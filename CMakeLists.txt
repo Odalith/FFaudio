@@ -13,6 +13,12 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libswresample
 )
 
-add_executable(ffAudio main.c)
+add_library(ffAudio SHARED ffaudio.c ffaudio.h)
 
 target_link_libraries(ffAudio PRIVATE SDL2 PkgConfig::FFMPEG)
+
+# Set properties for Windows DLL export
+set_target_properties(ffAudio PROPERTIES
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES
+)
