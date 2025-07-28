@@ -22,3 +22,29 @@ set_target_properties(ffAudio PROPERTIES
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN YES
 )
+
+# Build the test executable
+add_executable(test_ffaudio test.c)
+
+find_library(AVFORMAT_LIB avformat)
+find_library(AVCODEC_LIB avcodec)
+find_library(AVFILTER_LIB avfilter)
+find_library(AVUTIL_LIB avutil)
+find_library(SWRESAMPLE_LIB swresample)
+
+
+# Link the test executable to the library
+target_link_libraries(test_ffaudio
+        ffAudio
+        ${AVFORMAT_LIB}
+        ${AVCODEC_LIB}
+        ${AVFILTER_LIB}
+        ${AVUTIL_LIB}
+        ${SWRESAMPLE_LIB}
+)
+
+
+# Optional: Set output directory for the test binary
+set_target_properties(test_ffaudio PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/testbin
+)

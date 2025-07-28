@@ -23,14 +23,9 @@
  * simple media player based on the FFmpeg libraries
  */
 
-#include "ffaudio.h"
-
-//#include "config.h"
-//#include "config_components.h"
 #include <math.h>
 #include <limits.h>
 #include <signal.h>
-#include <stdatomic.h>
 #include <stdint.h>
 
 #include "libavutil/avstring.h"        // Internal: String utilities
@@ -44,321 +39,23 @@
 #include "libavutil/bprint.h"          // Internal: Binary print utilities
 #include "libavformat/avformat.h"
 #include "libavdevice/avdevice.h"
-#include "libavcodec/avcodec.h"
 #include "libswscale/swscale.h"
 #include "libavutil/opt.h"
 #include "libswresample/swresample.h"
+#include "libavcodec/avcodec.h"
 
 #include "libavfilter/avfilter.h"
 #include "libavfilter/buffersink.h"
 #include "libavfilter/buffersrc.h"
 
-
-//#include "cmdutils.h"
-
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_thread.h>
 
+#include "libavutil/avassert.h"
 
 
-//mem.h
-//
-
-/*
-void *av_malloc(size_t size)
-{
-    void *ptr = NULL;
-
-    if (size > atomic_load_explicit(&max_alloc_size, memory_order_relaxed))
-        return NULL;
-
-    #if HAVE_POSIX_MEMALIGN
-    if (size) //OS X on SDK 10.6 has a broken posix_memalign implementation
-        if (posix_memalign(&ptr, ALIGN, size))
-            ptr = NULL;
-    #elif HAVE_ALIGNED_MALLOC
-    ptr = _aligned_malloc(size, ALIGN);
-    #elif HAVE_MEMALIGN
-    #ifndef __DJGPP__
-    ptr = memalign(ALIGN, size);
-    #else
-    ptr = memalign(size, ALIGN);
-    #endif
-    /* Why 64?
-     * Indeed, we should align it:
-     *   on  4 for 386
-     *   on 16 for 486
-     *   on 32 for 586, PPro - K6-III
-     *   on 64 for K7 (maybe for P3 too).
-     * Because L1 and L2 caches are aligned on those values.
-     * But I don't want to code such logic here!
-     #1#
-    /* Why 32?
-     * For AVX ASM. SSE / NEON needs only 16.
-     * Why not larger? Because I did not see a difference in benchmarks ...
-     #1#
-    /* benchmarks with P3
-     * memalign(64) + 1          3071, 3051, 3032
-     * memalign(64) + 2          3051, 3032, 3041
-     * memalign(64) + 4          2911, 2896, 2915
-     * memalign(64) + 8          2545, 2554, 2550
-     * memalign(64) + 16         2543, 2572, 2563
-     * memalign(64) + 32         2546, 2545, 2571
-     * memalign(64) + 64         2570, 2533, 2558
-     *
-     * BTW, malloc seems to do 8-byte alignment by default here.
-     #1#
-    #else
-    ptr = malloc(size);
-    #endif
-    if(!ptr && !size) {
-        size = 1;
-        ptr= av_malloc(1);
-    }
-    #if CONFIG_MEMORY_POISONING
-    if (ptr)
-        memset(ptr, FF_MEMORY_POISON, size);
-    #endif
-    return ptr;
-}
-
-void *av_realloc(void *ptr, size_t size)
-{
-    void *ret;
-    if (size > atomic_load_explicit(&max_alloc_size, memory_order_relaxed))
-        return NULL;
-
-    #if HAVE_ALIGNED_MALLOC
-    ret = _aligned_realloc(ptr, size + !size, ALIGN);
-    #else
-    ret = realloc(ptr, size + !size);
-    #endif
-    #if CONFIG_MEMORY_POISONING
-    if (ret && !ptr)
-        memset(ret, FF_MEMORY_POISON, size);
-    #endif
-    return ret;
-}
-
-char *av_strndup(const char *s, size_t len)
-{
-    char *ret = NULL, *end;
-
-    if (!s)
-        return NULL;
-
-    end = memchr(s, 0, len);
-    if (end)
-        len = end - s;
-
-    ret = av_realloc(NULL, len + 1);
-    if (!ret)
-        return NULL;
-
-    memcpy(ret, s, len);
-    ret[len] = 0;
-    return ret;
-}
-
-void av_free(void *ptr)
-{
-    #if HAVE_ALIGNED_MALLOC
-    _aligned_free(ptr);
-    #else
-    free(ptr);
-    #endif
-}
-
-void *av_mallocz(size_t size)
-{
-    void *ptr = av_malloc(size);
-    if (ptr)
-        memset(ptr, 0, size);
-    return ptr;
-}
-
-
-//time.h
-
-int64_t av_gettime(void)
-{
-    #if HAVE_GETTIMEOFDAY
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (int64_t)tv.tv_sec * 1000000 + tv.tv_usec;
-    #elif HAVE_GETSYSTEMTIMEASFILETIME
-    FILETIME ft;
-    int64_t t;
-    GetSystemTimeAsFileTime(&ft);
-    t = (int64_t)ft.dwHighDateTime << 32 | ft.dwLowDateTime;
-    return t / 10 - 11644473600000000; /* Jan 1, 1601 #1#
-    #else
-    return -1;
-    #endif
-}
-
-int64_t av_gettime_relative(void)
-{
-    #if HAVE_CLOCK_GETTIME && defined(CLOCK_MONOTONIC)
-    #ifdef __APPLE__
-    if (&clock_gettime)
-        #endif
-    {
-        struct timespec ts;
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-        return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
-    }
-    #endif
-    return av_gettime() + 42 * 60 * 60 * INT64_C(1000000);
-}
-
-//fifo.h
-
-struct AVFifo {
-    uint8_t *buffer;
-
-    size_t elem_size, nb_elems;
-    size_t offset_r, offset_w;
-    // distinguishes the ambiguous situation offset_r == offset_w
-    int    is_empty;
-
-    unsigned int flags;
-    size_t       auto_grow_limit;
-};
-
-AVFifo *av_fifo_alloc2(size_t nb_elems, size_t elem_size,
-                       unsigned int flags)
-{
-    AVFifo *f;
-    void *buffer = NULL;
-
-    if (!elem_size)
-        return NULL;
-
-    if (nb_elems) {
-        buffer = av_realloc_array(NULL, nb_elems, elem_size);
-        if (!buffer)
-            return NULL;
-    }
-    f = av_mallocz(sizeof(*f));
-    if (!f) {
-        av_free(buffer);
-        return NULL;
-    }
-    f->buffer    = buffer;
-    f->nb_elems  = nb_elems;
-    f->elem_size = elem_size;
-    f->is_empty  = 1;
-
-    f->flags           = flags;
-    f->auto_grow_limit = FFMAX(AUTO_GROW_DEFAULT_BYTES / elem_size, 1);
-
-    return f;
-}
-
-static int fifo_write_common(AVFifo *f, const uint8_t *buf, size_t *nb_elems,
-                             AVFifoCB read_cb, void *opaque)
-{
-    size_t to_write = *nb_elems;
-    size_t offset_w;
-    int         ret = 0;
-
-    ret = fifo_check_space(f, to_write);
-    if (ret < 0)
-        return ret;
-
-    offset_w = f->offset_w;
-
-    while (to_write > 0) {
-        size_t    len = FFMIN(f->nb_elems - offset_w, to_write);
-        uint8_t *wptr = f->buffer + offset_w * f->elem_size;
-
-        if (read_cb) {
-            ret = read_cb(opaque, wptr, &len);
-            if (ret < 0 || len == 0)
-                break;
-        } else {
-            memcpy(wptr, buf, len * f->elem_size);
-            buf += len * f->elem_size;
-        }
-        offset_w += len;
-        if (offset_w >= f->nb_elems)
-            offset_w = 0;
-        to_write -= len;
-    }
-    f->offset_w = offset_w;
-
-    if (*nb_elems != to_write)
-        f->is_empty = 0;
-    *nb_elems -= to_write;
-
-    return ret;
-}
-
-int av_fifo_write(AVFifo *f, const void *buf, size_t nb_elems)
-{
-    return fifo_write_common(f, buf, &nb_elems, NULL, NULL);
-}
-
-
-static int fifo_peek_common(const AVFifo *f, uint8_t *buf, size_t *nb_elems,
-                            size_t offset, AVFifoCB write_cb, void *opaque)
-{
-    size_t  to_read = *nb_elems;
-    size_t offset_r = f->offset_r;
-    size_t can_read = av_fifo_can_read(f);
-    int         ret = 0;
-
-    if (offset > can_read || to_read > can_read - offset) {
-        *nb_elems = 0;
-        return AVERROR(EINVAL);
-    }
-
-    if (offset_r >= f->nb_elems - offset)
-        offset_r -= f->nb_elems - offset;
-    else
-        offset_r += offset;
-
-    while (to_read > 0) {
-        size_t    len = FFMIN(f->nb_elems - offset_r, to_read);
-        uint8_t *rptr = f->buffer + offset_r * f->elem_size;
-
-        if (write_cb) {
-            ret = write_cb(opaque, rptr, &len);
-            if (ret < 0 || len == 0)
-                break;
-        } else {
-            memcpy(buf, rptr, len * f->elem_size);
-            buf += len * f->elem_size;
-        }
-        offset_r += len;
-        if (offset_r >= f->nb_elems)
-            offset_r = 0;
-        to_read -= len;
-    }
-
-    *nb_elems -= to_read;
-
-    return ret;
-}
-
-int av_fifo_read(AVFifo *f, void *buf, size_t nb_elems)
-{
-    int ret = fifo_peek_common(f, buf, &nb_elems, 0, NULL, NULL);
-    av_fifo_drain2(f, nb_elems);
-    return ret;
-}
-
-
-void av_fifo_freep2(AVFifo **f)
-{
-    if (*f) {
-        av_freep(&(*f)->buffer);
-        av_freep(f);
-    }
-}*/
-
-
+//#include "cmdutils.h"
+//#include "opt_common.h"
 
 const char program_name[] = "ffplay";
 const int program_birth_year = 2003;
@@ -564,6 +261,42 @@ typedef struct VideoState {
     SDL_cond *continue_read_thread;
 } VideoState;
 
+enum StreamList {
+    STREAM_LIST_ALL,
+    STREAM_LIST_STREAM_ID,
+    STREAM_LIST_PROGRAM,
+    STREAM_LIST_GROUP_ID,
+    STREAM_LIST_GROUP_IDX,
+};
+
+typedef struct StreamSpecifier {
+    // trailing stream index - pick idx-th stream that matches
+    // all the other constraints; -1 when not present
+    int                  idx;
+
+    // which stream list to consider
+    enum StreamList      stream_list;
+
+    // STREAM_LIST_STREAM_ID: stream ID
+    // STREAM_LIST_GROUP_IDX: group index
+    // STREAM_LIST_GROUP_ID:  group ID
+    // STREAM_LIST_PROGRAM:   program ID
+    int64_t              list_id;
+
+    // when not AVMEDIA_TYPE_UNKNOWN, consider only streams of this type
+    enum AVMediaType     media_type;
+    uint8_t              no_apic;
+
+    uint8_t              usable_only;
+
+    int                  disposition;
+
+    char                *meta_key;
+    char                *meta_val;
+
+    char                *remainder;
+} StreamSpecifier;
+
 /* options specified by the user */
 static const AVInputFormat *file_iformat;
 static const char *input_filename;
@@ -583,12 +316,14 @@ static int loop = 1;
 static int framedrop = -1;
 static int infinite_buffer = -1;
 static const char *audio_codec_name;
-static const char **vfilters_list = NULL;
-static int nb_vfilters = 0;
+//static int nb_vfilters = 0;
 static char *afilters = NULL;
 static int find_stream_info = 1;
 static int filter_nbthreads = 0;
 static int64_t audio_callback_time;
+
+static AVDictionary *swr_opts_n;
+static AVDictionary *format_opts_n, *codec_opts_n;
 
 #define FF_QUIT_EVENT    (SDL_USEREVENT + 2)
 
@@ -603,6 +338,477 @@ int cmp_audio_fmts(enum AVSampleFormat fmt1, int64_t channel_count1,
         return av_get_packed_sample_fmt(fmt1) != av_get_packed_sample_fmt(fmt2);
     else
         return channel_count1 != channel_count2 || fmt1 != fmt2;
+}
+
+static void test_dict(const AVDictionary *test, const char *name) {
+
+    av_log(NULL, AV_LOG_ERROR, "%s ", name);
+
+    if (av_dict_count(test)) {
+        av_log(NULL, AV_LOG_ERROR, "\n%d\n", av_dict_count(test));
+
+        const AVDictionaryEntry *tdd = NULL;
+        while ((tdd = av_dict_iterate(test, tdd))) {
+            av_log(NULL, AV_LOG_ERROR, "%s \n", tdd->key);
+        }
+    }
+    else
+        av_log(NULL, AV_LOG_ERROR, "None\n");
+
+}
+
+static void init_dynload_n(void)
+{
+#if HAVE_SETDLLDIRECTORY && defined(_WIN32)
+    /* Calling SetDllDirectory with the empty string (but not NULL) removes the
+     * current working directory from the DLL search path as a security pre-caution. */
+    SetDllDirectory("");
+#endif
+}
+
+static int cmdutils_isalnum(char c)
+{
+    return (c >= '0' && c <= '9') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= 'a' && c <= 'z');
+}
+
+static void stream_specifier_uninit(StreamSpecifier *ss)
+{
+    av_freep(&ss->meta_key);
+    av_freep(&ss->meta_val);
+    av_freep(&ss->remainder);
+
+    memset(ss, 0, sizeof(*ss));
+}
+
+static int stream_specifier_parse(StreamSpecifier *ss, const char *spec,
+                           int allow_remainder, void *logctx)
+{
+    char *endptr;
+    int ret;
+
+    memset(ss, 0, sizeof(*ss));
+
+    ss->idx         = -1;
+    ss->media_type  = AVMEDIA_TYPE_UNKNOWN;
+    ss->stream_list = STREAM_LIST_ALL;
+
+    av_log(logctx, AV_LOG_TRACE, "Parsing stream specifier: %s\n", spec);
+
+    while (*spec) {
+        if (*spec <= '9' && *spec >= '0') { /* opt:index */
+            ss->idx = strtol(spec, &endptr, 0);
+
+            av_assert0(endptr > spec);
+            spec = endptr;
+
+            av_log(logctx, AV_LOG_TRACE,
+                   "Parsed index: %d; remainder: %s\n", ss->idx, spec);
+
+            // this terminates the specifier
+            break;
+        } else if ((*spec == 'v' || *spec == 'a' || *spec == 's' ||
+                    *spec == 'd' || *spec == 't' || *spec == 'V') &&
+                   !cmdutils_isalnum(*(spec + 1))) { /* opt:[vasdtV] */
+            if (ss->media_type != AVMEDIA_TYPE_UNKNOWN) {
+                av_log(logctx, AV_LOG_ERROR, "Stream type specified multiple times\n");
+                ret = AVERROR(EINVAL);
+                goto fail;
+            }
+
+            switch (*spec++) {
+            case 'v': ss->media_type = AVMEDIA_TYPE_VIDEO;      break;
+            case 'a': ss->media_type = AVMEDIA_TYPE_AUDIO;      break;
+            case 's': ss->media_type = AVMEDIA_TYPE_SUBTITLE;   break;
+            case 'd': ss->media_type = AVMEDIA_TYPE_DATA;       break;
+            case 't': ss->media_type = AVMEDIA_TYPE_ATTACHMENT; break;
+            case 'V': ss->media_type = AVMEDIA_TYPE_VIDEO;
+                      ss->no_apic    = 1;                       break;
+            default:  av_assert0(0);
+            }
+
+            av_log(logctx, AV_LOG_TRACE, "Parsed media type: %s; remainder: %s\n",
+                   av_get_media_type_string(ss->media_type), spec);
+        } else if (*spec == 'g' && *(spec + 1) == ':') {
+            if (ss->stream_list != STREAM_LIST_ALL)
+                goto multiple_stream_lists;
+
+            spec += 2;
+            if (*spec == '#' || (*spec == 'i' && *(spec + 1) == ':')) {
+                ss->stream_list = STREAM_LIST_GROUP_ID;
+
+                spec += 1 + (*spec == 'i');
+            } else
+                ss->stream_list = STREAM_LIST_GROUP_IDX;
+
+            ss->list_id = strtol(spec, &endptr, 0);
+            if (spec == endptr) {
+                av_log(logctx, AV_LOG_ERROR, "Expected stream group idx/ID, got: %s\n", spec);
+                ret = AVERROR(EINVAL);
+                goto fail;
+            }
+            spec = endptr;
+
+            av_log(logctx, AV_LOG_TRACE, "Parsed stream group %s: %"PRId64"; remainder: %s\n",
+                   ss->stream_list == STREAM_LIST_GROUP_ID ? "ID" : "index", ss->list_id, spec);
+        } else if (*spec == 'p' && *(spec + 1) == ':') {
+            if (ss->stream_list != STREAM_LIST_ALL)
+                goto multiple_stream_lists;
+
+            ss->stream_list = STREAM_LIST_PROGRAM;
+
+            spec += 2;
+            ss->list_id = strtol(spec, &endptr, 0);
+            if (spec == endptr) {
+                av_log(logctx, AV_LOG_ERROR, "Expected program ID, got: %s\n", spec);
+                ret = AVERROR(EINVAL);
+                goto fail;
+            }
+            spec = endptr;
+
+            av_log(logctx, AV_LOG_TRACE,
+                   "Parsed program ID: %"PRId64"; remainder: %s\n", ss->list_id, spec);
+        } else if (!strncmp(spec, "disp:", 5)) {
+            const AVClass *st_class = av_stream_get_class();
+            const AVOption       *o = av_opt_find(&st_class, "disposition", NULL, 0, AV_OPT_SEARCH_FAKE_OBJ);
+            char *disp = NULL;
+            size_t len;
+
+            av_assert0(o);
+
+            if (ss->disposition) {
+                av_log(logctx, AV_LOG_ERROR, "Multiple disposition specifiers\n");
+                ret = AVERROR(EINVAL);
+                goto fail;
+            }
+
+            spec += 5;
+
+            for (len = 0; cmdutils_isalnum(spec[len]) ||
+                          spec[len] == '_' || spec[len] == '+'; len++)
+                continue;
+
+            disp = av_strndup(spec, len);
+            if (!disp) {
+                ret = AVERROR(ENOMEM);
+                goto fail;
+            }
+
+            ret = av_opt_eval_flags(&st_class, o, disp, &ss->disposition);
+            av_freep(&disp);
+            if (ret < 0) {
+                av_log(logctx, AV_LOG_ERROR, "Invalid disposition specifier\n");
+                goto fail;
+            }
+
+            spec += len;
+
+            av_log(logctx, AV_LOG_TRACE,
+                   "Parsed disposition: 0x%x; remainder: %s\n", ss->disposition, spec);
+        } else if (*spec == '#' ||
+                   (*spec == 'i' && *(spec + 1) == ':')) {
+            if (ss->stream_list != STREAM_LIST_ALL)
+                goto multiple_stream_lists;
+
+            ss->stream_list = STREAM_LIST_STREAM_ID;
+
+            spec += 1 + (*spec == 'i');
+            ss->list_id = strtol(spec, &endptr, 0);
+            if (spec == endptr) {
+                av_log(logctx, AV_LOG_ERROR, "Expected stream ID, got: %s\n", spec);
+                ret = AVERROR(EINVAL);
+                goto fail;
+            }
+            spec = endptr;
+
+            av_log(logctx, AV_LOG_TRACE,
+                   "Parsed stream ID: %"PRId64"; remainder: %s\n", ss->list_id, spec);
+
+            // this terminates the specifier
+            break;
+        } else if (*spec == 'm' && *(spec + 1) == ':') {
+            av_assert0(!ss->meta_key && !ss->meta_val);
+
+            spec += 2;
+            ss->meta_key = av_get_token(&spec, ":");
+            if (!ss->meta_key) {
+                ret = AVERROR(ENOMEM);
+                goto fail;
+            }
+            if (*spec == ':') {
+                spec++;
+                ss->meta_val = av_get_token(&spec, ":");
+                if (!ss->meta_val) {
+                    ret = AVERROR(ENOMEM);
+                    goto fail;
+                }
+            }
+
+            av_log(logctx, AV_LOG_TRACE,
+                   "Parsed metadata: %s:%s; remainder: %s", ss->meta_key,
+                   ss->meta_val ? ss->meta_val : "<any value>", spec);
+
+            // this terminates the specifier
+            break;
+        } else if (*spec == 'u' && (*(spec + 1) == '\0' || *(spec + 1) == ':')) {
+            ss->usable_only = 1;
+            spec++;
+            av_log(logctx, AV_LOG_ERROR, "Parsed 'usable only'\n");
+
+            // this terminates the specifier
+            break;
+        } else
+            break;
+
+        if (*spec == ':')
+            spec++;
+    }
+
+    if (*spec) {
+        if (!allow_remainder) {
+            av_log(logctx, AV_LOG_ERROR,
+                   "Trailing garbage at the end of a stream specifier: %s\n",
+                   spec);
+            ret = AVERROR(EINVAL);
+            goto fail;
+        }
+
+        if (*spec == ':')
+            spec++;
+
+        ss->remainder = av_strdup(spec);
+        if (!ss->remainder) {
+            ret = AVERROR(EINVAL);
+            goto fail;
+        }
+    }
+
+    return 0;
+
+multiple_stream_lists:
+    av_log(logctx, AV_LOG_ERROR,
+           "Cannot combine multiple program/group designators in a "
+           "single stream specifier");
+    ret = AVERROR(EINVAL);
+
+fail:
+    stream_specifier_uninit(ss);
+    return ret;
+}
+
+static unsigned stream_specifier_match(const StreamSpecifier *ss,
+                                const AVFormatContext *s, const AVStream *st,
+                                void *logctx)
+{
+    const AVStreamGroup *g = NULL;
+    const AVProgram *p = NULL;
+    int start_stream = 0, nb_streams;
+    int nb_matched = 0;
+
+    switch (ss->stream_list) {
+    case STREAM_LIST_STREAM_ID:
+        // <n-th> stream with given ID makes no sense and should be impossible to request
+        av_assert0(ss->idx < 0);
+        // return early if we know for sure the stream does not match
+        if (st->id != ss->list_id)
+            return 0;
+        start_stream = st->index;
+        nb_streams   = st->index + 1;
+        break;
+    case STREAM_LIST_ALL:
+        start_stream = ss->idx >= 0 ? 0 : st->index;
+        nb_streams   = st->index + 1;
+        break;
+    case STREAM_LIST_PROGRAM:
+        for (unsigned i = 0; i < s->nb_programs; i++) {
+            if (s->programs[i]->id == ss->list_id) {
+                p          = s->programs[i];
+                break;
+            }
+        }
+        if (!p) {
+            av_log(logctx, AV_LOG_WARNING, "No program with ID %"PRId64" exists,"
+                   " stream specifier can never match\n", ss->list_id);
+            return 0;
+        }
+        nb_streams = p->nb_stream_indexes;
+        break;
+    case STREAM_LIST_GROUP_ID:
+        for (unsigned i = 0; i < s->nb_stream_groups; i++) {
+            if (ss->list_id == s->stream_groups[i]->id) {
+                g = s->stream_groups[i];
+                break;
+            }
+        }
+        // fall-through
+    case STREAM_LIST_GROUP_IDX:
+        if (ss->stream_list == STREAM_LIST_GROUP_IDX &&
+            ss->list_id >= 0 && ss->list_id < s->nb_stream_groups)
+            g = s->stream_groups[ss->list_id];
+
+        if (!g) {
+            av_log(logctx, AV_LOG_WARNING, "No stream group with group %s %"
+                   PRId64" exists, stream specifier can never match\n",
+                   ss->stream_list == STREAM_LIST_GROUP_ID ? "ID" : "index",
+                   ss->list_id);
+            return 0;
+        }
+        nb_streams = g->nb_streams;
+        break;
+    default: av_assert0(0);
+    }
+
+    for (int i = start_stream; i < nb_streams; i++) {
+        const AVStream *candidate = s->streams[g ? g->streams[i]->index :
+                                               p ? p->stream_index[i]   : i];
+
+        if (ss->media_type != AVMEDIA_TYPE_UNKNOWN &&
+            (ss->media_type != candidate->codecpar->codec_type ||
+             (ss->no_apic && (candidate->disposition & AV_DISPOSITION_ATTACHED_PIC))))
+            continue;
+
+        if (ss->meta_key) {
+            const AVDictionaryEntry *tag = av_dict_get(candidate->metadata,
+                                                       ss->meta_key, NULL, 0);
+
+            if (!tag)
+                continue;
+            if (ss->meta_val && strcmp(tag->value, ss->meta_val))
+                continue;
+        }
+
+        if (ss->usable_only) {
+            const AVCodecParameters *par = candidate->codecpar;
+
+            switch (par->codec_type) {
+            case AVMEDIA_TYPE_AUDIO:
+                if (!par->sample_rate || !par->ch_layout.nb_channels ||
+                    par->format == AV_SAMPLE_FMT_NONE)
+                    continue;
+                break;
+            case AVMEDIA_TYPE_VIDEO:
+                if (!par->width || !par->height || par->format == AV_PIX_FMT_NONE)
+                    continue;
+                break;
+            case AVMEDIA_TYPE_UNKNOWN:
+                continue;
+            }
+        }
+
+        if (ss->disposition &&
+            (candidate->disposition & ss->disposition) != ss->disposition)
+            continue;
+
+        if (st == candidate)
+            return ss->idx < 0 || ss->idx == nb_matched;
+
+        nb_matched++;
+    }
+
+    return 0;
+}
+
+static int check_stream_specifier(AVFormatContext *s, AVStream *st, const char *spec)
+{
+    StreamSpecifier ss;
+    int ret;
+
+    ret = stream_specifier_parse(&ss, spec, 0, NULL);
+    if (ret < 0)
+        return ret;
+
+    ret = stream_specifier_match(&ss, s, st, NULL);
+    stream_specifier_uninit(&ss);
+    return ret;
+}
+
+static int filter_codec_opts_n(const AVDictionary *opts, enum AVCodecID codec_id,
+                      AVFormatContext *s, AVStream *st, const AVCodec *codec,
+                      AVDictionary **dst, AVDictionary **opts_used)
+{
+    AVDictionary    *ret = NULL;
+    const AVDictionaryEntry *t = NULL;
+    int            flags = s->oformat ? AV_OPT_FLAG_ENCODING_PARAM
+                                      : AV_OPT_FLAG_DECODING_PARAM;
+    char          prefix = 0;
+    const AVClass    *cc = avcodec_get_class();
+
+    switch (st->codecpar->codec_type) {
+    case AVMEDIA_TYPE_VIDEO:
+        prefix  = 'v';
+        flags  |= AV_OPT_FLAG_VIDEO_PARAM;
+        break;
+    case AVMEDIA_TYPE_AUDIO:
+        prefix  = 'a';
+        flags  |= AV_OPT_FLAG_AUDIO_PARAM;
+        break;
+    case AVMEDIA_TYPE_SUBTITLE:
+        prefix  = 's';
+        flags  |= AV_OPT_FLAG_SUBTITLE_PARAM;
+        break;
+    }
+
+    while (t = av_dict_iterate(opts, t)) {
+        const AVClass *priv_class;
+        char *p = strchr(t->key, ':');
+        int used = 0;
+
+        /* check stream specification in opt name */
+        if (p) {
+            int err = check_stream_specifier(s, st, p + 1);
+            if (err < 0) {
+                av_dict_free(&ret);
+                return err;
+            } else if (!err)
+                continue;
+
+            *p = 0;
+        }
+
+        if (av_opt_find(&cc, t->key, NULL, flags, AV_OPT_SEARCH_FAKE_OBJ) ||
+            !codec ||
+            ((priv_class = codec->priv_class) &&
+             av_opt_find(&priv_class, t->key, NULL, flags,
+                         AV_OPT_SEARCH_FAKE_OBJ))) {
+            av_dict_set(&ret, t->key, t->value, 0);
+            used = 1;
+        } else if (t->key[0] == prefix &&
+                 av_opt_find(&cc, t->key + 1, NULL, flags,
+                             AV_OPT_SEARCH_FAKE_OBJ)) {
+            av_dict_set(&ret, t->key + 1, t->value, 0);
+            used = 1;
+        }
+
+        if (p)
+            *p = ':';
+
+        if (used && opts_used)
+            av_dict_set(opts_used, t->key, "", 0);
+    }
+
+    *dst = ret;
+    return 0;
+}
+
+static void remove_avoptions_n(AVDictionary **a, AVDictionary *b)
+{
+    const AVDictionaryEntry *t = NULL;
+
+    while ((t = av_dict_iterate(b, t))) {
+        av_dict_set(a, t->key, NULL, AV_DICT_MATCH_CASE);
+    }
+}
+
+static int check_avoptions_n(AVDictionary *m)
+{
+    const AVDictionaryEntry *t = av_dict_iterate(m, NULL);
+    if (t) {
+        av_log(NULL, AV_LOG_FATAL, "Option %s not found.\n", t->key);
+        return AVERROR_OPTION_NOT_FOUND;
+    }
+
+    return 0;
 }
 
 static int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
@@ -1069,10 +1275,18 @@ static void do_exit(VideoState *is)
     if (is) {
         stream_close(is);
     }
-    //uninit_opts();
-    for (int i = 0; i < nb_vfilters; i++)
-        av_freep(&vfilters_list[i]);
-    av_freep(&vfilters_list);
+
+    /*for (int i = 0; i < nb_vfilters; i++)
+    av_freep(&vfilters_list[i]);
+av_freep(&vfilters_list);*/
+
+    av_dict_free(&swr_opts_n);
+    av_dict_free(&format_opts_n);
+    av_dict_free(&codec_opts_n);
+    av_freep(&codec_opts_n);
+    av_freep(&codec_opts_n);
+    av_freep(&codec_opts_n);
+
     av_freep(&audio_codec_name);
     av_freep(&input_filename);
     //avformat_network_deinit();
@@ -1276,8 +1490,10 @@ static int configure_audio_filters(VideoState *is, const char *afilters, int for
 
     av_bprint_init(&bp, 0, AV_BPRINT_SIZE_AUTOMATIC);
 
-    /*while ((e = av_dict_iterate(swr_opts, e)))
+    //Todo swr_opts was empty so swr_opts_n is left null but this should probably be implemented at some point
+    while ((e = av_dict_iterate(swr_opts_n, e)))
         av_strlcatf(aresample_swr_opts, sizeof(aresample_swr_opts), "%s=%s:", e->key, e->value);
+
     if (strlen(aresample_swr_opts))
         aresample_swr_opts[strlen(aresample_swr_opts)-1] = '\0';
     av_opt_set(is->agraph, "aresample_swr_opts", aresample_swr_opts, 0);
@@ -1287,7 +1503,7 @@ static int configure_audio_filters(VideoState *is, const char *afilters, int for
     ret = snprintf(asrc_args, sizeof(asrc_args),
                    "sample_rate=%d:sample_fmt=%s:time_base=%d/%d:channel_layout=%s",
                    is->audio_filter_src.freq, av_get_sample_fmt_name(is->audio_filter_src.fmt),
-                   1, is->audio_filter_src.freq, bp.str);*/
+                   1, is->audio_filter_src.freq, bp.str);
 
     ret = avfilter_graph_create_filter(&filt_asrc,
                                        avfilter_get_by_name("abuffer"), "ffplay_abuffer",
@@ -1752,19 +1968,24 @@ static int stream_component_open(VideoState *is, int stream_index)
     if (fast)
         avctx->flags2 |= AV_CODEC_FLAG2_FAST;
 
-    /*ret = filter_codec_opts(codec_opts, avctx->codec_id, ic,
+    /*ret = filter_codec_opts(codec_opts_n, avctx->codec_id, ic,
                             ic->streams[stream_index], codec, &opts, NULL);
     if (ret < 0)
         goto fail;
 
+    const AVDictionaryEntry *tdd = NULL;
+    while ((tdd = av_dict_iterate(opts, tdd))) {
+        av_log(NULL, AV_LOG_ERROR, "%s %s \n", tdd->key, tdd->value);
+    }
+
+    av_log(NULL, AV_LOG_ERROR, "%d\n", av_dict_count(codec_opts_n));
+    av_log(NULL, AV_LOG_ERROR, "%d\n", av_dict_count(opts)); Neither of these have any values at this point*/
+
     if (!av_dict_get(opts, "threads", NULL, 0))
         av_dict_set(&opts, "threads", "auto", 0);
     if (stream_lowres)
-        av_dict_set_int(&opts, "lowres", stream_lowres, 0);*/
-
-    av_dict_set(&opts, "threads", "auto", 0);
-    if (stream_lowres)
         av_dict_set_int(&opts, "lowres", stream_lowres, 0);
+
     av_dict_set(&opts, "flags", "+copy_opaque", AV_DICT_MULTIKEY);
 
     /*if (avctx->codec_type == AVMEDIA_TYPE_VIDEO) {
@@ -1776,9 +1997,9 @@ static int stream_component_open(VideoState *is, int stream_index)
     if ((ret = avcodec_open2(avctx, codec, &opts)) < 0) {
         goto fail;
     }
-    /*ret = check_avoptions(opts);
+    ret = check_avoptions_n(opts);
     if (ret < 0)
-        goto fail;*/
+        goto fail;
 
     is->eof = 0;
     ic->streams[stream_index]->discard = AVDISCARD_DEFAULT;
@@ -1872,6 +2093,37 @@ static int is_realtime(AVFormatContext *s)
     return 0;
 }
 
+static int setup_find_stream_info_opts_n(AVFormatContext *s,
+                                AVDictionary *local_codec_opts,
+                                AVDictionary ***dst)
+{
+    int ret;
+    AVDictionary **opts;
+
+    *dst = NULL;
+
+    if (!s->nb_streams)
+        return 0;
+
+    opts = av_calloc(s->nb_streams, sizeof(*opts));
+    if (!opts)
+        return AVERROR(ENOMEM);
+
+    for (int i = 0; i < s->nb_streams; i++) {
+        ret = filter_codec_opts_n(local_codec_opts, s->streams[i]->codecpar->codec_id,
+                                s, s->streams[i], NULL, &opts[i], NULL);
+        if (ret < 0)
+            goto fail;
+    }
+    *dst = opts;
+    return 0;
+    fail:
+        for (int i = 0; i < s->nb_streams; i++)
+            av_dict_free(&opts[i]);
+    av_freep(&opts);
+    return ret;
+}
+
 /* this thread gets the stream from the disk or the network */
 static int read_thread(void *arg)
 {
@@ -1910,23 +2162,30 @@ static int read_thread(void *arg)
     }
     ic->interrupt_callback.callback = decode_interrupt_cb;
     ic->interrupt_callback.opaque = is;
-    /*if (!av_dict_get(format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
-        av_dict_set(&format_opts, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
-        scan_all_pmts_set = 1;
-    }*/
-    err = avformat_open_input(&ic, is->filename, is->iformat, NULL);//Removed &format_opts from last
+
+
+    //Adds scan_all_pmts = 1 then removes it
+    if (!av_dict_get(format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
+        av_dict_set(&format_opts_n, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
+        scan_all_pmts_set = 1;//This is set
+    }
+    err = avformat_open_input(&ic, is->filename, is->iformat, &format_opts_n);
     if (err < 0) {
         //print_error(is->filename, err);
+        av_log(NULL, AV_LOG_ERROR, "Could not open input stream.\n");
         ret = -1;
         goto fail;
     }
-    /*if (scan_all_pmts_set)
-        av_dict_set(&format_opts, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
-    remove_avoptions(&format_opts, codec_opts);
 
-    ret = check_avoptions(format_opts);
+    if (scan_all_pmts_set)
+        av_dict_set(&format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
+
+    remove_avoptions_n(&format_opts_n, codec_opts_n);
+
+    ret = check_avoptions_n(format_opts_n);
     if (ret < 0)
-        goto fail;*/
+        goto fail;
+
     is->ic = ic;
 
     if (genpts)
@@ -1936,13 +2195,13 @@ static int read_thread(void *arg)
         AVDictionary **opts;
         int orig_nb_streams = ic->nb_streams;
 
-        /*err = setup_find_stream_info_opts(ic, codec_opts, &opts);
+        err = setup_find_stream_info_opts_n(ic, codec_opts_n, &opts);
         if (err < 0) {
             av_log(NULL, AV_LOG_ERROR,
                    "Error setting up avformat_find_stream_info() options\n");
             ret = err;
             goto fail;
-        }*/
+        }
 
         err = avformat_find_stream_info(ic, opts);
 
@@ -2307,9 +2566,9 @@ static int opt_codec(void *optctx, const char *opt, const char *arg)
    return *name ? 0 : AVERROR(ENOMEM);
 }
 
-static int dummy;
+/*static int dummy;
 
-/*static const OptionDef options[] = {
+static const OptionDef options[] = {
     CMDUTILS_COMMON_OPTIONS
     { "ast",                OPT_TYPE_STRING, OPT_EXPERT, { &wanted_stream_spec[AVMEDIA_TYPE_AUDIO] }, "select desired audio stream", "stream_specifier" },
     { "ss",                 OPT_TYPE_TIME,            0, { &start_time }, "seek to a given position in seconds", "pos" },
@@ -2330,27 +2589,67 @@ static int dummy;
     { "i",                  OPT_TYPE_BOOL,            0, { &dummy}, "read specified file", "input_file"},
     { "codec",              OPT_TYPE_FUNC, OPT_FUNC_ARG, { .func_arg = opt_codec}, "force decoder", "decoder_name" },
     { "acodec",             OPT_TYPE_STRING, OPT_EXPERT, {    &audio_codec_name }, "force audio decoder",    "decoder_name" },
-    { "find_stream_info",   OPT_TYPE_BOOL, OPT_INPUT | OPT_EXPERT, { &find_stream_info },
-        "read and decode the streams to fill missing information with heuristics" },
+    { "find_stream_info",   OPT_TYPE_BOOL, OPT_INPUT | OPT_EXPERT, { &find_stream_info }, "read and decode the streams to fill missing information with heuristics" },
     { "filter_threads",     OPT_TYPE_INT,    OPT_EXPERT, { &filter_nbthreads }, "number of filter threads per graph" },
     { NULL, },
 };*/
 
+static void print_static_variables(void) {
+    av_log(NULL, AV_LOG_INFO, "=== Static Variables Debug Info ===\n");
 
+    // Pointer variables
+    av_log(NULL, AV_LOG_INFO, "file_iformat: %p\n", file_iformat);
+    av_log(NULL, AV_LOG_INFO, "input_filename: %s\n", input_filename ? input_filename : "(null)");
+    av_log(NULL, AV_LOG_INFO, "audio_codec_name: %s\n", audio_codec_name ? audio_codec_name : "(null)");
+    av_log(NULL, AV_LOG_INFO, "afilters: %s\n", afilters ? afilters : "(null)");
 
-void show_help_default(const char *opt, const char *arg)
-{
+    // Integer variables
+    av_log(NULL, AV_LOG_INFO, "audio_disable: %d\n", audio_disable);
+    av_log(NULL, AV_LOG_INFO, "seek_by_bytes: %d\n", seek_by_bytes);
+    av_log(NULL, AV_LOG_INFO, "startup_volume: %d\n", startup_volume);
+    //av_log(NULL, AV_LOG_INFO, "av_sync_type: %d\n", av_sync_type);
+    av_log(NULL, AV_LOG_INFO, "fast: %d\n", fast);
+    av_log(NULL, AV_LOG_INFO, "genpts: %d\n", genpts);
+    av_log(NULL, AV_LOG_INFO, "lowres: %d\n", lowres);
+    av_log(NULL, AV_LOG_INFO, "decoder_reorder_pts: %d\n", decoder_reorder_pts);
+    av_log(NULL, AV_LOG_INFO, "autoexit: %d\n", autoexit);
+    av_log(NULL, AV_LOG_INFO, "loop: %d\n", loop);
+    av_log(NULL, AV_LOG_INFO, "framedrop: %d\n", framedrop);
+    av_log(NULL, AV_LOG_INFO, "infinite_buffer: %d\n", infinite_buffer);
+    //av_log(NULL, AV_LOG_INFO, "nb_vfilters: %d\n", nb_vfilters);
+    av_log(NULL, AV_LOG_INFO, "find_stream_info: %d\n", find_stream_info);
+    av_log(NULL, AV_LOG_INFO, "filter_nbthreads: %d\n", filter_nbthreads);
+
+    // 64-bit integer variables
+    av_log(NULL, AV_LOG_INFO, "start_time: %"PRId64"\n", start_time);
+    av_log(NULL, AV_LOG_INFO, "duration: %"PRId64"\n", duration);
+    av_log(NULL, AV_LOG_INFO, "audio_callback_time: %"PRId64"\n", audio_callback_time);
+
+    // Array elements (showing first few elements of wanted_stream_spec)
+    av_log(NULL, AV_LOG_INFO, "wanted_stream_spec[AVMEDIA_TYPE_VIDEO]: %s\n",
+           wanted_stream_spec[AVMEDIA_TYPE_VIDEO] ? wanted_stream_spec[AVMEDIA_TYPE_VIDEO] : "(null)");
+    av_log(NULL, AV_LOG_INFO, "wanted_stream_spec[AVMEDIA_TYPE_AUDIO]: %s\n",
+           wanted_stream_spec[AVMEDIA_TYPE_AUDIO] ? wanted_stream_spec[AVMEDIA_TYPE_AUDIO] : "(null)");
+    av_log(NULL, AV_LOG_INFO, "wanted_stream_spec[AVMEDIA_TYPE_SUBTITLE]: %s\n",
+           wanted_stream_spec[AVMEDIA_TYPE_SUBTITLE] ? wanted_stream_spec[AVMEDIA_TYPE_SUBTITLE] : "(null)");
+
+    av_log(NULL, AV_LOG_INFO, "=== End Static Variables Debug Info ===\n");
 }
 
+static void show_help_default(const char *opt, const char *arg) {
+
+}
+
+/* Called from the main */
 void start()
 {
     int flags, ret;
     VideoState *is;
 
-    //init_dynload();
+    init_dynload_n();
 
     av_log_set_flags(AV_LOG_SKIP_REPEATED);
-    //parse_loglevel(argc, argv, options);
+    av_log_set_level(AV_LOG_INFO);
 
     /* register all codecs, demux and protocols */
 #if CONFIG_AVDEVICE
@@ -2361,8 +2660,24 @@ void start()
     signal(SIGINT , sigterm_handler); /* Interrupt (ANSI).    */
     signal(SIGTERM, sigterm_handler); /* Termination (ANSI).  */
 
-    ret = opt_input_file(NULL, "/home/malkj/Music/Natalie Holt - Loki Green Theme.flac");
+    /*print_static_variables();
+    ret = parse_options(NULL, argc, argv, options, opt_input_file);
+    if (ret < 0)
+        exit(ret == AVERROR_EXIT ? 0 : 1);
+    print_static_variables();*/
+
+    input_filename = "/home/malkj/Music/Des Rocs - Dream Machine (The Lucid Edition) (2023)/12. Des Rocs - The Way It Has to Be.flac";
     startup_volume = 50;
+    loop = -1;
+
+    if (!input_filename) {
+        //show_usage();
+        av_log(NULL, AV_LOG_FATAL, "An input file must be specified\n");
+        av_log(NULL, AV_LOG_FATAL,
+               "Use -h to get full help or, even better, run 'man %s'\n", program_name);
+        exit(1);
+    }
+
 
     flags = SDL_INIT_AUDIO | SDL_INIT_TIMER;
     /* Try to work around an occasional ALSA buffer underflow issue when the
