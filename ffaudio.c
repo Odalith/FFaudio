@@ -18,10 +18,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-/**
- * @file
- * simple media player based on the FFmpeg libraries
- */
+#include "ffaudio.h"
 
 #include <math.h>
 #include <limits.h>
@@ -98,168 +95,6 @@ const int program_birth_year = 2003;
 
 #define USE_ONEPASS_SUBTITLE_RENDER 1
 
-typedef struct MyAVPacketList {
-    AVPacket *pkt;
-    int serial;
-} MyAVPacketList;
-
-typedef struct PacketQueue {
-    AVFifo *pkt_list;
-    int nb_packets;
-    int size;
-    int64_t duration;
-    int abort_request;
-    int serial;
-    SDL_mutex *mutex;
-    SDL_cond *cond;
-} PacketQueue;
-
-#define VIDEO_PICTURE_QUEUE_SIZE 3
-#define SUBPICTURE_QUEUE_SIZE 16
-#define SAMPLE_QUEUE_SIZE 9
-#define FRAME_QUEUE_SIZE FFMAX(SAMPLE_QUEUE_SIZE, FFMAX(VIDEO_PICTURE_QUEUE_SIZE, SUBPICTURE_QUEUE_SIZE))
-
-typedef struct AudioParams {
-    int freq;
-    AVChannelLayout ch_layout;
-    enum AVSampleFormat fmt;
-    int frame_size;
-    int bytes_per_sec;
-} AudioParams;
-
-typedef struct Clock {
-    double pts;           /* clock base */
-    double pts_drift;     /* clock base minus time at which we updated the clock */
-    double last_updated;
-    double speed;
-    int serial;           /* clock is based on a packet with this serial */
-    int paused;
-    int *queue_serial;    /* pointer to the current packet queue serial, used for obsolete clock detection */
-} Clock;
-
-typedef struct FrameData {
-    int64_t pkt_pos;
-} FrameData;
-
-/* Common struct for handling all types of decoded data and allocated render buffers. */
-typedef struct Frame {
-    AVFrame *frame;
-    AVSubtitle sub;
-    int serial;
-    double pts;           /* presentation timestamp for the frame */
-    double duration;      /* estimated duration of the frame */
-    int64_t pos;          /* byte position of the frame in the input file */
-    int width;
-    int height;
-    int format;
-    AVRational sar;
-    int uploaded;
-    int flip_v;
-} Frame;
-
-typedef struct FrameQueue {
-    Frame queue[FRAME_QUEUE_SIZE];
-    int rindex;
-    int windex;
-    int size;
-    int max_size;
-    int keep_last;
-    int rindex_shown;
-    SDL_mutex *mutex;
-    SDL_cond *cond;
-    PacketQueue *pktq;
-} FrameQueue;
-
-enum {
-    AV_SYNC_AUDIO_MASTER, /* default choice */
-    AV_SYNC_EXTERNAL_CLOCK, /* synchronize to an external clock */
-};
-
-typedef struct Decoder {
-    AVPacket *pkt;
-    PacketQueue *queue;
-    AVCodecContext *avctx;
-    int pkt_serial;
-    int finished;
-    int packet_pending;
-    SDL_cond *empty_queue_cond;
-    int64_t start_pts;
-    AVRational start_pts_tb;
-    int64_t next_pts;
-    AVRational next_pts_tb;
-    SDL_Thread *decoder_tid;
-} Decoder;
-
-typedef struct VideoState {
-    SDL_Thread *read_tid;
-    const AVInputFormat *iformat;
-    int abort_request;
-    int paused;
-    int last_paused;
-    int seek_req;
-    int seek_flags;
-    int64_t seek_pos;
-    int64_t seek_rel;
-    int read_pause_return;
-    AVFormatContext *ic;
-    int realtime;
-
-    Clock audclk;
-    Clock vidclk;
-    Clock extclk;
-
-    FrameQueue sampq;
-
-    Decoder auddec;
-
-    int audio_stream;
-
-    int av_sync_type;
-
-    double audio_clock;
-    int audio_clock_serial;
-    double audio_diff_cum; /* used for AV difference average computation */
-    double audio_diff_avg_coef;
-    double audio_diff_threshold;
-    int audio_diff_avg_count;
-    AVStream *audio_st;
-    PacketQueue audioq;
-    int audio_hw_buf_size;
-    uint8_t *audio_buf;
-    uint8_t *audio_buf1;
-    unsigned int audio_buf_size; /* in bytes */
-    unsigned int audio_buf1_size;
-    int audio_buf_index; /* in bytes */
-    int audio_write_buf_size;
-    int audio_volume;
-    int muted;
-    struct AudioParams audio_src;
-    struct AudioParams audio_filter_src;
-    struct AudioParams audio_tgt;
-    struct SwrContext *swr_ctx;
-
-    //AVTXContext *rdft; ~553KD
-    //av_tx_fn rdft_fn; ~553KD
-    //int rdft_bits; ~553KD
-    //float *real_data; ~553KD
-    //AVComplexFloat *rdft_data; ~553KD
-
-    double frame_timer;
-    double max_frame_duration;      // maximum duration of a frame - above this, we consider the jump a timestamp discontinuity
-    int eof;
-
-    char *filename;
-    int xleft, ytop;
-    int step;
-
-    AVFilterContext *in_audio_filter;   // the first filter in the audio chain
-    AVFilterContext *out_audio_filter;  // the last filter in the audio chain
-    AVFilterGraph *agraph;              // audio filter graph
-
-    int last_audio_stream;
-
-    SDL_cond *continue_read_thread;
-} VideoState;
 
 enum StreamList {
     STREAM_LIST_ALL,
@@ -304,6 +139,7 @@ static int audio_disable;
 static const char* wanted_stream_spec[AVMEDIA_TYPE_NB] = {0};
 static int seek_by_bytes = -1;
 static int startup_volume = 100;
+static int sdl_volume = 0;
 static int av_sync_type = AV_SYNC_AUDIO_MASTER;
 static int64_t start_time = AV_NOPTS_VALUE;
 static int64_t duration = AV_NOPTS_VALUE;
@@ -1011,7 +847,9 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                 if (ret == AVERROR_EOF) {
                     d->finished = d->pkt_serial;
                     avcodec_flush_buffers(d->avctx);
-                    av_log(NULL, AV_LOG_INFO, "Its hath ended\n");//Todo This is called 2nd when playback ends
+                    if (notify_of_eof_callback) {
+                        notify_of_eof_callback();
+                    }
                     return 0;
                 }
                 if (ret >= 0)
@@ -1270,15 +1108,10 @@ static void stream_close(VideoState *is)
     av_free(is);
 }
 
-static void do_exit(VideoState *is)
-{
+static void clean_video_state(VideoState *is) {
     if (is) {
         stream_close(is);
     }
-
-    /*for (int i = 0; i < nb_vfilters; i++)
-    av_freep(&vfilters_list[i]);
-av_freep(&vfilters_list);*/
 
     av_dict_free(&swr_opts_n);
     av_dict_free(&format_opts_n);
@@ -1289,6 +1122,17 @@ av_freep(&vfilters_list);*/
 
     av_freep(&audio_codec_name);
     av_freep(&input_filename);
+}
+
+static void do_exit(VideoState *is)
+{
+
+
+    /*for (int i = 0; i < nb_vfilters; i++)
+    av_freep(&vfilters_list[i]);
+av_freep(&vfilters_list);*/
+
+    clean_video_state(is);
     //avformat_network_deinit();
     SDL_Quit();
     av_log(NULL, AV_LOG_QUIET, "%s", "");
@@ -1418,7 +1262,8 @@ static void update_volume(VideoState *is, int sign, double step)
 {
     double volume_level = is->audio_volume ? (20 * log(is->audio_volume / (double)SDL_MIX_MAXVOLUME) / log(10)) : -1000.0;
     int new_volume = lrint(SDL_MIX_MAXVOLUME * pow(10.0, (volume_level + sign * step) / 20.0));
-    is->audio_volume = av_clip(is->audio_volume == new_volume ? (is->audio_volume + sign) : new_volume, 0, SDL_MIX_MAXVOLUME);
+    sdl_volume = av_clip(is->audio_volume == new_volume ? (is->audio_volume + sign) : new_volume, 0, SDL_MIX_MAXVOLUME);
+    is->audio_volume = sdl_volume;
 }
 
 static void step_to_next_frame(VideoState *is)
@@ -2356,7 +2201,7 @@ static int read_thread(void *arg)
                 if (is->audio_stream >= 0)
                     packet_queue_put_nullpacket(&is->audioq, pkt, is->audio_stream);
                 is->eof = 1;
-                av_log(NULL, AV_LOG_INFO, "BINGUIS2\n");// Todo this is called first when ffmpeg is done reading packets
+                // This is first when ffmpeg is done reading packets, may be useful to prepare the next song
             }
             if (ic->pb && ic->pb->error) {
                 if (autoexit)
@@ -2439,11 +2284,12 @@ static VideoState *stream_open(const char *filename,
     if (startup_volume > 100)
         av_log(NULL, AV_LOG_WARNING, "-volume=%d > 100, setting to 100\n", startup_volume);
     startup_volume = av_clip(startup_volume, 0, 100);
-    startup_volume = av_clip(SDL_MIX_MAXVOLUME * startup_volume / 100, 0, SDL_MIX_MAXVOLUME);
-    is->audio_volume = startup_volume;
+    sdl_volume = av_clip(SDL_MIX_MAXVOLUME * startup_volume / 100, 0, SDL_MIX_MAXVOLUME);
+    is->audio_volume = sdl_volume;
     is->muted = 0;
     is->av_sync_type = av_sync_type;
     is->read_tid     = SDL_CreateThread(read_thread, "read_thread", is);
+
     if (!is->read_tid) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateThread(): %s\n", SDL_GetError());
 fail:
@@ -2498,6 +2344,15 @@ static void event_loop(VideoState *cur_stream)
 
     for (;;) {
         refresh_loop_wait_event(cur_stream, &event);
+    }
+}
+
+void wait_loop() {
+    double remaining_time = 0.0;
+    while (1) {
+        if (remaining_time > 0.0)
+            av_usleep((int64_t)(remaining_time * 1000000.0));
+        remaining_time = REFRESH_RATE;
     }
 }
 
@@ -2566,85 +2421,37 @@ static int opt_codec(void *optctx, const char *opt, const char *arg)
    return *name ? 0 : AVERROR(ENOMEM);
 }
 
-/*static int dummy;
 
-static const OptionDef options[] = {
-    CMDUTILS_COMMON_OPTIONS
-    { "ast",                OPT_TYPE_STRING, OPT_EXPERT, { &wanted_stream_spec[AVMEDIA_TYPE_AUDIO] }, "select desired audio stream", "stream_specifier" },
-    { "ss",                 OPT_TYPE_TIME,            0, { &start_time }, "seek to a given position in seconds", "pos" },
-    { "t",                  OPT_TYPE_TIME,            0, { &duration }, "play  \"duration\" seconds of audio/video", "duration" },
-    { "bytes",              OPT_TYPE_INT,             0, { &seek_by_bytes }, "seek by bytes 0=off 1=on -1=auto", "val" },
-    { "volume",             OPT_TYPE_INT,             0, { &startup_volume}, "set startup volume 0=min 100=max", "volume" },
-    { "f",                  OPT_TYPE_FUNC, OPT_FUNC_ARG, { .func_arg = opt_format }, "force format", "fmt" },
-    { "fast",               OPT_TYPE_BOOL,   OPT_EXPERT, { &fast }, "non spec compliant optimizations", "" },
-    { "genpts",             OPT_TYPE_BOOL,   OPT_EXPERT, { &genpts }, "generate pts", "" },
-    { "drp",                OPT_TYPE_INT,    OPT_EXPERT, { &decoder_reorder_pts }, "let decoder reorder pts 0=off 1=on -1=auto", ""},
-    { "lowres",             OPT_TYPE_INT,    OPT_EXPERT, { &lowres }, "", "" },
-    { "sync",               OPT_TYPE_FUNC, OPT_FUNC_ARG | OPT_EXPERT, { .func_arg = opt_sync }, "set audio-video sync. type (type=audio/video/ext)", "type" },
-    { "autoexit",           OPT_TYPE_BOOL,   OPT_EXPERT, { &autoexit }, "exit at the end", "" },
-    { "loop",               OPT_TYPE_INT,    OPT_EXPERT, { &loop }, "set number of times the playback shall be looped", "loop count" },
-    { "framedrop",          OPT_TYPE_BOOL,   OPT_EXPERT, { &framedrop }, "drop frames when cpu is too slow", "" },
-    { "infbuf",             OPT_TYPE_BOOL,   OPT_EXPERT, { &infinite_buffer }, "don't limit the input buffer size (useful with realtime streams)", "" },
-    { "af",                 OPT_TYPE_STRING,          0, { &afilters }, "set audio filters", "filter_graph" },
-    { "i",                  OPT_TYPE_BOOL,            0, { &dummy}, "read specified file", "input_file"},
-    { "codec",              OPT_TYPE_FUNC, OPT_FUNC_ARG, { .func_arg = opt_codec}, "force decoder", "decoder_name" },
-    { "acodec",             OPT_TYPE_STRING, OPT_EXPERT, {    &audio_codec_name }, "force audio decoder",    "decoder_name" },
-    { "find_stream_info",   OPT_TYPE_BOOL, OPT_INPUT | OPT_EXPERT, { &find_stream_info }, "read and decode the streams to fill missing information with heuristics" },
-    { "filter_threads",     OPT_TYPE_INT,    OPT_EXPERT, { &filter_nbthreads }, "number of filter threads per graph" },
-    { NULL, },
-};*/
+void play_audio(const char *filename) {
 
-static void print_static_variables(void) {
-    av_log(NULL, AV_LOG_INFO, "=== Static Variables Debug Info ===\n");
+    if (last_is) {
+        clean_video_state(last_is);
+    }
 
-    // Pointer variables
-    av_log(NULL, AV_LOG_INFO, "file_iformat: %p\n", file_iformat);
-    av_log(NULL, AV_LOG_INFO, "input_filename: %s\n", input_filename ? input_filename : "(null)");
-    av_log(NULL, AV_LOG_INFO, "audio_codec_name: %s\n", audio_codec_name ? audio_codec_name : "(null)");
-    av_log(NULL, AV_LOG_INFO, "afilters: %s\n", afilters ? afilters : "(null)");
+    input_filename = av_strdup(filename);
 
-    // Integer variables
-    av_log(NULL, AV_LOG_INFO, "audio_disable: %d\n", audio_disable);
-    av_log(NULL, AV_LOG_INFO, "seek_by_bytes: %d\n", seek_by_bytes);
-    av_log(NULL, AV_LOG_INFO, "startup_volume: %d\n", startup_volume);
-    //av_log(NULL, AV_LOG_INFO, "av_sync_type: %d\n", av_sync_type);
-    av_log(NULL, AV_LOG_INFO, "fast: %d\n", fast);
-    av_log(NULL, AV_LOG_INFO, "genpts: %d\n", genpts);
-    av_log(NULL, AV_LOG_INFO, "lowres: %d\n", lowres);
-    av_log(NULL, AV_LOG_INFO, "decoder_reorder_pts: %d\n", decoder_reorder_pts);
-    av_log(NULL, AV_LOG_INFO, "autoexit: %d\n", autoexit);
-    av_log(NULL, AV_LOG_INFO, "loop: %d\n", loop);
-    av_log(NULL, AV_LOG_INFO, "framedrop: %d\n", framedrop);
-    av_log(NULL, AV_LOG_INFO, "infinite_buffer: %d\n", infinite_buffer);
-    //av_log(NULL, AV_LOG_INFO, "nb_vfilters: %d\n", nb_vfilters);
-    av_log(NULL, AV_LOG_INFO, "find_stream_info: %d\n", find_stream_info);
-    av_log(NULL, AV_LOG_INFO, "filter_nbthreads: %d\n", filter_nbthreads);
+    if (!input_filename) {
+        //show_usage();
+        av_log(NULL, AV_LOG_FATAL, "An input file must be specified\n");
+        av_log(NULL, AV_LOG_FATAL,
+               "Use -h to get full help or, even better, run 'man %s'\n", program_name);
+        exit(1);
+    }
 
-    // 64-bit integer variables
-    av_log(NULL, AV_LOG_INFO, "start_time: %"PRId64"\n", start_time);
-    av_log(NULL, AV_LOG_INFO, "duration: %"PRId64"\n", duration);
-    av_log(NULL, AV_LOG_INFO, "audio_callback_time: %"PRId64"\n", audio_callback_time);
-
-    // Array elements (showing first few elements of wanted_stream_spec)
-    av_log(NULL, AV_LOG_INFO, "wanted_stream_spec[AVMEDIA_TYPE_VIDEO]: %s\n",
-           wanted_stream_spec[AVMEDIA_TYPE_VIDEO] ? wanted_stream_spec[AVMEDIA_TYPE_VIDEO] : "(null)");
-    av_log(NULL, AV_LOG_INFO, "wanted_stream_spec[AVMEDIA_TYPE_AUDIO]: %s\n",
-           wanted_stream_spec[AVMEDIA_TYPE_AUDIO] ? wanted_stream_spec[AVMEDIA_TYPE_AUDIO] : "(null)");
-    av_log(NULL, AV_LOG_INFO, "wanted_stream_spec[AVMEDIA_TYPE_SUBTITLE]: %s\n",
-           wanted_stream_spec[AVMEDIA_TYPE_SUBTITLE] ? wanted_stream_spec[AVMEDIA_TYPE_SUBTITLE] : "(null)");
-
-    av_log(NULL, AV_LOG_INFO, "=== End Static Variables Debug Info ===\n");
-}
-
-static void show_help_default(const char *opt, const char *arg) {
-
+    last_is = stream_open(input_filename, file_iformat);
+    if (!last_is) {
+        av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
+        do_exit(NULL);
+    }
 }
 
 /* Called from the main */
-void start()
+void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const GetNextSong callback3)
 {
-    int flags, ret;
-    VideoState *is;
+    notify_of_error_callback = callback;
+    notify_of_eof_callback = callback2;
+    get_next_song_callback = callback3;
+    int flags = SDL_INIT_AUDIO | SDL_INIT_TIMER;
 
     init_dynload_n();
 
@@ -2655,36 +2462,21 @@ void start()
 #if CONFIG_AVDEVICE
     avdevice_register_all();
 #endif
-    //avformat_network_init();
 
     signal(SIGINT , sigterm_handler); /* Interrupt (ANSI).    */
     signal(SIGTERM, sigterm_handler); /* Termination (ANSI).  */
 
-    /*print_static_variables();
-    ret = parse_options(NULL, argc, argv, options, opt_input_file);
-    if (ret < 0)
-        exit(ret == AVERROR_EXIT ? 0 : 1);
-    print_static_variables();*/
+    startup_volume = initial_volume;
+    loop = loop_count;
 
-    input_filename = "/home/malkj/Music/Des Rocs - Dream Machine (The Lucid Edition) (2023)/12. Des Rocs - The Way It Has to Be.flac";
-    startup_volume = 50;
-    loop = -1;
-
-    if (!input_filename) {
-        //show_usage();
-        av_log(NULL, AV_LOG_FATAL, "An input file must be specified\n");
-        av_log(NULL, AV_LOG_FATAL,
-               "Use -h to get full help or, even better, run 'man %s'\n", program_name);
-        exit(1);
-    }
-
-
-    flags = SDL_INIT_AUDIO | SDL_INIT_TIMER;
     /* Try to work around an occasional ALSA buffer underflow issue when the
      * period size is NPOT due to ALSA resampling by forcing the buffer size. */
     if (!SDL_getenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE"))
         SDL_setenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE","1", 1);
 
+    SDL_SetHint(SDL_HINT_APP_NAME, app_name);
+    SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
 
     if (SDL_Init (flags)) {
         av_log(NULL, AV_LOG_FATAL, "Could not initialize SDL - %s\n", SDL_GetError());
@@ -2696,14 +2488,4 @@ void start()
     SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
     SDL_EventState(SDL_DISPLAYEVENT, SDL_IGNORE);
 
-
-    is = stream_open(input_filename, file_iformat);
-    if (!is) {
-        av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
-        do_exit(NULL);
-    }
-
-    event_loop(is);
-
-    /* never returns */
 }
