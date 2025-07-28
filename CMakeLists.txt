@@ -3,6 +3,7 @@ project(ffAudio C)
 
 set(CMAKE_C_STANDARD 11)
 
+
 find_package(SDL2 REQUIRED)
 find_package(PkgConfig REQUIRED)
 
@@ -13,12 +14,12 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libswresample
 )
 
-add_library(ffAudio SHARED ffaudio.c ffaudio.h)
+add_library(ffaudio SHARED ffaudio.c ffaudio.h)
 
-target_link_libraries(ffAudio PRIVATE SDL2 PkgConfig::FFMPEG)
+target_link_libraries(ffaudio PUBLIC SDL2 PkgConfig::FFMPEG)
 
 # Set properties for Windows DLL export
-set_target_properties(ffAudio PROPERTIES
+set_target_properties(ffaudio PROPERTIES
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN YES
 )
@@ -35,7 +36,7 @@ find_library(SWRESAMPLE_LIB swresample)
 
 # Link the test executable to the library
 target_link_libraries(test_ffaudio
-        ffAudio
+        ffaudio
         ${AVFORMAT_LIB}
         ${AVCODEC_LIB}
         ${AVFILTER_LIB}
@@ -43,8 +44,10 @@ target_link_libraries(test_ffaudio
         ${SWRESAMPLE_LIB}
 )
 
-
 # Optional: Set output directory for the test binary
 set_target_properties(test_ffaudio PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/testbin
+        INSTALL_RPATH_USE_LINK_PATH TRUE
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "$ORIGIN/../lib"
 )
