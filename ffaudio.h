@@ -16,6 +16,7 @@
 #define SAMPLE_QUEUE_SIZE 9
 #define FRAME_QUEUE_SIZE FFMAX(SAMPLE_QUEUE_SIZE, FFMAX(VIDEO_PICTURE_QUEUE_SIZE, SUBPICTURE_QUEUE_SIZE))
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <libavcodec/avcodec.h>
 #include <libavfilter/avfilter.h>
@@ -186,17 +187,30 @@ static VideoState *last_is = NULL;
 
 typedef void (*NotifyOfError)(const char* message, int request);
 typedef void (*NotifyOfEndOfFile)();
-typedef char* (*GetNextSong)();
+typedef void (*NotifyOfRestart)();
 
 // Static variables to hold the callback functions
 static NotifyOfError notify_of_error_callback = NULL;
 static NotifyOfEndOfFile notify_of_eof_callback = NULL;
-static GetNextSong get_next_song_callback = NULL;
+static NotifyOfRestart notify_of_restart_callback = NULL;
 
 
-DLL_EXPORT void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const GetNextSong callback3);
+
+DLL_EXPORT void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
 
 DLL_EXPORT void play_audio(const char *filename);
+
+DLL_EXPORT void stop();
+
+DLL_EXPORT void pause(const bool value);
+
+DLL_EXPORT void seek(const int percentPos);
+
+DLL_EXPORT void set_volume(const int volume);
+
+DLL_EXPORT void mute(const bool value);
+
+DLL_EXPORT void set_loop_count(const int loop_count);
 
 DLL_EXPORT void wait_loop();
 

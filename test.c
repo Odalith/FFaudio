@@ -21,18 +21,15 @@ void eof_callback() {
     play_audio(song);
 }
 
-char* next_callback() {
-    printf("Next\n");
-}
+void restart_callback() {}
 
 int main(void) {
-    //queue[0] = "/home/malkj/Music/kroh - GHOSTS.flac";
-    queue[0] = "/home/malkj/Downloads/Unique Formats/Jh.mp3";
-    queue[1] = "/home/malkj/Music/JT Music - I Think Therefore I Am.flac";
-    queue[2] = "/home/malkj/Music/NASAYA - 33.flac";
-    queue[3] = "/home/malkj/Music/c. g. - dom fera - monster song.mp3";
+    queue[0] = "/home/malkj/Music/POWER/01-01 POWER.flac";
+    queue[1] = "/home/malkj/Music/Sin Woven Puppet/01-01 Sin Woven Puppet.flac";
+    queue[2] = "/home/malkj/Music/Perfect Dreams/01-01 Perfect Dreams.flac";
+    queue[3] = "/home/malkj/Music/Des Rocs - Dream Machine (The Lucid Edition) (2023)/05. Des Rocs - Never Ending Moment.flac";
 
-    initialize("Nachtul", 50, 1, error_callback, eof_callback, next_callback);
+    initialize("Nachtul", 50, 1, error_callback, eof_callback, restart_callback);
 
     play_audio(queue[queue_pos]);
 

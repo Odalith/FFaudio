@@ -35,7 +35,7 @@
 #include "libavutil/time.h"            // Internal: Time utilities
 #include "libavutil/bprint.h"          // Internal: Binary print utilities
 #include "libavformat/avformat.h"
-#include "libavdevice/avdevice.h"
+//#include "libavdevice/avdevice.h"
 #include "libswscale/swscale.h"
 #include "libavutil/opt.h"
 #include "libswresample/swresample.h"
@@ -160,6 +160,8 @@ static int64_t audio_callback_time;
 
 static AVDictionary *swr_opts_n;
 static AVDictionary *format_opts_n, *codec_opts_n;
+static int64_t request_count;
+static bool is_init_done = false;
 
 #define FF_QUIT_EVENT    (SDL_USEREVENT + 2)
 
@@ -174,23 +176,6 @@ int cmp_audio_fmts(enum AVSampleFormat fmt1, int64_t channel_count1,
         return av_get_packed_sample_fmt(fmt1) != av_get_packed_sample_fmt(fmt2);
     else
         return channel_count1 != channel_count2 || fmt1 != fmt2;
-}
-
-static void test_dict(const AVDictionary *test, const char *name) {
-
-    av_log(NULL, AV_LOG_ERROR, "%s ", name);
-
-    if (av_dict_count(test)) {
-        av_log(NULL, AV_LOG_ERROR, "\n%d\n", av_dict_count(test));
-
-        const AVDictionaryEntry *tdd = NULL;
-        while ((tdd = av_dict_iterate(test, tdd))) {
-            av_log(NULL, AV_LOG_ERROR, "%s \n", tdd->key);
-        }
-    }
-    else
-        av_log(NULL, AV_LOG_ERROR, "None\n");
-
 }
 
 static void init_dynload_n(void)
@@ -1247,24 +1232,24 @@ static void stream_toggle_pause(VideoState *is)
     is->paused = is->audclk.paused = is->vidclk.paused = is->extclk.paused = !is->paused;
 }
 
-static void toggle_pause(VideoState *is)
+/*static void toggle_pause(VideoState *is)
 {
     stream_toggle_pause(is);
     is->step = 0;
-}
+}*/
 
-static void toggle_mute(VideoState *is)
+/*static void toggle_mute(VideoState *is)
 {
     is->muted = !is->muted;
-}
+}*/
 
-static void update_volume(VideoState *is, int sign, double step)
+/*static void update_volume(VideoState *is, int sign, double step)
 {
     double volume_level = is->audio_volume ? (20 * log(is->audio_volume / (double)SDL_MIX_MAXVOLUME) / log(10)) : -1000.0;
     int new_volume = lrint(SDL_MIX_MAXVOLUME * pow(10.0, (volume_level + sign * step) / 20.0));
     sdl_volume = av_clip(is->audio_volume == new_volume ? (is->audio_volume + sign) : new_volume, 0, SDL_MIX_MAXVOLUME);
     is->audio_volume = sdl_volume;
-}
+}*/
 
 static void step_to_next_frame(VideoState *is)
 {
@@ -2158,6 +2143,7 @@ static int read_thread(void *arg)
 //      of the seek_pos/seek_rel variables
 
             ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
+
             if (ret < 0) {
                 av_log(NULL, AV_LOG_ERROR,
                        "%s: error while seeking\n", is->ic->url);
@@ -2190,6 +2176,10 @@ static int read_thread(void *arg)
             (!is->audio_st || (is->auddec.finished == is->audioq.serial && frame_queue_nb_remaining(&is->sampq) == 0))) {
             if (loop != 1 && (!loop || --loop)) {
                 stream_seek(is, start_time != AV_NOPTS_VALUE ? start_time : 0, 0, 0);
+
+                if (notify_of_restart_callback) {
+                    notify_of_restart_callback();
+                }
             } else if (autoexit) {
                 ret = AVERROR_EOF;
                 goto fail;
@@ -2333,8 +2323,10 @@ static void seek_chapter(VideoState *is, int incr)
         return;
 
     av_log(NULL, AV_LOG_VERBOSE, "Seeking to chapter %d.\n", i);
-    stream_seek(is, av_rescale_q(is->ic->chapters[i]->start, is->ic->chapters[i]->time_base,
-                                 AV_TIME_BASE_Q), 0, 0);
+    stream_seek(is,
+        av_rescale_q(is->ic->chapters[i]->start, is->ic->chapters[i]->time_base,AV_TIME_BASE_Q),
+        0,
+        0);
 }
 
 /* handle an event sent by the GUI */
@@ -2346,6 +2338,7 @@ static void event_loop(VideoState *cur_stream)
         refresh_loop_wait_event(cur_stream, &event);
     }
 }
+
 
 void wait_loop() {
     double remaining_time = 0.0;
@@ -2421,36 +2414,14 @@ static int opt_codec(void *optctx, const char *opt, const char *arg)
    return *name ? 0 : AVERROR(ENOMEM);
 }
 
-
-void play_audio(const char *filename) {
-
-    if (last_is) {
-        clean_video_state(last_is);
-    }
-
-    input_filename = av_strdup(filename);
-
-    if (!input_filename) {
-        //show_usage();
-        av_log(NULL, AV_LOG_FATAL, "An input file must be specified\n");
-        av_log(NULL, AV_LOG_FATAL,
-               "Use -h to get full help or, even better, run 'man %s'\n", program_name);
-        exit(1);
-    }
-
-    last_is = stream_open(input_filename, file_iformat);
-    if (!last_is) {
-        av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
-        do_exit(NULL);
-    }
-}
-
 /* Called from the main */
-void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const GetNextSong callback3)
+void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3)
 {
+    if (is_init_done) return;
+
     notify_of_error_callback = callback;
     notify_of_eof_callback = callback2;
-    get_next_song_callback = callback3;
+    notify_of_restart_callback = callback3;
     int flags = SDL_INIT_AUDIO | SDL_INIT_TIMER;
 
     init_dynload_n();
@@ -2488,4 +2459,81 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
     SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
     SDL_EventState(SDL_DISPLAYEVENT, SDL_IGNORE);
 
+    is_init_done = true;
+}
+
+void play_audio(const char *filename) {
+
+    if (last_is) {
+        clean_video_state(last_is);
+    }
+
+    input_filename = av_strdup(filename);
+
+    if (!input_filename) {
+        //show_usage();
+        av_log(NULL, AV_LOG_FATAL, "An input file must be specified\n");
+        av_log(NULL, AV_LOG_FATAL,
+               "Use -h to get full help or, even better, run 'man %s'\n", program_name);
+        exit(1);
+    }
+
+    last_is = stream_open(input_filename, file_iformat);
+    if (!last_is) {
+        av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
+        do_exit(NULL);
+    }
+
+    ++request_count;
+}
+
+void stop() {
+    if (!last_is) return;
+
+    clean_video_state(last_is);
+
+    ++request_count;
+}
+
+void pause(const bool value) {
+
+    if (!last_is || value == last_is->paused) return;
+
+    stream_toggle_pause(last_is);
+    last_is->step = 0;
+
+    ++request_count;
+}
+
+void seek(const int percentPos) {
+    if (!last_is) return;
+
+    const int64_t pos = percentPos * INT64_MAX / INT64_MIN; //percentPos * last_is->ic->streams[last_is->audio_stream]->duration / 100;
+
+    stream_seek(last_is, pos, 0, 0);
+
+    ++request_count;
+}
+
+void set_volume(const int volume) {
+    if (!last_is || volume > 100 || volume < 0 || volume == startup_volume) return;
+
+    startup_volume = volume;
+    sdl_volume = av_clip(SDL_MIX_MAXVOLUME * volume / 100, 0, SDL_MIX_MAXVOLUME);
+    last_is->audio_volume = sdl_volume;
+
+    ++request_count;
+}
+
+void mute(const bool value) {
+
+    if (!last_is || value == last_is->muted) return;
+
+    last_is->muted = !last_is->muted;
+
+    ++request_count;
+}
+
+void set_loop_count(const int loop_count) {
+    loop = loop_count;
 }
