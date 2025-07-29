@@ -197,7 +197,7 @@ DLL_EXPORT void play_audio(const char *filename);
 
 DLL_EXPORT void stop();
 
-DLL_EXPORT void pause_audio(const bool value);
+DLL_EXPORT void pause(const bool value);
 
 DLL_EXPORT void seek(const double percentPos);
 

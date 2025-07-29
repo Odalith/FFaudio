@@ -2494,7 +2494,7 @@ void stop() {
     ++request_count;
 }
 
-void pause_audio(const bool value) {
+void pause(const bool value) {
 
     if (!last_is || value == last_is->paused) return;
 
