@@ -2504,12 +2504,23 @@ void pause_audio(const bool value) {
     ++request_count;
 }
 
-void seek(const int percentPos) {
-    if (!last_is) return;
+void seek(const double percentPos) {
+    if (!last_is || !last_is->ic) return;
 
-    const int64_t pos = percentPos * INT64_MAX / INT64_MIN; //percentPos * last_is->ic->streams[last_is->audio_stream]->duration / 100;
+    // Get the total duration of the media file
+    int64_t duration = last_is->ic->duration;
+    if (duration == AV_NOPTS_VALUE) {
+        // If duration is unknown, we can't seek by percentage
+        return;
+    }
 
-    stream_seek(last_is, pos, 0, 0);
+    // duration is already in AV_TIME_BASE units (microseconds)
+    int64_t target_pos = (int64_t)(percentPos / 100.0 * duration);
+
+    if (target_pos < 0) target_pos = 0;
+    if (target_pos > duration) target_pos = duration;
+
+    stream_seek(last_is, target_pos, 0, 0);
 
     ++request_count;
 }

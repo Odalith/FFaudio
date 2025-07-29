@@ -199,7 +199,7 @@ DLL_EXPORT void stop();
 
 DLL_EXPORT void pause_audio(const bool value);
 
-DLL_EXPORT void seek(const int percentPos);
+DLL_EXPORT void seek(const double percentPos);
 
 DLL_EXPORT void set_volume(const int volume);
 
