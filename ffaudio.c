@@ -1221,15 +1221,16 @@ static void stream_seek(VideoState *is, int64_t pos, int64_t rel, int by_bytes)
 /* pause or resume the video */
 static void stream_toggle_pause(VideoState *is)
 {
-    if (is->paused) {
+    /*if (is->paused) {
         is->frame_timer += av_gettime_relative() / 1000000.0 - is->vidclk.last_updated;
         if (is->read_pause_return != AVERROR(ENOSYS)) {
             is->vidclk.paused = 0;
         }
         set_clock(&is->vidclk, get_clock(&is->vidclk), is->vidclk.serial);
-    }
+    }*/
+
     set_clock(&is->extclk, get_clock(&is->extclk), is->extclk.serial);
-    is->paused = is->audclk.paused = is->vidclk.paused = is->extclk.paused = !is->paused;
+    is->paused = is->audclk.paused = is->extclk.paused = !is->paused;
 }
 
 /*static void toggle_pause(VideoState *is)
@@ -2055,7 +2056,7 @@ static int read_thread(void *arg)
                         !!(ic->iformat->flags & AVFMT_TS_DISCONT) &&
                         strcmp("ogg", ic->iformat->name);
 
-    is->max_frame_duration = (ic->iformat->flags & AVFMT_TS_DISCONT) ? 10.0 : 3600.0;
+    //is->max_frame_duration = (ic->iformat->flags & AVFMT_TS_DISCONT) ? 10.0 : 3600.0;
 
 
     /* if seeking requested, we execute it */
@@ -2251,8 +2252,6 @@ static VideoState *stream_open(const char *filename,
     if (!is->filename)
         goto fail;
     is->iformat = iformat;
-    is->ytop    = 0;
-    is->xleft   = 0;
 
     /* start video display */
     if (frame_queue_init(&is->sampq, &is->audioq, SAMPLE_QUEUE_SIZE, 1) < 0)
@@ -2495,7 +2494,7 @@ void stop() {
     ++request_count;
 }
 
-void pause(const bool value) {
+void pause_audio(const bool value) {
 
     if (!last_is || value == last_is->paused) return;
 

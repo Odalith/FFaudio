@@ -13,6 +13,7 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libavutil
         libswresample
         libswscale
+        libavfilter
 )
 
 add_library(ffaudio SHARED ffaudio.c ffaudio.h)

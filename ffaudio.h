@@ -127,7 +127,6 @@ typedef struct VideoState {
     int realtime;
 
     Clock audclk;
-    Clock vidclk;
     Clock extclk;
 
     FrameQueue sampq;
@@ -166,12 +165,8 @@ typedef struct VideoState {
     //float *real_data; ~553KD
     //AVComplexFloat *rdft_data; ~553KD
 
-    double frame_timer;
-    double max_frame_duration;      // maximum duration of a frame - above this, we consider the jump a timestamp discontinuity
     int eof;
-
     char *filename;
-    int xleft, ytop;
     int step;
 
     AVFilterContext *in_audio_filter;   // the first filter in the audio chain
@@ -202,7 +197,7 @@ DLL_EXPORT void play_audio(const char *filename);
 
 DLL_EXPORT void stop();
 
-DLL_EXPORT void pause(const bool value);
+DLL_EXPORT void pause_audio(const bool value);
 
 DLL_EXPORT void seek(const int percentPos);
 
