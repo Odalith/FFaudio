@@ -832,9 +832,6 @@ static int decoder_decode_frame(Decoder *d, AVFrame *frame, AVSubtitle *sub) {
                 if (ret == AVERROR_EOF) {
                     d->finished = d->pkt_serial;
                     avcodec_flush_buffers(d->avctx);
-                    if (notify_of_eof_callback) {
-                        notify_of_eof_callback();
-                    }
                     return 0;
                 }
                 if (ret >= 0)
@@ -2156,6 +2153,10 @@ static int read_thread(void *arg)
                 } else {
                    set_clock(&is->extclk, seek_target / (double)AV_TIME_BASE, 0);
                 }
+
+                if (notify_of_restart_callback) {
+                    notify_of_restart_callback();
+                }
             }
             is->seek_req = 0;
             is->eof = 0;
@@ -2178,9 +2179,6 @@ static int read_thread(void *arg)
             if (loop != 1 && (!loop || --loop)) {
                 stream_seek(is, start_time != AV_NOPTS_VALUE ? start_time : 0, 0, 0);
 
-                if (notify_of_restart_callback) {
-                    notify_of_restart_callback();
-                }
             } else if (autoexit) {
                 ret = AVERROR_EOF;
                 goto fail;
@@ -2236,6 +2234,10 @@ static int read_thread(void *arg)
         SDL_PushEvent(&event);
     }
     SDL_DestroyMutex(wait_mutex);
+
+    if (notify_of_eof_callback) {
+        notify_of_eof_callback();
+    }
     return 0;
 }
 
@@ -2438,6 +2440,7 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
 
     startup_volume = initial_volume;
     loop = loop_count;
+    autoexit = 1;
 
     /* Try to work around an occasional ALSA buffer underflow issue when the
      * period size is NPOT due to ALSA resampling by forcing the buffer size. */
