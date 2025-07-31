@@ -1081,6 +1081,7 @@ static void stream_close(VideoState *is)
     avformat_close_input(&is->ic);
 
     packet_queue_destroy(&is->audioq);
+    avfilter_graph_free(&is->agraph);
 
     /* free all pictures */
     frame_queue_destroy(&is->sampq);
@@ -1099,8 +1100,6 @@ static void clean_video_state(VideoState *is) {
     av_dict_free(&format_opts_n);
     av_dict_free(&codec_opts_n);
     av_freep(&codec_opts_n);
-    av_freep(&codec_opts_n);
-    av_freep(&codec_opts_n);
 
     av_freep(&audio_codec_name);
     av_freep(&input_filename);
@@ -1115,6 +1114,7 @@ static void do_exit(VideoState *is)
 av_freep(&vfilters_list);*/
 
     clean_video_state(is);
+    last_is = NULL;
     //avformat_network_deinit();
     SDL_Quit();
     av_log(NULL, AV_LOG_QUIET, "%s", "");
@@ -2415,6 +2415,16 @@ static int opt_codec(void *optctx, const char *opt, const char *arg)
    return *name ? 0 : AVERROR(ENOMEM);
 }
 
+void add_to_filter_chain(const char *filter_name)
+{
+    if (afilters && strlen(afilters) > 0) {
+        // Combine user filters with loudnorm
+        afilters = av_asprintf("%s,%s", afilters, filter_name);
+    } else {
+        afilters = av_strdup(filter_name);
+    }
+}
+
 /* Called from the main */
 void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3)
 {
@@ -2461,6 +2471,15 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
     SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
     SDL_EventState(SDL_DISPLAYEVENT, SDL_IGNORE);
 
+    // Add loudness normalization filter
+    const char *loudnorm_filter = "loudnorm=I=-16:TP=-1.5:LRA=11";
+    const char *volume_filter = "volume=replaygain=track:replaygain_preamp=10.0";
+    const char *crossfeed_filter = "crossfeed=strength=0.3";
+
+    //add_to_filter_chain(loudnorm_filter);
+    add_to_filter_chain(volume_filter);
+    add_to_filter_chain(crossfeed_filter);
+
     is_init_done = true;
 }
 
@@ -2468,8 +2487,10 @@ void play_audio(const char *filename) {
 
     if (last_is) {
         clean_video_state(last_is);
+        last_is = NULL;
     }
 
+    av_freep(&input_filename);
     input_filename = av_strdup(filename);
 
     if (!input_filename) {
@@ -2493,6 +2514,7 @@ void stop() {
     if (!last_is) return;
 
     clean_video_state(last_is);
+    last_is = NULL;
 
     ++request_count;
 }
