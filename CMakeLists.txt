@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.30)
 project(ffAudio C)
 
 set(CMAKE_C_STANDARD 11)
+#[[set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize=leak -g -O1")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fsanitize=leak")]]
 
 
 find_package(SDL2 REQUIRED)
@@ -48,8 +50,8 @@ target_link_libraries(test_ffaudio
 
 # Optional: Set output directory for the test binary
 set_target_properties(test_ffaudio PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/testbin
-        INSTALL_RPATH_USE_LINK_PATH TRUE
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+#[[        INSTALL_RPATH_USE_LINK_PATH TRUE
         BUILD_WITH_INSTALL_RPATH TRUE
-        INSTALL_RPATH "$ORIGIN/../lib"
+        INSTALL_RPATH "$ORIGIN/lib"]]
 )
