@@ -94,7 +94,7 @@ typedef struct FrameQueue {
 
 enum {
     AV_SYNC_AUDIO_MASTER, /* default choice */
-    AV_SYNC_EXTERNAL_CLOCK, /* synchronize to an external clock */
+    //AV_SYNC_EXTERNAL_CLOCK, /* synchronize to an external clock */
 };
 
 typedef struct Decoder {
@@ -131,7 +131,7 @@ typedef struct VideoState {
 
     FrameQueue sampq;
 
-    Decoder auddec;
+    Decoder audio_decoder;
 
     int audio_stream;
 
@@ -144,7 +144,7 @@ typedef struct VideoState {
     double audio_diff_threshold;
     int audio_diff_avg_count;
     AVStream *audio_st;
-    PacketQueue audioq;
+    PacketQueue audio_queue;
     int audio_hw_buf_size;
     uint8_t *audio_buf;
     uint8_t *audio_buf1;
@@ -156,7 +156,6 @@ typedef struct VideoState {
     int muted;
     struct AudioParams audio_src;
     struct AudioParams audio_filter_src;
-    struct AudioParams audio_tgt;
     struct SwrContext *swr_ctx;
 
     //AVTXContext *rdft; ~553KD
@@ -190,6 +189,7 @@ static NotifyOfEndOfFile notify_of_eof_callback = NULL;
 static NotifyOfRestart notify_of_restart_callback = NULL;
 
 
+DLL_EXPORT void shutdown();
 
 DLL_EXPORT void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
 
