@@ -18,7 +18,9 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libavfilter
 )
 
-add_library(ffaudio SHARED ffaudio.c ffaudio.h)
+add_library(ffaudio SHARED ffaudio.c ffaudio.h
+        cmdutils.c
+        cmdutils.h)
 
 target_link_libraries(ffaudio PUBLIC SDL2 PkgConfig::FFMPEG)
 
