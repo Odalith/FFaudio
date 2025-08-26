@@ -36,6 +36,9 @@
 #include "libavutil/bprint.h"          // Internal: Binary print utilities
 #include "libavformat/avformat.h"
 //#include "libavdevice/avdevice.h"
+#include <time.h>
+#include <bits/time.h>
+
 #include "libswscale/swscale.h"
 #include "libavutil/opt.h"
 #include "libswresample/swresample.h"
@@ -91,18 +94,16 @@ static int64_t audio_callback_time;
 //These will most likely be removed
 static int fast = 0;
 static int genpts = 0;
-static int autoexit;
 
 static AVDictionary *swr_opts_n;
 static AVDictionary *format_opts_n, *codec_opts_n;
 static int64_t request_count;
 static bool is_init_done = false;
 
-
-static bool is_audio_device_initialized = false;
 static SDL_AudioDeviceID audio_dev;
 static SDL_AudioSpec given_spec;
 static struct AudioParams audio_target;
+static timer_t audio_device_close_timer;
 
 static int cmp_audio_fmts(enum AVSampleFormat fmt1, int64_t channel_count1,
                    enum AVSampleFormat fmt2, int64_t channel_count2)
@@ -527,7 +528,7 @@ static void decoder_abort(Decoder *d, FrameQueue *fq)
     packet_queue_flush(d->queue);
 }
 
-static void stream_component_close(VideoState *is, int stream_index)
+static void stream_component_close(TrackState *is, int stream_index)
 {
     AVFormatContext *ic = is->ic;
     AVCodecParameters *codecpar;
@@ -540,7 +541,8 @@ static void stream_component_close(VideoState *is, int stream_index)
     case AVMEDIA_TYPE_AUDIO:
             decoder_abort(&is->audio_decoder, &is->sampq);
             decoder_destroy(&is->audio_decoder);
-            SDL_PauseAudioDevice(audio_dev, 1);//Pause while we wait for next file
+            SDL_CloseAudioDevice(audio_dev);
+            audio_dev = 0;
             swr_free(&is->swr_ctx);
             av_freep(&is->audio_buf1);
             is->audio_buf1_size = 0;
@@ -569,7 +571,7 @@ static void stream_component_close(VideoState *is, int stream_index)
     }
 }
 
-static void stream_close(VideoState *is)
+static void stream_close(TrackState *is)
 {
     /* XXX: use a special url_shutdown call to abort parse cleanly */
     is->abort_request = 1;
@@ -583,6 +585,7 @@ static void stream_close(VideoState *is)
 
     packet_queue_destroy(&is->audio_queue);
     avfilter_graph_free(&is->agraph);
+    av_channel_layout_uninit(&is->channel_layout);
 
     /* free all pictures */
     frame_queue_destroy(&is->sampq);
@@ -592,7 +595,7 @@ static void stream_close(VideoState *is)
     av_free(is);
 }
 
-static void clean_video_state(VideoState *is) {
+static void clean_video_state(TrackState *is) {
     if (is) {
         stream_close(is);
     }
@@ -606,7 +609,7 @@ static void clean_video_state(VideoState *is) {
     av_freep(&input_filename);
 }
 
-static void do_exit(VideoState *is)
+static void do_exit(TrackState *is)
 {
 
 
@@ -615,7 +618,7 @@ static void do_exit(VideoState *is)
 av_freep(&vfilters_list);*/
 
     clean_video_state(is);
-    last_is = NULL;
+    current_track = NULL;
     //avformat_network_deinit();
     SDL_Quit();
     av_log(NULL, AV_LOG_QUIET, "%s", "");
@@ -675,7 +678,7 @@ static void sync_clock_to_slave(Clock *c, Clock *slave)
         set_clock(c, slave_clock, slave->serial);
 }
 
-static int get_master_sync_type(const VideoState *is) {
+static int get_master_sync_type(const TrackState *is) {
     if (is->av_sync_type == AV_SYNC_AUDIO_MASTER) {
         if (is->audio_st)
             return AV_SYNC_AUDIO_MASTER;
@@ -691,7 +694,7 @@ static int get_master_sync_type(const VideoState *is) {
 }
 
 /* get the current master clock value */
-static double get_master_clock(VideoState *is)
+static double get_master_clock(TrackState *is)
 {
     double val;
 
@@ -707,7 +710,7 @@ static double get_master_clock(VideoState *is)
 }
 
 /* seek in the stream */
-static void stream_seek(VideoState *is, int64_t pos, int64_t rel, int by_bytes)
+static void stream_seek(TrackState *is, int64_t pos, int64_t rel, int by_bytes)
 {
     if (!is->seek_req) {
         is->seek_pos = pos;
@@ -720,47 +723,6 @@ static void stream_seek(VideoState *is, int64_t pos, int64_t rel, int by_bytes)
     }
 }
 
-/* pause or resume the video */
-static void stream_toggle_pause(VideoState *is)
-{
-    /*if (is->paused) {
-        is->frame_timer += av_gettime_relative() / 1000000.0 - is->vidclk.last_updated;
-        if (is->read_pause_return != AVERROR(ENOSYS)) {
-            is->vidclk.paused = 0;
-        }
-        set_clock(&is->vidclk, get_clock(&is->vidclk), is->vidclk.serial);
-    }*/
-
-    set_clock(&is->extclk, get_clock(&is->extclk), is->extclk.serial);
-    is->paused = is->audclk.paused = is->extclk.paused = !is->paused;
-}
-
-/*static void toggle_pause(VideoState *is)
-{
-    stream_toggle_pause(is);
-    is->step = 0;
-}*/
-
-/*static void toggle_mute(VideoState *is)
-{
-    is->muted = !is->muted;
-}*/
-
-/*static void update_volume(VideoState *is, int sign, double step)
-{
-    double volume_level = is->audio_volume ? (20 * log(is->audio_volume / (double)SDL_MIX_MAXVOLUME) / log(10)) : -1000.0;
-    int new_volume = lrint(SDL_MIX_MAXVOLUME * pow(10.0, (volume_level + sign * step) / 20.0));
-    sdl_volume = av_clip(is->audio_volume == new_volume ? (is->audio_volume + sign) : new_volume, 0, SDL_MIX_MAXVOLUME);
-    is->audio_volume = sdl_volume;
-}*/
-
-static void step_to_next_frame(VideoState *is)
-{
-    /* if the stream is paused unpause it, then step */
-    if (is->paused)
-        stream_toggle_pause(is);
-    is->step = 1;
-}
 
 static int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
                                  AVFilterContext *source_ctx, AVFilterContext *sink_ctx)
@@ -805,7 +767,7 @@ fail:
     return ret;
 }
 
-static int configure_audio_filters(VideoState *is, const char *afilters, int force_output_format)
+static int configure_audio_filters(TrackState *is, const char *afilters, int force_output_format)
 {
     static const enum AVSampleFormat sample_fmts[] = { AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE };
     int sample_rates[2] = { 0, -1 };
@@ -885,7 +847,7 @@ end:
 
 static int audio_thread(void *arg)
 {
-    VideoState *is = arg;
+    TrackState *is = arg;
     AVFrame *frame = av_frame_alloc();
     Frame *af;
     int last_serial = -1;
@@ -905,11 +867,12 @@ static int audio_thread(void *arg)
                 tb = (AVRational){1, frame->sample_rate};
 
                 reconfigure =
-                    cmp_audio_fmts(is->audio_filter_src.fmt, is->audio_filter_src.ch_layout.nb_channels,
-                                   frame->format, frame->ch_layout.nb_channels)    ||
-                    av_channel_layout_compare(&is->audio_filter_src.ch_layout, &frame->ch_layout) ||
-                    is->audio_filter_src.freq           != frame->sample_rate ||
-                    is->audio_decoder.pkt_serial               != last_serial;
+                    cmp_audio_fmts(is->audio_filter_src.fmt, is->audio_filter_src.ch_layout.nb_channels, frame->format, frame->ch_layout.nb_channels)
+                    || is->audio_filter_src.freq != frame->sample_rate
+                    || is->audio_decoder.pkt_serial != last_serial;
+                    av_channel_layout_compare(&is->audio_filter_src.ch_layout, &frame->ch_layout)
+                    || is->audio_filter_src.freq != frame->sample_rate
+                    || is->audio_decoder.pkt_serial != last_serial;
 
                 if (reconfigure) {
                     char buf1[1024], buf2[1024];
@@ -979,7 +942,7 @@ static int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name,
  * stored in is->audio_buf, with size in bytes given by the return
  * value.
  */
-static int audio_decode_frame(VideoState *is)
+static int audio_decode_frame(TrackState *is)
 {
     int data_size, resampled_data_size;
     av_unused double audio_clock0;
@@ -1092,7 +1055,7 @@ static int audio_decode_frame(VideoState *is)
 static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
 {
     //Global is used here because the opaque * gets de-allocated after first track
-    VideoState *is = last_is;
+    TrackState *is = current_track;
     int audio_size, len1;
 
     audio_callback_time = av_gettime_relative();
@@ -1133,7 +1096,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
 
 static int audio_open(void *opaque, AVChannelLayout *wanted_channel_layout, int wanted_sample_rate)
 {
-    if (is_audio_device_initialized) return given_spec.size;
+    //if (is_audio_device_initialized) return given_spec.size; always reconfigure audio to adapt to differing sample rates
 
     SDL_AudioSpec wanted_spec, spec;
     const char *env;
@@ -1166,7 +1129,8 @@ static int audio_open(void *opaque, AVChannelLayout *wanted_channel_layout, int 
     wanted_spec.samples = FFMAX(SDL_AUDIO_MIN_BUFFER_SIZE, 2 << av_log2(wanted_spec.freq / SDL_AUDIO_MAX_CALLBACKS_PER_SEC));
     wanted_spec.callback = sdl_audio_callback;
     wanted_spec.userdata = NULL;
-    while (!audio_dev && !(audio_dev = SDL_OpenAudioDevice(NULL, 0, &wanted_spec, &spec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE))) {
+
+    while (!(audio_dev = SDL_OpenAudioDevice(NULL, 0, &wanted_spec, &spec, SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE))) {
         av_log(NULL, AV_LOG_WARNING, "SDL_OpenAudio (%d channels, %d Hz): %s\n",
                wanted_spec.channels, wanted_spec.freq, SDL_GetError());
         wanted_spec.channels = next_nb_channels[FFMIN(7, wanted_spec.channels)];
@@ -1208,20 +1172,17 @@ static int audio_open(void *opaque, AVChannelLayout *wanted_channel_layout, int 
     }
 
     given_spec = spec;
-    is_audio_device_initialized = true;
     return given_spec.size;
 }
 
 /* open a given stream. Return 0 if OK */
-static int stream_component_open(VideoState *is, int stream_index)
+static int stream_component_open(TrackState *is, int stream_index)
 {
     AVFormatContext *ic = is->ic;
     AVCodecContext *avctx;
     const AVCodec *codec;
     const char *forced_codec_name = NULL;
     AVDictionary *opts = NULL;
-    int sample_rate;
-    AVChannelLayout ch_layout = { 0 };
     int ret = 0;
 
     if (stream_index < 0 || stream_index >= ic->nb_streams)
@@ -1292,14 +1253,14 @@ static int stream_component_open(VideoState *is, int stream_index)
             if ((ret = configure_audio_filters(is, afilters, 0)) < 0)
                 goto fail;
             sink = is->out_audio_filter;
-            sample_rate    = av_buffersink_get_sample_rate(sink);
-            ret = av_buffersink_get_ch_layout(sink, &ch_layout);
+            is->sample_rate    = av_buffersink_get_sample_rate(sink);
+            ret = av_buffersink_get_ch_layout(sink, &is->channel_layout);
             if (ret < 0)
                 goto fail;
         }
 
         /* prepare audio output */
-        if ((ret = audio_open(is, &ch_layout, sample_rate)) < 0)
+        if ((ret = audio_open(is, &is->channel_layout, is->sample_rate)) < 0)
             goto fail;
 
         is->audio_hw_buf_size = ret;
@@ -1336,7 +1297,6 @@ static int stream_component_open(VideoState *is, int stream_index)
 fail:
     avcodec_free_context(&avctx);
 out:
-    av_channel_layout_uninit(&ch_layout);
     av_dict_free(&opts);
 
     return ret;
@@ -1344,7 +1304,7 @@ out:
 
 static int decode_interrupt_cb(void *ctx)
 {
-    VideoState *is = ctx;
+    TrackState *is = ctx;
     return is->abort_request;
 }
 
@@ -1374,7 +1334,7 @@ static int is_realtime(AVFormatContext *s)
 /* this thread gets the stream from the disk or the network */
 static int read_thread(void *arg)
 {
-    VideoState *is = arg;
+    TrackState *is = arg;
     AVFormatContext *ic = NULL;
     int err, i, ret;
     int st_index[AVMEDIA_TYPE_NB];
@@ -1578,8 +1538,8 @@ static int read_thread(void *arg)
             }
             is->seek_req = 0;
             is->eof = 0;
-            if (is->paused)
-                step_to_next_frame(is);
+            /*if (is->paused)
+                step_to_next_frame(is);*/
         }
 
         /* if the queue are full, no need to read more */
@@ -1594,10 +1554,14 @@ static int read_thread(void *arg)
         }
         if (!is->paused &&
             (!is->audio_st || (is->audio_decoder.finished == is->audio_queue.serial && frame_queue_nb_remaining(&is->sampq) == 0))) {
-            if (loop != 1 && (!loop || --loop)) {
-                stream_seek(is, start_time != AV_NOPTS_VALUE ? start_time : 0, 0, 0);
+            if (loop != 0) {
 
-            } else if (autoexit) {
+                if (loop > 1) {
+                    loop--;
+                }
+                stream_seek(is, start_time != AV_NOPTS_VALUE ? start_time : 0, 0, 0);
+            }
+            else {
                 ret = AVERROR_EOF;
                 goto fail;
             }
@@ -1611,10 +1575,7 @@ static int read_thread(void *arg)
                 // This is first when ffmpeg is done reading packets, may be useful to prepare the next song
             }
             if (ic->pb && ic->pb->error) {
-                if (autoexit)
-                    goto fail;
-                else
-                    break;
+                goto fail;
             }
             SDL_LockMutex(wait_mutex);
             SDL_CondWaitTimeout(is->continue_read_thread, wait_mutex, 10);
@@ -1659,12 +1620,10 @@ static int read_thread(void *arg)
     return 0;
 }
 
-static VideoState *stream_open(const char *filename,
+static TrackState *stream_open(const char *filename,
                                const AVInputFormat *iformat)
 {
-    VideoState *is;
-
-    is = av_mallocz(sizeof(VideoState));
+    TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
         return NULL;
     is->last_audio_stream = is->audio_stream = -1;
@@ -1673,7 +1632,6 @@ static VideoState *stream_open(const char *filename,
         goto fail;
     is->iformat = iformat;
 
-    /* start video display */
     if (frame_queue_init(&is->sampq, &is->audio_queue, SAMPLE_QUEUE_SIZE, 1) < 0)
         goto fail;
 
@@ -1688,10 +1646,7 @@ static VideoState *stream_open(const char *filename,
     init_clock(&is->audclk, &is->audio_queue.serial);
     init_clock(&is->extclk, &is->extclk.serial);
     is->audio_clock_serial = -1;
-    if (startup_volume < 0)
-        av_log(NULL, AV_LOG_WARNING, "-volume=%d < 0, setting to 0\n", startup_volume);
-    if (startup_volume > 100)
-        av_log(NULL, AV_LOG_WARNING, "-volume=%d > 100, setting to 100\n", startup_volume);
+
     startup_volume = av_clip(startup_volume, 0, 100);
     sdl_volume = av_clip(SDL_MIX_MAXVOLUME * startup_volume / 100, 0, SDL_MIX_MAXVOLUME);
     is->audio_volume = sdl_volume;
@@ -1753,7 +1708,6 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
 
     startup_volume = initial_volume;
     loop = loop_count;
-    autoexit = 1;
 
     /* Try to work around an occasional ALSA buffer underflow issue when the
      * period size is NPOT due to ALSA resampling by forcing the buffer size. */
@@ -1761,6 +1715,8 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
         SDL_setenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE","1", 1);
 
     SDL_SetHint(SDL_HINT_APP_NAME, app_name);
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, "app_name");
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "music");
     SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
 
@@ -1791,16 +1747,16 @@ void shutdown() {
         SDL_CloseAudioDevice(audio_dev);
         audio_dev = 0;
     }
-    is_audio_device_initialized = false;
+
     is_init_done = false;
     SDL_Quit();
 }
 
 void play_audio(const char *filename) {
 
-    if (last_is) {
-        clean_video_state(last_is);
-        last_is = NULL;
+    if (current_track) {
+        clean_video_state(current_track);
+        current_track = NULL;
     }
 
     av_freep(&input_filename);
@@ -1814,9 +1770,9 @@ void play_audio(const char *filename) {
         exit(1);
     }
 
-    last_is = stream_open(input_filename, file_iformat);
+    current_track = stream_open(input_filename, file_iformat);
 
-    if (!last_is) {
+    if (!current_track) {
         av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
         do_exit(NULL);
     }
@@ -1825,29 +1781,39 @@ void play_audio(const char *filename) {
 }
 
 void stop() {
-    if (!last_is) return;
+    if (!current_track) return;
 
-    clean_video_state(last_is);
-    last_is = NULL;
+    clean_video_state(current_track);
+    current_track = NULL;
 
     ++request_count;
 }
 
 void pause(const bool value) {
 
-    if (!last_is || value == last_is->paused) return;
+    if (!current_track || value == current_track->paused) return;
 
-    stream_toggle_pause(last_is);
-    last_is->step = 0;
+
+    if (value) {
+        SDL_PauseAudioDevice(audio_dev, 1);
+    }
+    else if (audio_dev) {
+        SDL_PauseAudioDevice(audio_dev, 0);
+    }
+
+
+    set_clock(&current_track->extclk, get_clock(&current_track->extclk), current_track->extclk.serial);
+    current_track->paused = current_track->audclk.paused = current_track->extclk.paused = !current_track->paused;
+    current_track->step = 0;
 
     ++request_count;
 }
 
 void seek(const double percentPos) {
-    if (!last_is || !last_is->ic) return;
+    if (!current_track || !current_track->ic) return;
 
     // Get the total duration of the media file
-    int64_t duration = last_is->ic->duration;
+    int64_t duration = current_track->ic->duration;
     if (duration == AV_NOPTS_VALUE) {
         // If duration is unknown, we can't seek by percentage
         return;
@@ -1859,26 +1825,26 @@ void seek(const double percentPos) {
     if (target_pos < 0) target_pos = 0;
     if (target_pos > duration) target_pos = duration;
 
-    stream_seek(last_is, target_pos, 0, 0);
+    stream_seek(current_track, target_pos, 0, 0);
 
     ++request_count;
 }
 
 void set_volume(const int volume) {
-    if (!last_is || volume > 100 || volume < 0 || volume == startup_volume) return;
+    if (!current_track || volume > 100 || volume < 0 || volume == startup_volume) return;
 
     startup_volume = volume;
     sdl_volume = av_clip(SDL_MIX_MAXVOLUME * volume / 100, 0, SDL_MIX_MAXVOLUME);
-    last_is->audio_volume = sdl_volume;
+    current_track->audio_volume = sdl_volume;
 
     ++request_count;
 }
 
 void mute(const bool value) {
 
-    if (!last_is || value == last_is->muted) return;
+    if (!current_track || value == current_track->muted) return;
 
-    last_is->muted = !last_is->muted;
+    current_track->muted = !current_track->muted;
 
     ++request_count;
 }

@@ -130,7 +130,7 @@ typedef struct Decoder {
     SDL_Thread *decoder_tid;
 } Decoder;
 
-typedef struct VideoState {
+typedef struct TrackState {
     SDL_Thread *read_tid;
     const AVInputFormat *iformat;
     int abort_request;
@@ -176,6 +176,9 @@ typedef struct VideoState {
     struct AudioParams audio_filter_src;
     struct SwrContext *swr_ctx;
 
+    AVChannelLayout channel_layout;
+    int sample_rate;
+
     //AVTXContext *rdft; ~553KD
     //av_tx_fn rdft_fn; ~553KD
     //int rdft_bits; ~553KD
@@ -193,9 +196,9 @@ typedef struct VideoState {
     int last_audio_stream;
 
     SDL_cond *continue_read_thread;
-} VideoState;
+} TrackState;
 
-static VideoState *last_is = NULL;
+static TrackState *current_track = NULL;
 
 typedef void (*NotifyOfError)(const char* message, int request);
 typedef void (*NotifyOfEndOfFile)();
