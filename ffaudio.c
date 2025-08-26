@@ -74,13 +74,11 @@ const int program_birth_year = 2025;
 #define FF_QUIT_EVENT    (SDL_USEREVENT + 2)
 
 /* options specified by the user */
-static const AVInputFormat *file_iformat;
-static const char *input_filename;
 static const char* wanted_stream_spec[AVMEDIA_TYPE_NB] = {0};
 static int seek_by_bytes = -1;
 static int startup_volume = 100;
 static int sdl_volume = 0;
-static int av_sync_type = AV_SYNC_AUDIO_MASTER;
+const static int av_sync_type = AV_SYNC_AUDIO_MASTER;
 static int64_t start_time = AV_NOPTS_VALUE;
 static int64_t duration = AV_NOPTS_VALUE;
 static int loop = 1;
@@ -606,7 +604,6 @@ static void clean_video_state(TrackState *is) {
     av_freep(&codec_opts_n);
 
     av_freep(&audio_codec_name);
-    av_freep(&input_filename);
 }
 
 static void do_exit(TrackState *is)
@@ -1620,8 +1617,7 @@ static int read_thread(void *arg)
     return 0;
 }
 
-static TrackState *stream_open(const char *filename,
-                               const AVInputFormat *iformat)
+static TrackState *stream_open(const char *filename)
 {
     TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
@@ -1630,7 +1626,7 @@ static TrackState *stream_open(const char *filename,
     is->filename = av_strdup(filename);
     if (!is->filename)
         goto fail;
-    is->iformat = iformat;
+    is->iformat = av_find_input_format(filename);
 
     if (frame_queue_init(&is->sampq, &is->audio_queue, SAMPLE_QUEUE_SIZE, 1) < 0)
         goto fail;
@@ -1759,18 +1755,8 @@ void play_audio(const char *filename) {
         current_track = NULL;
     }
 
-    av_freep(&input_filename);
-    input_filename = av_strdup(filename);
 
-    if (!input_filename) {
-        //show_usage();
-        av_log(NULL, AV_LOG_FATAL, "An input file must be specified\n");
-        av_log(NULL, AV_LOG_FATAL,
-               "Use -h to get full help or, even better, run 'man %s'\n", program_name);
-        exit(1);
-    }
-
-    current_track = stream_open(input_filename, file_iformat);
+    current_track = stream_open(filename);
 
     if (!current_track) {
         av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
