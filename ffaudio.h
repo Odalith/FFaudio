@@ -214,7 +214,7 @@ DLL_EXPORT void shutdown();
 
 DLL_EXPORT void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
 
-DLL_EXPORT void play_audio(const char *filename);
+DLL_EXPORT void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting);
 
 DLL_EXPORT void stop();
 

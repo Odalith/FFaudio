@@ -98,6 +98,7 @@ static AVDictionary *format_opts_n, *codec_opts_n;
 static int64_t request_count;
 static bool is_init_done = false;
 
+static bool is_audio_device_initialized = false;
 static SDL_AudioDeviceID audio_dev;
 static SDL_AudioSpec given_spec;
 static struct AudioParams audio_target;
@@ -539,7 +540,8 @@ static void stream_component_close(TrackState *is, int stream_index)
     case AVMEDIA_TYPE_AUDIO:
             decoder_abort(&is->audio_decoder, &is->sampq);
             decoder_destroy(&is->audio_decoder);
-            SDL_CloseAudioDevice(audio_dev);
+            //SDL_CloseAudioDevice(audio_dev);
+            SDL_PauseAudioDevice(audio_dev, 1);
             audio_dev = 0;
             swr_free(&is->swr_ctx);
             av_freep(&is->audio_buf1);
@@ -1093,7 +1095,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
 
 static int audio_open(void *opaque, AVChannelLayout *wanted_channel_layout, int wanted_sample_rate)
 {
-    //if (is_audio_device_initialized) return given_spec.size; always reconfigure audio to adapt to differing sample rates
+    if (is_audio_device_initialized) return given_spec.size;// always reconfigure audio to adapt to differing sample rates
 
     SDL_AudioSpec wanted_spec, spec;
     const char *env;
@@ -1169,6 +1171,7 @@ static int audio_open(void *opaque, AVChannelLayout *wanted_channel_layout, int 
     }
 
     given_spec = spec;
+    is_audio_device_initialized = true;
     return given_spec.size;
 }
 
@@ -1257,6 +1260,7 @@ static int stream_component_open(TrackState *is, int stream_index)
         }
 
         /* prepare audio output */
+        av_log(NULL, AV_LOG_INFO, "%d\n", is->sample_rate);
         if ((ret = audio_open(is, &is->channel_layout, is->sample_rate)) < 0)
             goto fail;
 
@@ -1679,6 +1683,42 @@ static void add_to_filter_chain(const char *filter_name)
     }
 }
 
+static void clear_filter_chain() {
+    av_freep(&afilters);
+}
+
+
+/*static void timer_callback(union sigval sigval) {
+    if (!current_track->paused) {
+        return;
+    }
+
+    SDL_CloseAudioDevice(audio_dev);
+}
+
+int cancel_timer(timer_t tid) {
+    const struct itimerspec disarm = {0};
+    return timer_settime(tid, 0, &disarm, NULL);
+}
+
+int start_timer(timer_t tid) {
+    struct itimerspec its = {0};
+    its.it_value.tv_sec = 30;              // fire after 30 seconds
+    its.it_value.tv_nsec = 0;             // one-shot: it_interval = 0
+    timer_settime(tid, 0, &its, NULL);
+}
+
+
+static void re_create_audio_device(TrackState *is) {
+    if (audio_dev) {
+        return;
+    }
+
+    if (audio_open(&is, &is->channel_layout, is->sample_rate) < 0) {
+        av_log(NULL, AV_LOG_FATAL, "Failed to re-create audio device");
+    }
+}*/
+
 /* Called from the main */
 void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3)
 {
@@ -1711,9 +1751,11 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
         SDL_setenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE","1", 1);
 
     SDL_SetHint(SDL_HINT_APP_NAME, app_name);
-    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, "app_name");
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, app_name);
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "music");
+    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, app_name);
     SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
+    SDL_SetHint(SDL_HINT_AUDIO_RESAMPLING_MODE, "3");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
 
     if (SDL_Init (flags)) {
@@ -1726,14 +1768,16 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
     SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
     SDL_EventState(SDL_DISPLAYEVENT, SDL_IGNORE);
 
-    // Add loudness normalization filter
-    const char *loudnorm_filter = "loudnorm=I=-16:TP=-1.5:LRA=11";
-    const char *volume_filter = "volume=replaygain=track:replaygain_preamp=10.0";
-    const char *crossfeed_filter = "crossfeed=strength=0.3";
 
-    //add_to_filter_chain(loudnorm_filter);
-    add_to_filter_chain(volume_filter);
-    add_to_filter_chain(crossfeed_filter);
+    // Setup timer to close audio device on pause
+    /*struct sigevent sev = {0};
+    sev.sigev_notify = SIGEV_THREAD;      // run callback in a new thread
+    sev.sigev_notify_function = timer_callback;
+
+    if (timer_create(CLOCK_REALTIME, &sev, &audio_device_close_timer) == -1) {
+        perror("timer_create");
+        exit(1);
+    }*/
 
     is_init_done = true;
 }
@@ -1744,15 +1788,34 @@ void shutdown() {
         audio_dev = 0;
     }
 
+    is_audio_device_initialized = false;
     is_init_done = false;
     SDL_Quit();
 }
 
-void play_audio(const char *filename) {
+void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting) {
 
     if (current_track) {
         clean_video_state(current_track);
         current_track = NULL;
+    }
+
+    clear_filter_chain();
+    // Add loudness normalization filter. Ex: I=-16:TP=-1.5:LRA=11:measured_I=-8.9:measured_LRA=5.2:measured_TP=1.1:measured_thresh=-19.1:offset=-0.8
+    if (loudnorm_settings) {
+        const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", loudnorm_settings);
+        add_to_filter_chain(loudnorm_filter);
+        av_freep(&loudnorm_filter);
+    }
+
+    if (crossfeed_setting) {
+        const char *crossfeed_filter = av_asprintf("crossfeed=%s", crossfeed_setting);
+        add_to_filter_chain(crossfeed_filter);
+        av_freep(&crossfeed_filter);
+    }
+
+    if (!afilters) {
+        afilters = "";
     }
 
 

@@ -18,7 +18,7 @@ void eof_callback() {
     ++queue_pos;
     const char * song = queue[queue_pos];
     printf("Playing %s\n", song);
-    play_audio(song);
+    play_audio(song, NULL, NULL);
 }
 
 void restart_callback() {}
@@ -31,7 +31,7 @@ int main(void) {
 
     initialize("Nachtul", 50, 1, error_callback, eof_callback, restart_callback);
 
-    play_audio(queue[queue_pos]);
+    play_audio(queue[queue_pos], NULL, NULL);
 
     wait_loop();
 
