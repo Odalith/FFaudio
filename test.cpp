@@ -60,7 +60,12 @@ void eof_callback() {
 void restart_callback() {}
 
 int main(int argc, char **argv) {
-    fs::path root = (argc > 1) ? argv[1] : ".";
+    if (argc < 2) {
+        std::cerr << "Pass the media directory as an argument";
+        return 1;
+    }
+
+    const fs::path root =  argv[1];
 
     try {
         queue = get_regular_files(root);
@@ -70,7 +75,7 @@ int main(int argc, char **argv) {
     }
 
 
-    initialize("Nachtul", 50, 1, error_callback, eof_callback, restart_callback);
+    initialize("Nachtul", 50, 0, error_callback, eof_callback, restart_callback);
 
     play_audio(queue[queue_pos].c_str(), nullptr, nullptr);
 
