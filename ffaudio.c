@@ -81,7 +81,7 @@ static int sdl_volume = 0;
 const static int av_sync_type = AV_SYNC_AUDIO_MASTER;
 static int64_t start_time = AV_NOPTS_VALUE;
 static int64_t duration = AV_NOPTS_VALUE;
-static int loop = 1;
+static int loop = 0;
 static int infinite_buffer = -1;
 static const char *audio_codec_name;
 static char *afilters = NULL;
@@ -1557,7 +1557,7 @@ static int read_thread(void *arg)
             (!is->audio_st || (is->audio_decoder.finished == is->audio_queue.serial && frame_queue_nb_remaining(&is->sampq) == 0))) {
             if (loop != 0) {
 
-                if (loop > 1) {
+                if (loop >= 1) {
                     loop--;
                 }
                 stream_seek(is, start_time != AV_NOPTS_VALUE ? start_time : 0, 0, 0);
