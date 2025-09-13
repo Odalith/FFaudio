@@ -1814,10 +1814,6 @@ void play_audio(const char *filename, const char * loudnorm_settings, const char
         av_freep(&crossfeed_filter);
     }
 
-    if (!afilters) {
-        afilters = "";
-    }
-
 
     current_track = stream_open(filename);
 
