@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.30)
-project(ffAudio C)
+project(ffAudio LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 #[[set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize=leak -g -O1")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fsanitize=leak")]]
 
@@ -31,7 +33,7 @@ set_target_properties(ffaudio PROPERTIES
 )
 
 # Build the test executable
-add_executable(test_ffaudio test.c)
+add_executable(test_ffaudio test.cpp)
 
 find_library(AVFORMAT_LIB avformat)
 find_library(AVCODEC_LIB avcodec)

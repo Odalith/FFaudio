@@ -209,6 +209,10 @@ static NotifyOfError notify_of_error_callback = NULL;
 static NotifyOfEndOfFile notify_of_eof_callback = NULL;
 static NotifyOfRestart notify_of_restart_callback = NULL;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 
 DLL_EXPORT void shutdown();
 
@@ -229,6 +233,10 @@ DLL_EXPORT void mute(const bool value);
 DLL_EXPORT void set_loop_count(const int loop_count);
 
 DLL_EXPORT void wait_loop();
+
+#ifdef __cplusplus
+} // extern "C"
+#endif
 
 
 #endif //FFAUDIO_H
