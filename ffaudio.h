@@ -132,7 +132,6 @@ typedef struct Decoder {
 
 typedef struct TrackState {
     SDL_Thread *read_tid;
-    const AVInputFormat *iformat;
     int abort_request;
     int paused;
     int last_paused;
@@ -154,13 +153,10 @@ typedef struct TrackState {
     int audio_stream;
 
     int av_sync_type;
-
     double audio_clock;
     int audio_clock_serial;
-    double audio_diff_cum; /* used for AV difference average computation */
-    double audio_diff_avg_coef;
-    double audio_diff_threshold;
-    int audio_diff_avg_count;
+
+
     AVStream *audio_st;
     PacketQueue audio_queue;
     int audio_hw_buf_size;
@@ -172,12 +168,17 @@ typedef struct TrackState {
     int audio_write_buf_size;
     int audio_volume;
     int muted;
-    struct AudioParams audio_src;
-    struct AudioParams audio_filter_src;
+
     struct SwrContext *swr_ctx;
+    struct AudioParams audio_target; /*This is set to the global 'audio_target' not sure if this is needed*/
+    struct AudioParams audio_filter_src; /*This is the parameters of the current file */
 
     AVChannelLayout channel_layout;
-    int sample_rate;
+
+
+    AVFilterContext *in_audio_filter;   // the first filter in the audio chain
+    AVFilterContext *out_audio_filter;  // the last filter in the audio chain
+    AVFilterGraph *agraph;              // audio filter graph
 
     //AVTXContext *rdft; ~553KD
     //av_tx_fn rdft_fn; ~553KD
@@ -186,12 +187,8 @@ typedef struct TrackState {
     //AVComplexFloat *rdft_data; ~553KD
 
     int eof;
-    char *filename;
-    int step;
-
-    AVFilterContext *in_audio_filter;   // the first filter in the audio chain
-    AVFilterContext *out_audio_filter;  // the last filter in the audio chain
-    AVFilterGraph *agraph;              // audio filter graph
+    const char *filename;
+    const AVInputFormat *iformat;
 
     int last_audio_stream;
 
@@ -213,10 +210,11 @@ static NotifyOfRestart notify_of_restart_callback = NULL;
 extern "C" {
 #endif
 
+enum sample_rates {LOW = 44100, MEDIUM = 48000, HIGH = 96000, ULTRA = 192000};
 
 DLL_EXPORT void shutdown();
 
-DLL_EXPORT void initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
+DLL_EXPORT void initialize(const char* app_name, const int initial_volume, const int loop_count, const int wanted_sample_rate, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
 
 DLL_EXPORT void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting);
 

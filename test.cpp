@@ -6,6 +6,8 @@
 #include <vector>
 #include <string>
 #include <iostream>
+#include <algorithm>
+#include <random>
 #include "ffaudio.h"
 
 namespace fs = std::filesystem;
@@ -53,7 +55,8 @@ void eof_callback() {
         return;
     }
     const auto song = queue[queue_pos].string();
-    std::cout << "Playing" << song << std::endl;
+    std::cout << "Playing " << song << std::endl;
+
     play_audio(song.c_str(), nullptr, nullptr);
 }
 
@@ -74,8 +77,14 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Shuffle queue
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::shuffle(queue.begin(), queue.end(), gen);
 
-    initialize("Nachtul", 50, 0, error_callback, eof_callback, restart_callback);
+
+
+    initialize("Nachtul", 50, 0, MEDIUM, error_callback, eof_callback, restart_callback);
 
     play_audio(queue[queue_pos].c_str(), nullptr, nullptr);
 
