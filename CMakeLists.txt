@@ -4,8 +4,23 @@ project(ffAudio LANGUAGES C CXX)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-#[[set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fsanitize=address -fsanitize=leak -g -O1")
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fsanitize=address -fsanitize=leak")]]
+
+if (CMAKE_BUILD_TYPE MATCHES "Debug")
+    # Common sanitizer flags (address, undefined behavior, and leak)
+    set(SANITIZE_FLAGS "-fsanitize=address,undefined,leak")
+
+    # Compile options for all languages (C and C++)
+    add_compile_options(
+            -g
+            -O1
+            -fno-omit-frame-pointer
+            ${SANITIZE_FLAGS}
+    )
+
+    # Linker options
+    add_link_options(${SANITIZE_FLAGS})
+endif()
+
 
 
 find_package(SDL2 REQUIRED)
@@ -22,7 +37,17 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 
 add_library(ffaudio SHARED ffaudio.c ffaudio.h
         cmdutils.c
-        cmdutils.h)
+        cmdutils.h
+        packet_queue_utils.c
+        packet_queue_utils.h
+        clock_utils.c
+        clock_utils.h
+        frame_queue_utils.c
+        frame_queue_utils.h
+        decoder_utils.c
+        decoder_utils.h
+        filtergraph.c
+        filtergraph.h)
 
 target_link_libraries(ffaudio PUBLIC SDL2 PkgConfig::FFMPEG)
 

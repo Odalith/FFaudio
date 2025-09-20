@@ -40,9 +40,37 @@
 #include <libavutil/fifo.h>
 #include <SDL2/SDL_mutex.h>
 #include <SDL2/SDL_thread.h>
+#include <math.h>
+#include <limits.h>
+#include <stdint.h>
 
+#include "libavutil/avstring.h"        // Internal: String utilities
+#include "libavutil/channel_layout.h"
+#include "libavutil/mathematics.h"
+#include "libavutil/mem.h"             // Internal: Memory management utilities
+#include "libavutil/dict.h"
+#include "libavutil/fifo.h"            // Internal: FIFO buffer implementation
+#include "libavutil/samplefmt.h"
+#include "libavutil/time.h"            // Internal: Time utilities
+#include "libavutil/bprint.h"          // Internal: Binary print utilities
+#include "libavformat/avformat.h"
+//#include "libavdevice/avdevice.h"
+#include <time.h>
+#include <bits/time.h>
 
-#include "cmdutils.h"
+#include "libswscale/swscale.h"
+#include "libavutil/opt.h"
+#include "libswresample/swresample.h"
+#include "libavcodec/avcodec.h"
+
+#include "libavfilter/avfilter.h"
+#include "libavfilter/buffersink.h"
+#include "libavfilter/buffersrc.h"
+
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_thread.h>
+
+#include "libavutil/avassert.h"
 
 typedef struct MyAVPacketList {
     AVPacket *pkt;
@@ -195,7 +223,44 @@ typedef struct TrackState {
     SDL_cond *continue_read_thread;
 } TrackState;
 
-static TrackState *current_track = NULL;
+
+typedef struct AudioPlayer {
+    int startup_volume;                // default 100
+    int sdl_volume;                    // default 0
+    int filter_nbthreads;              // default 0
+    int64_t audio_callback_time;       // default 0
+    char *audio_codec_name;            // default NULL
+    char *audio_filters;               // default NULL
+    const char* wanted_stream_spec[AVMEDIA_TYPE_NB]; // default [NULL]
+    int seek_by_bytes;                 // default -1
+    int64_t start_time;                // AV_NOPTS_VALUE//Todo should be part of TrackState
+    int64_t duration;                  // AV_NOPTS_VALUE//Todo should be part of TrackState
+    int loop;                          // default 0//Todo should be part of TrackState
+    int infinite_buffer;               // default -1
+    int find_stream_info;              // default 1
+
+    TrackState *current_track;         // default NULL
+    const char *current_file;          // default NULL
+    AVDictionary *format_opts_n;       // default NULL
+    AVDictionary *codec_opts_n;        // default NULL
+    AVDictionary *swr_opts_n;          // default NULL
+
+    int64_t request_count;             // default 0
+    bool is_init_done;                 // default false
+
+    bool is_audio_device_initialized;  // default false
+    SDL_AudioDeviceID device_id;       // default 0
+    SDL_AudioSpec given_spec;          // default NULL
+    SDL_AudioFormat given_format;      // AUDIO_S16SYS
+    AudioParams *audio_target;         // default malloc
+    //timer_t audio_device_close_timer;
+
+    // Likely to be removed
+    int fast;                          // default 0
+    int genpts;                        // default 0
+} AudioPlayer;
+
+
 
 typedef void (*NotifyOfError)(const char* message, int request);
 typedef void (*NotifyOfEndOfFile)();
@@ -205,6 +270,7 @@ typedef void (*NotifyOfRestart)();
 static NotifyOfError notify_of_error_callback = NULL;
 static NotifyOfEndOfFile notify_of_eof_callback = NULL;
 static NotifyOfRestart notify_of_restart_callback = NULL;
+
 
 #ifdef __cplusplus
 extern "C" {

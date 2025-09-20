@@ -8,11 +8,19 @@
 #include <iostream>
 #include <algorithm>
 #include <random>
+#include <chrono>
+#include <thread>
+#include <functional>
 #include "ffaudio.h"
 
 namespace fs = std::filesystem;
 
 static std::vector<fs::path> queue;
+int queue_pos = 0;
+bool song_skipped = false;
+bool stop_timer = false;
+constexpr int PLAY_COUNT = -1;
+constexpr int SKIP_AFTER_SECONDS = -1;
 
 std::vector<fs::path> get_regular_files(const fs::path& root) {
     std::vector<fs::path> out;
@@ -40,24 +48,50 @@ std::vector<fs::path> get_regular_files(const fs::path& root) {
     return out;
 }
 
+std::thread schedule_after(std::chrono::milliseconds delay, std::function<void()> fn) {
+    return std::thread([delay, fn = std::move(fn)] {
+        if (stop_timer) {
+            stop_timer = false;
+            return;
+        }
 
-int queue_pos = 0;
+        std::this_thread::sleep_for(delay);
+        song_skipped = true;
+        fn();
+    });
+}
+
+
 
 void error_callback(const char* message, int request) {
-    printf("Error\n");
+    std::cout <<"Error" << std::endl;
+}
+
+void play_next() {
+    if (queue_pos >= queue.size() -1 || (PLAY_COUNT > 0 && queue_pos >= PLAY_COUNT -1)) {
+        std::cout << "Done" << std::endl;
+        exit(0);
+    }
+
+    const auto song = queue[queue_pos].string();
+    std::cout << (queue_pos + 1) << " Playing " << song << std::endl;
+
+    play_audio(song.c_str(), nullptr, nullptr);
+    ++queue_pos;
+
+    if constexpr (SKIP_AFTER_SECONDS > 0) {
+        auto t = schedule_after(std::chrono::seconds(SKIP_AFTER_SECONDS), play_next);
+        t.detach();
+    }
 }
 
 void eof_callback() {
-    printf("EOF\n");
-    ++queue_pos;
-    if (queue_pos >= queue.size()) {
-        std::cout << "Done" << std::endl;
-        return;
-    }
-    const auto song = queue[queue_pos].string();
-    std::cout << "Playing " << song << std::endl;
+    std::cout <<"EOF" << std::endl;
 
-    play_audio(song.c_str(), nullptr, nullptr);
+    if (!song_skipped) {
+        play_next();
+        song_skipped = false;
+    }
 }
 
 void restart_callback() {}
@@ -83,10 +117,10 @@ int main(int argc, char **argv) {
     std::shuffle(queue.begin(), queue.end(), gen);
 
 
-
+    // Setup and play audio
     initialize("Nachtul", 50, 0, MEDIUM, error_callback, eof_callback, restart_callback);
 
-    play_audio(queue[queue_pos].c_str(), nullptr, nullptr);
+    play_next();
 
     wait_loop();
 
