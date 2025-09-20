@@ -198,7 +198,7 @@ typedef struct TrackState {
     int muted;
 
     struct SwrContext *swr_ctx;
-    struct AudioParams audio_target; /*This is set to the global 'audio_target' not sure if this is needed*/
+    //struct AudioParams audio_target; /*This is set to the global 'audio_target' not sure if this is needed*/
     struct AudioParams audio_filter_src; /*This is the parameters of the current file */
 
     AVChannelLayout channel_layout;

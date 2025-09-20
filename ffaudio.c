@@ -355,13 +355,15 @@ static int stream_component_open(TrackState *is, int stream_index)
     if (ret < 0) goto fail;
     is->audio_filter_src.fmt = avctx->sample_fmt;
 
-    /* this is useful only when configure_audio_filters() is called with force_output_format == false*/
-    if ((ret = configure_audio_filters(audio_player, is, audio_player->audio_filters, true)) < 0) goto fail;
+    /* this is useful only when configure_audio_filters() is called with force_output_format == false
+     * configure_audio_filters() is run in audio_thread() on the first frame so this is only needed for file-first audio configuration
+     */
+    /*if ((ret = configure_audio_filters(audio_player, is, audio_player->audio_filters, true)) < 0) goto fail;
 
     const AVFilterContext * sink = is->out_audio_filter;
 
     ret = av_buffersink_get_ch_layout(sink, &is->channel_layout);
-    if (ret < 0) goto fail;
+    if (ret < 0) goto fail;*/
 
     //prepare audio output Todo make option to (A) create new audio device based on this stream (B) create new audio device for every new stream
     /*av_log(NULL, AV_LOG_INFO, "%d\n", is->sample_rate);
@@ -369,7 +371,7 @@ static int stream_component_open(TrackState *is, int stream_index)
         goto fail;*/
 
     is->audio_hw_buf_size = ret;
-    is->audio_target = *audio_player->audio_target;
+    //is->audio_target = *audio_player->audio_target; 34HSD
     is->audio_buf_size  = 0;
     is->audio_buf_index = 0;
 
@@ -770,9 +772,9 @@ static int audio_decode_frame(TrackState *is)
 
     wanted_nb_samples = frame->frame->nb_samples;
 
-    if (frame->frame->format != is->audio_target.fmt
-        || av_channel_layout_compare(&frame->frame->ch_layout, &is->audio_target.ch_layout)
-        || frame->frame->sample_rate   != is->audio_target.freq
+    if (frame->frame->format != audio_player->audio_target->fmt
+        || av_channel_layout_compare(&frame->frame->ch_layout, &audio_player->audio_target->ch_layout)
+        || frame->frame->sample_rate   != audio_player->audio_target->freq
         || (wanted_nb_samples != frame->frame->nb_samples && !is->swr_ctx)) {
         swr_free(&is->swr_ctx);
 
@@ -790,10 +792,10 @@ static int audio_decode_frame(TrackState *is)
             swr_free(&is->swr_ctx);
             return -1;
         }
-        if (av_channel_layout_copy(&is->audio_target.ch_layout, &frame->frame->ch_layout) < 0)
+        if (av_channel_layout_copy(&audio_player->audio_target->ch_layout, &frame->frame->ch_layout) < 0)
             return -1;
-        is->audio_target.freq = frame->frame->sample_rate;
-        is->audio_target.fmt = frame->frame->format;
+        audio_player->audio_target->freq = frame->frame->sample_rate;
+        audio_player->audio_target->fmt = frame->frame->format;
     }
 
     if (is->swr_ctx) {
