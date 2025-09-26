@@ -39,7 +39,6 @@ const int program_birth_year = 2025;
 #define REFRESH_RATE 0.01
 #define MAX_QUEUE_SIZE (15 * 1024 * 1024)
 #define MIN_FRAMES 25
-#define FF_QUIT_EVENT    (SDL_USEREVENT + 2)
 
 static AudioPlayer *audio_player = NULL;
 
@@ -97,10 +96,13 @@ static void stream_component_close(TrackState *is, int stream_index)
     }
 }
 
-static void stream_close(TrackState *is)
+static void track_state_clear(TrackState *is)
 {
     /* XXX: use a special url_shutdown call to abort parse cleanly */
-    is->abort_request = 1;
+    if (!is->abort_request) {
+        is->abort_request = true;
+    }
+
     SDL_WaitThread(is->read_tid, NULL);
 
     /* close each stream */
@@ -121,9 +123,10 @@ static void stream_close(TrackState *is)
     av_free(is);
 }
 
-static void clean_video_state(TrackState *is) {
+static void cleanup_for_next_track(TrackState *is) {
     if (is) {
-        stream_close(is);
+        track_state_clear(is);
+        is = NULL;
     }
 
     av_dict_free(&audio_player->swr_opts_n);
@@ -134,16 +137,29 @@ static void clean_video_state(TrackState *is) {
     free(audio_player->current_file);
 }
 
-static void do_exit(TrackState *is)
+static void abort_track() {
+    if (audio_player->current_track) {
+        audio_player->is_eof_from_skip = true;
+        audio_player->current_track->abort_request = true;
+
+        SDL_LockMutex(audio_player->abort_mutex);
+        while (audio_player->current_track) {
+            SDL_CondWait(audio_player->abort_cond, audio_player->abort_mutex);
+        }
+        SDL_UnlockMutex(audio_player->abort_mutex);
+    }
+}
+
+/*static void do_exit(TrackState *is)
 {
 
-    clean_video_state(is);
+    abort_track();
     audio_player->current_track = NULL;
     //Todo avformat_network_deinit();
     SDL_Quit();
     av_log(NULL, AV_LOG_QUIET, "%s", "");
     exit(0);
-}
+}*/
 
 static void sigterm_handler(int sig)
 {
@@ -237,7 +253,7 @@ static int audio_thread(void *arg)
                     char buf1[1024], buf2[1024];
                     av_channel_layout_describe(&is->audio_filter_src.ch_layout, buf1, sizeof(buf1));
                     av_channel_layout_describe(&frame->ch_layout, buf2, sizeof(buf2));
-                    av_log(NULL, AV_LOG_INFO,
+                    av_log(NULL, AV_LOG_DEBUG,
                            "Audio frame changed from rate:%d ch:%d fmt:%s layout:%s serial:%d to rate:%d ch:%d fmt:%s layout:%s serial:%d\n",
                            is->audio_filter_src.freq, is->audio_filter_src.ch_layout.nb_channels, av_get_sample_fmt_name(is->audio_filter_src.fmt), buf1, last_serial,
                            frame->sample_rate, frame->ch_layout.nb_channels, av_get_sample_fmt_name(frame->format), buf2, is->audio_decoder.pkt_serial);
@@ -673,22 +689,30 @@ static int read_thread(void *arg)
 
     ret = 0;
  fail:
-    if (ic && !is->ic)
+    if (ic && !is->ic) {
         avformat_close_input(&ic);
+    }
 
     av_packet_free(&pkt);
-    if (ret != 0) {
+    /*if (ret != 0) {
         SDL_Event event;
+        SDL_memset(&event, 0, sizeof(event));
 
-        event.type = FF_QUIT_EVENT;
+        event.type = audio_player->eof_event;
         event.user.data1 = is;
         SDL_PushEvent(&event);
-    }
+    }*/
     SDL_DestroyMutex(wait_mutex);
 
-    if (notify_of_eof_callback) {
-        notify_of_eof_callback();
-    }
+
+    SDL_Event event;
+    SDL_memset(&event, 0, sizeof(event));
+
+    event.type = audio_player->eof_event;
+    event.user.data1 = is;
+    SDL_PushEvent(&event);
+
+
     return 0;
 }
 
@@ -730,7 +754,13 @@ static TrackState *stream_open(const char *filename)
     if (!is->read_tid) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateThread(): %s\n", SDL_GetError());
 fail:
-        stream_close(is);
+        //cleanup_for_next_track(audio_player->current_track);
+        /*SDL_Event event;
+        SDL_memset(&event, 0, sizeof(event));
+
+        event.type = audio_player->eof_event;
+        event.user.data1 = is;
+        SDL_PushEvent(&event); Todo send event here?*/
         return NULL;
     }
     return is;
@@ -1035,6 +1065,38 @@ static void re_create_audio_device(TrackState *is) {
     }
 }*/
 
+static int event_thread(void*) {
+    SDL_AtomicSet(&audio_player->event_thread_running, true);
+
+    SDL_Event e;
+    while (SDL_AtomicGet(&audio_player->event_thread_running)) {
+        while (SDL_PollEvent(&e)) {
+            if (e.type == audio_player->eof_event && audio_player->current_track) {
+
+                cleanup_for_next_track(audio_player->current_track);
+                audio_player->current_track = NULL;
+
+                if (notify_of_eof_callback) {
+                    notify_of_eof_callback(audio_player->is_eof_from_skip);
+                }
+
+                if (audio_player->is_eof_from_skip) {
+                    audio_player->is_eof_from_skip = false;
+                }
+
+                SDL_LockMutex(audio_player->abort_mutex);
+                SDL_CondSignal(audio_player->abort_cond);
+                SDL_UnlockMutex(audio_player->abort_mutex);
+            }
+        }
+
+        // Sleep a bit to avoid busy-waiting; tune as needed.
+        SDL_Delay(1);
+    }
+
+    return 0;
+}
+
 void app_state_init(AudioPlayer *s) {
     if (!s) return;
 
@@ -1065,10 +1127,19 @@ void app_state_init(AudioPlayer *s) {
     s->codec_opts_n = NULL;
     s->swr_opts_n = NULL;
 
-    s->request_count = 0;
-    s->is_init_done = false;
 
+    SDL_AtomicSet(&s->event_thread_running, false);
+    s->event_thread = NULL;
+    s->eof_event = SDL_RegisterEvents(1);
+
+    s->abort_mutex = SDL_CreateMutex();
+    s->abort_cond = SDL_CreateCond();
+
+    s->request_count = 0;
+    s->is_eof_from_skip = false;
+    s->is_init_done = false;
     s->is_audio_device_initialized = false;
+
     s->device_id = (SDL_AudioDeviceID)0;
     //s->given_spec = NULL;
     s->given_format = AUDIO_S16SYS;
@@ -1120,8 +1191,16 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
     SDL_SetHint(SDL_HINT_AUDIO_RESAMPLING_MODE, "3");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
 
-    if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER)) {
+    if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_EVENTS)) {
         av_log(NULL, AV_LOG_FATAL, "Could not initialize SDL - %s\n", SDL_GetError());
+        SDL_Quit();
+        return;
+    }
+
+    audio_player->eof_event = SDL_RegisterEvents(1);
+    if (audio_player->eof_event  == (Uint32)-1) {
+        SDL_Log("Failed to register custom events");
+        SDL_Quit();
         return;
     }
 
@@ -1129,8 +1208,19 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
     SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
     SDL_EventState(SDL_DISPLAYEVENT, SDL_IGNORE);
 
+    // Start the event thread
+    audio_player->event_thread = SDL_CreateThread(event_thread, "Event_Thread", NULL);
+    if (!audio_player->event_thread) {
+        SDL_Log("SDL_CreateThread Error: %s", SDL_GetError());
+        SDL_Quit();
+        return;
+    }
+
     /* prepare audio output */
-    if (audio_open(wanted_sample_rate, 2) < 0) return;//Todo Hard coded to 2 channels for now
+    if (audio_open(wanted_sample_rate, 2) < 0) {//Todo Hard coded to 2 channels for now
+        SDL_Quit();
+        return;
+    }
 
 
     // Setup timer to close audio device on pause
@@ -1149,6 +1239,8 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
 void shutdown() {
     if (!audio_player) return;
 
+    abort_track();
+
     if (audio_player->device_id != 0) {
         SDL_CloseAudioDevice(audio_player->device_id);
         audio_player->device_id = 0;
@@ -1156,16 +1248,16 @@ void shutdown() {
 
     audio_player->is_audio_device_initialized = false;
     audio_player->is_init_done = false;
+    SDL_WaitThread(audio_player->event_thread, NULL);
+    SDL_DestroyMutex(audio_player->abort_mutex);
+    SDL_DestroyCond(audio_player->abort_cond);
     SDL_Quit();
 }
 
 void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting) {
-    if (!audio_player) return;
+    if (!audio_player || !audio_player->is_init_done) return;
 
-    if (audio_player->current_track) {
-        clean_video_state(audio_player->current_track);
-        audio_player->current_track = NULL;
-    }
+    abort_track();
 
     clear_filter_chain(audio_player);
     // Add loudness normalization filter. Ex: I=-16:TP=-1.5:LRA=11:measured_I=-8.9:measured_LRA=5.2:measured_TP=1.1:measured_thresh=-19.1:offset=-0.8
@@ -1184,23 +1276,20 @@ void play_audio(const char *filename, const char * loudnorm_settings, const char
     audio_player->current_track = stream_open(filename);
 
     if (!audio_player->current_track) {
-        av_log(NULL, AV_LOG_FATAL, "Failed to initialize VideoState!\n");
-        do_exit(NULL);
+        av_log(NULL, AV_LOG_FATAL, "Failed to initialize TrackState!\n");
+        //do_exit(NULL);
     }
 
     ++audio_player->request_count;
 }
 
 void stop() {
-    if (!audio_player->current_track) return;
-
-    clean_video_state(audio_player->current_track);
-    audio_player->current_track = NULL;
+    abort_track();
 
     ++audio_player->request_count;
 }
 
-void pause(const bool value) {
+void pause_audio(const bool value) {
 
     if (!audio_player->current_track || value == audio_player->current_track->paused) return;
 
@@ -1268,17 +1357,3 @@ void set_loop_count(const int loop_count) {
 
 
 
-/*packet_queue_init
-Starting thread: read_tid
-packet queue start
-Starting thread: decoder_tid
-EOF
-Cleaning thread: read_tid
-packet_queue_abort
-frame_queue_peek_readable: aborts
-Cleaning thread: decoder_tid
-packet_queue_destroy
-packet_queue_init
-Starting read thread: read_tid
-packet queue start
-Starting read thread: decoder_tid*/

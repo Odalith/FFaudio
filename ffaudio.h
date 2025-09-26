@@ -20,6 +20,7 @@
 
 #ifndef FFAUDIO_H
 #define FFAUDIO_H
+#include <stdatomic.h>
 
 #ifdef _WIN32
     #define DLL_EXPORT __declspec(dllexport)
@@ -239,16 +240,25 @@ typedef struct AudioPlayer {
     int infinite_buffer;               // default -1
     int find_stream_info;              // default 1
 
+
     TrackState *current_track;         // default NULL
     const char *current_file;          // default NULL
     AVDictionary *format_opts_n;       // default NULL
     AVDictionary *codec_opts_n;        // default NULL
     AVDictionary *swr_opts_n;          // default NULL
 
+    SDL_Thread *event_thread;          // default NULL
+    SDL_atomic_t event_thread_running; // default false
+    Uint32 eof_event;                  // default SDL_RegisterEvents
+
+    SDL_mutex *abort_mutex;            // default SDL_CreateMutex
+    SDL_cond *abort_cond;              // default SDL_CreateCond
+
     int64_t request_count;             // default 0
     bool is_init_done;                 // default false
-
+    bool is_eof_from_skip;             // default false
     bool is_audio_device_initialized;  // default false
+
     SDL_AudioDeviceID device_id;       // default 0
     SDL_AudioSpec given_spec;          // default NULL
     SDL_AudioFormat given_format;      // AUDIO_S16SYS
@@ -263,7 +273,7 @@ typedef struct AudioPlayer {
 
 
 typedef void (*NotifyOfError)(const char* message, int request);
-typedef void (*NotifyOfEndOfFile)();
+typedef void (*NotifyOfEndOfFile)(bool is_eof_from_skip);
 typedef void (*NotifyOfRestart)();
 
 // Static variables to hold the callback functions
@@ -286,7 +296,7 @@ DLL_EXPORT void play_audio(const char *filename, const char * loudnorm_settings,
 
 DLL_EXPORT void stop();
 
-DLL_EXPORT void pause(const bool value);
+DLL_EXPORT void pause_audio(const bool value);
 
 DLL_EXPORT void seek(const double percentPos);
 
