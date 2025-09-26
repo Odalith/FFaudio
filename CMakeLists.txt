@@ -1,25 +1,17 @@
 cmake_minimum_required(VERSION 3.30)
-project(ffAudio LANGUAGES C CXX)
+project(ffAudio LANGUAGES C)
 
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD 17)
 
-if (CMAKE_BUILD_TYPE MATCHES "Debug")
-    # Common sanitizer flags (address, undefined behavior, and leak)
-    set(SANITIZE_FLAGS "-fsanitize=address,undefined,leak")
 
-    # Compile options for all languages (C and C++)
-    add_compile_options(
-            -g
-            -O1
-            -fno-omit-frame-pointer
-            ${SANITIZE_FLAGS}
-    )
+if(CMAKE_BUILD_TYPE MATCHES "Debug")
 
-    # Linker options
-    add_link_options(${SANITIZE_FLAGS})
+set(SAN_FLAGS -fsanitize=address)
+set(SAN_COMPILE_FLAGS -g -O1 -fno-omit-frame-pointer ${SAN_FLAGS})
+set(SAN_LINK_FLAGS ${SAN_FLAGS})
+
 endif()
+
 
 
 
@@ -49,6 +41,13 @@ add_library(ffaudio SHARED ffaudio.c ffaudio.h
         filtergraph.c
         filtergraph.h)
 
+if(CMAKE_BUILD_TYPE MATCHES "Debug")
+
+target_compile_options(ffaudio PRIVATE ${SAN_COMPILE_FLAGS})
+target_link_options(ffaudio PRIVATE ${SAN_LINK_FLAGS})
+
+endif()
+
 target_link_libraries(ffaudio PUBLIC SDL2 PkgConfig::FFMPEG)
 
 # Set properties for Windows DLL export
@@ -58,7 +57,7 @@ set_target_properties(ffaudio PROPERTIES
 )
 
 # Build the test executable
-add_executable(test_ffaudio test.cpp)
+add_executable(test_ffaudio test.c)
 
 find_library(AVFORMAT_LIB avformat)
 find_library(AVCODEC_LIB avcodec)
@@ -76,6 +75,13 @@ target_link_libraries(test_ffaudio
         ${AVUTIL_LIB}
         ${SWRESAMPLE_LIB}
 )
+
+if(CMAKE_BUILD_TYPE MATCHES "Debug")
+
+target_compile_options(test_ffaudio PRIVATE ${SAN_COMPILE_FLAGS})
+target_link_options(test_ffaudio PRIVATE ${SAN_LINK_FLAGS})
+
+endif()
 
 # Optional: Set output directory for the test binary
 set_target_properties(test_ffaudio PROPERTIES
