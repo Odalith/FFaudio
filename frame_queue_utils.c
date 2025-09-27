@@ -7,7 +7,6 @@
 void frame_queue_unref_item(Frame *vp)
 {
     av_frame_unref(vp->frame);
-    avsubtitle_free(&vp->sub);
 }
 
 int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int keep_last)

@@ -114,17 +114,11 @@ typedef struct FrameData {
 /* Common struct for handling all types of decoded data and allocated render buffers. */
 typedef struct Frame {
     AVFrame *frame;
-    AVSubtitle sub;
     int serial;
     double pts;           /* presentation timestamp for the frame */
     double duration;      /* estimated duration of the frame */
     int64_t pos;          /* byte position of the frame in the input file */
-    int width;
-    int height;
     int format;
-    AVRational sar;
-    int uploaded;
-    int flip_v;
 } Frame;
 
 typedef struct FrameQueue {
@@ -178,6 +172,7 @@ typedef struct TrackState {
     FrameQueue sampq;
 
     Decoder audio_decoder;
+    char *forced_audio_codec_name;     // default NULL
 
     int audio_stream;
 
@@ -189,9 +184,9 @@ typedef struct TrackState {
     AVStream *audio_st;
     PacketQueue audio_queue;
     int audio_hw_buf_size;
-    uint8_t *audio_buf;
+    uint8_t *audio_buf0;
     uint8_t *audio_buf1;
-    unsigned int audio_buf_size; /* in bytes */
+    unsigned int audio_buf0_size; /* in bytes */
     unsigned int audio_buf1_size;
     int audio_buf_index; /* in bytes */
     int audio_write_buf_size;
@@ -230,19 +225,17 @@ typedef struct AudioPlayer {
     int sdl_volume;                    // default 0
     int filter_nbthreads;              // default 0
     int64_t audio_callback_time;       // default 0
-    char *audio_codec_name;            // default NULL
     char *audio_filters;               // default NULL
     const char* wanted_stream_spec[AVMEDIA_TYPE_NB]; // default [NULL]
     int seek_by_bytes;                 // default -1
     int64_t start_time;                // AV_NOPTS_VALUE//Todo should be part of TrackState
     int64_t duration;                  // AV_NOPTS_VALUE//Todo should be part of TrackState
-    int loop;                          // default 0//Todo should be part of TrackState
+    int loop;                          // default 0
     int infinite_buffer;               // default -1
     int find_stream_info;              // default 1
 
 
     TrackState *current_track;         // default NULL
-    const char *current_file;          // default NULL
     AVDictionary *format_opts_n;       // default NULL
     AVDictionary *codec_opts_n;        // default NULL
     AVDictionary *swr_opts_n;          // default NULL
@@ -263,7 +256,6 @@ typedef struct AudioPlayer {
     SDL_AudioSpec given_spec;          // default NULL
     SDL_AudioFormat given_format;      // AUDIO_S16SYS
     AudioParams *audio_target;         // default malloc
-    //timer_t audio_device_close_timer;
 
     // Likely to be removed
     int fast;                          // default 0
