@@ -256,8 +256,8 @@ typedef struct AudioPlayer {
 
     int64_t request_count;             // default 0
     bool is_init_done;                 // default false
-    bool is_eof_from_skip;             // default false
     bool is_audio_device_initialized;  // default false
+    bool is_eof_from_skip;             // default false
 
     SDL_AudioDeviceID device_id;       // default 0
     SDL_AudioSpec given_spec;          // default NULL
@@ -290,7 +290,9 @@ enum sample_rates {LOW = 44100, MEDIUM = 48000, HIGH = 96000, ULTRA = 192000};
 
 DLL_EXPORT void shutdown();
 
-DLL_EXPORT void initialize(const char* app_name, const int initial_volume, const int loop_count, const int wanted_sample_rate, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
+DLL_EXPORT int initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
+
+DLL_EXPORT int configure_audio_device(const char* audio_device, int audio_device_index, bool use_default);
 
 DLL_EXPORT void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting);
 
@@ -307,6 +309,8 @@ DLL_EXPORT void mute(const bool value);
 DLL_EXPORT void set_loop_count(const int loop_count);
 
 DLL_EXPORT void wait_loop();
+
+DLL_EXPORT int get_audio_devices(int *out_total, char ***out_devices);
 
 #ifdef __cplusplus
 } // extern "C"

@@ -77,6 +77,9 @@ static void stream_component_close(TrackState *is, int stream_index)
         swr_free(&is->swr_ctx);
         av_freep(&is->audio_buf1);
         is->audio_buf1_size = 0;
+        is->audio_buf1 = NULL;
+        av_freep(&is->audio_buf);
+        is->audio_buf_size = 0;
         is->audio_buf = NULL;
 
         /*if (is->rdft) {
@@ -928,7 +931,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
     }
 }
 
-static Uint32 audio_open(const int wanted_sample_rate, const int wanted_channels)
+static Uint32 audio_open_legacy(const int wanted_sample_rate, const int wanted_channels)
 {
     if (audio_player->is_audio_device_initialized) return audio_player->given_spec.size;
 
@@ -1020,7 +1023,95 @@ static Uint32 audio_open(const int wanted_sample_rate, const int wanted_channels
     }
 
     audio_player->given_spec = spec;
-    audio_player->is_audio_device_initialized = true;
+    return audio_player->given_spec.size;
+}
+
+static Uint32 audio_open(const char* audio_device, const int audio_device_index, const bool use_default)
+{
+    if (audio_player->is_audio_device_initialized) return audio_player->given_spec.size;
+
+    if (!use_default && (!audio_device || audio_device_index < 0)) {
+        av_log(NULL, AV_LOG_ERROR, "Audio device cannot be null or index cannot be negative\n");
+    }
+
+    SDL_AudioSpec preferred_spec, spec;
+
+
+    if (use_default) {
+        char *default_device = {0};
+        if (SDL_GetDefaultAudioInfo(&default_device, &preferred_spec, false) != 0) {//Todo inform user of chosen audio device? So far it only has "System default"
+            av_log(NULL, AV_LOG_ERROR, "Failed to get default preferred audio device spec for %s\n", audio_device);
+            free(default_device);
+            return -1;
+        }
+        av_log(NULL, AV_LOG_INFO, "%s\n", default_device);
+        free(default_device);
+    }
+    else {
+        if (SDL_GetAudioDeviceSpec(audio_device_index, false, &preferred_spec) != 0) {
+            av_log(NULL, AV_LOG_ERROR, "Failed to get preferred audio device spec\n");
+            return -1;
+        }
+    }
+
+
+    AVChannelLayout wanted_channel_layout = {0};
+    av_channel_layout_default(&wanted_channel_layout, preferred_spec.channels);
+
+    if (preferred_spec.freq <= 0 || preferred_spec.channels <= 0) {
+        av_log(NULL, AV_LOG_ERROR, "Invalid sample rate or channel count!\n");
+        av_channel_layout_uninit(&wanted_channel_layout);
+        return -1;
+    }
+
+    printf("%d\n", preferred_spec.format);
+    preferred_spec.format = audio_player->given_format;
+    //preferred_spec.samples = FFMAX(SDL_AUDIO_MIN_BUFFER_SIZE, 2 << av_log2(wanted_spec.freq / SDL_AUDIO_MAX_CALLBACKS_PER_SEC));
+    preferred_spec.callback = sdl_audio_callback;
+    preferred_spec.userdata = NULL;
+
+    if (!(audio_player->device_id = SDL_OpenAudioDevice(use_default ? NULL : audio_device, false, &preferred_spec, &spec, 0))) {
+        av_log(NULL, AV_LOG_ERROR, "SDL_OpenAudioDevice (%d channels, %d Hz): %s\n", preferred_spec.channels, preferred_spec.freq, SDL_GetError());
+        av_channel_layout_uninit(&wanted_channel_layout);
+        return -1;
+    }
+
+    printf("%d\n", spec.samples);
+
+
+    if (spec.format != audio_player->given_format) {
+        av_log(NULL, AV_LOG_ERROR,
+               "SDL advised audio format %d is not supported!\n", spec.format);
+        av_channel_layout_uninit(&wanted_channel_layout);
+        return -1;
+    }
+    if (spec.channels != preferred_spec.channels) {
+        av_channel_layout_uninit(&wanted_channel_layout);
+        av_channel_layout_default(&wanted_channel_layout, spec.channels);
+
+        if (wanted_channel_layout.order != AV_CHANNEL_ORDER_NATIVE) {
+            av_log(NULL, AV_LOG_ERROR,
+                   "SDL advised channel count %d is not supported!\n", spec.channels);
+            av_channel_layout_uninit(&wanted_channel_layout);
+            return -1;
+        }
+    }
+
+    audio_player->audio_target->fmt = AV_SAMPLE_FMT_S16;//Todo make this have a switch for sdl formats
+    audio_player->audio_target->freq = spec.freq;
+    if (av_channel_layout_copy(&audio_player->audio_target->ch_layout, &wanted_channel_layout) < 0) {
+        av_channel_layout_uninit(&wanted_channel_layout);
+        return -1;
+    }
+    audio_player->audio_target->frame_size = av_samples_get_buffer_size(NULL, audio_player->audio_target->ch_layout.nb_channels, 1, audio_player->audio_target->fmt, 1);
+    audio_player->audio_target->bytes_per_sec = av_samples_get_buffer_size(NULL, audio_player->audio_target->ch_layout.nb_channels, audio_player->audio_target->freq, audio_player->audio_target->fmt, 1);
+    if (audio_player->audio_target->bytes_per_sec <= 0 || audio_player->audio_target->frame_size <= 0) {
+        av_log(NULL, AV_LOG_ERROR, "av_samples_get_buffer_size failed\n");
+        av_channel_layout_uninit(&wanted_channel_layout);
+        return -1;
+    }
+
+    audio_player->given_spec = spec;
     return audio_player->given_spec.size;
 }
 
@@ -1097,7 +1188,7 @@ static int event_thread(void*) {
     return 0;
 }
 
-void app_state_init(AudioPlayer *s) {
+static void app_state_init(AudioPlayer *s) {
     if (!s) return;
 
     // Zero everything first
@@ -1150,10 +1241,27 @@ void app_state_init(AudioPlayer *s) {
     s->genpts = 0;
 }
 
-/* Called from the main */
-void initialize(const char* app_name, const int initial_volume, const int loop_count, const int wanted_sample_rate, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3)
+void shutdown() {
+    if (!audio_player) return;
+
+    abort_track();
+
+    if (audio_player->device_id != 0) {
+        SDL_CloseAudioDevice(audio_player->device_id);
+        audio_player->device_id = 0;
+    }
+
+    audio_player->is_audio_device_initialized = false;
+    audio_player->is_init_done = false;
+    SDL_WaitThread(audio_player->event_thread, NULL);
+    SDL_DestroyMutex(audio_player->abort_mutex);
+    SDL_DestroyCond(audio_player->abort_cond);
+    SDL_Quit();
+}
+
+int initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3)
 {
-    if (audio_player) return;
+    if (audio_player) return -1;
 
     audio_player = (AudioPlayer *)malloc(sizeof(AudioPlayer));
     app_state_init(audio_player);
@@ -1194,14 +1302,14 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
     if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_EVENTS)) {
         av_log(NULL, AV_LOG_FATAL, "Could not initialize SDL - %s\n", SDL_GetError());
         SDL_Quit();
-        return;
+        return -1;
     }
 
     audio_player->eof_event = SDL_RegisterEvents(1);
     if (audio_player->eof_event  == (Uint32)-1) {
         SDL_Log("Failed to register custom events");
         SDL_Quit();
-        return;
+        return -1;
     }
 
     SDL_EventState(SDL_SYSWMEVENT, SDL_IGNORE);
@@ -1213,13 +1321,7 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
     if (!audio_player->event_thread) {
         SDL_Log("SDL_CreateThread Error: %s", SDL_GetError());
         SDL_Quit();
-        return;
-    }
-
-    /* prepare audio output */
-    if (audio_open(wanted_sample_rate, 2) < 0) {//Todo Hard coded to 2 channels for now
-        SDL_Quit();
-        return;
+        return -1;
     }
 
 
@@ -1236,22 +1338,19 @@ void initialize(const char* app_name, const int initial_volume, const int loop_c
     audio_player->is_init_done = true;
 }
 
-void shutdown() {
-    if (!audio_player) return;
-
-    abort_track();
-
-    if (audio_player->device_id != 0) {
-        SDL_CloseAudioDevice(audio_player->device_id);
-        audio_player->device_id = 0;
+int configure_audio_device(const char* audio_device, const int audio_device_index, const bool use_default) {
+    if (!audio_player->is_init_done) return -1;
+    if (audio_player->is_audio_device_initialized) {
+        return -1;//Todo setup reconfigure
     }
 
-    audio_player->is_audio_device_initialized = false;
-    audio_player->is_init_done = false;
-    SDL_WaitThread(audio_player->event_thread, NULL);
-    SDL_DestroyMutex(audio_player->abort_mutex);
-    SDL_DestroyCond(audio_player->abort_cond);
-    SDL_Quit();
+
+    if (audio_open(audio_device, audio_device_index, use_default) < 0) {//Todo Hard coded to 2 channels for now
+        SDL_Quit();
+        return -1;
+    }
+
+    audio_player->is_audio_device_initialized = true;
 }
 
 void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting) {
@@ -1355,5 +1454,75 @@ void set_loop_count(const int loop_count) {
     audio_player->loop = loop_count;
 }
 
+int get_audio_devices(int *out_total, char ***out_devices) {
+    if (!out_total || !out_devices) {
+        return -1;
+    }
 
+    const int count = SDL_GetNumAudioDevices(false);
+    if (count <= 0) {
+        *out_total = 0;
+        *out_devices = NULL;
+        return (count == 0) ? 0 : -1;
+    }
+
+    char **devices = malloc(count * sizeof(char *));
+    if (!devices) {
+        *out_total = 0;
+        *out_devices = NULL;
+        return -1;
+    }
+
+    int filled = 0;
+    for (int i = 0; i < count; i++) {
+        const char *name = SDL_GetAudioDeviceName(i, false);
+        if (!name) {
+            // Clean up on failure
+            for (int j = 0; j < filled; j++) {
+                free(devices[j]);
+            }
+            free(devices);
+            *out_total = 0;
+            *out_devices = NULL;
+            return -1;
+        }
+
+        devices[i] = strdup(name);
+
+        if (!devices[i]) {
+            // Clean up on failure
+            for (int j = 0; j < filled; j++) {
+                free(devices[j]);
+            }
+            free(devices);
+            *out_total = 0;
+            *out_devices = NULL;
+            return -1;
+        }
+        filled++;
+    }
+
+    *out_total = count;
+    *out_devices = devices;
+    return 0;
+}
+
+/*int get_audio_device_preferred_spec(int audio_device_index) {
+    SDL_AudioSpec *spec = {0};
+    SDL_GetAudioDeviceSpec(audio_device_index, false, spec);
+
+    spec->
+}*/
+
+
+/*
+ * PROGRAM THREADING STRUCTURE
+ * sdl_audio_callback()
+ * -Thread is internal to SDL
+ * -Is setup in initialize() with audio_open()
+ * -Thread is active for as long as there is an audio device open
+ * -Calls to sdl_audio_callback() stop when audio device is paused
+ *
+ *
+ */
 

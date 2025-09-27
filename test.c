@@ -169,12 +169,23 @@ int main(int argc, char **argv) {
     srand((unsigned int)time(NULL));
     shuffle_queue();
 
-    // Setup and play audio
-    initialize("Nachtul", 50, 0, MEDIUM, error_callback, eof_callback, restart_callback);
+    // Setup
+    initialize("Nachtul", 50, 0, error_callback, eof_callback, restart_callback);
+
+    // Find audio devices
+    int n;
+    char **devs;
+    if (get_audio_devices(&n, &devs)==0) {
+        for (int i = 0; i < n; ++i) {
+            printf("%d %s\n", i, devs[i]);
+            free(devs[i]);
+        }
+    }
+
+    configure_audio_device(NULL, -1, true);
+
 
     play_next();
-
-    int *intPtr = malloc(1000);
 
     wait_loop();
 
