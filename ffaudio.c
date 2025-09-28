@@ -1062,7 +1062,6 @@ static void app_state_init(AudioPlayer *s) {
     s->is_audio_device_initialized = false;
 
     s->device_id = (SDL_AudioDeviceID)0;
-    //s->given_spec = NULL;
     s->given_format = AUDIO_S16SYS;
     s->audio_target = (AudioParams *)malloc(sizeof(AudioParams));
 
@@ -1167,7 +1166,7 @@ int configure_audio_device(const char* audio_device, const int audio_device_inde
     }
 
 
-    if (audio_open(audio_device, audio_device_index, use_default) < 0) {//Todo Hard coded to 2 channels for now
+    if (audio_open(audio_device, audio_device_index, use_default) < 0) {
         SDL_Quit();
         return -1;
     }
@@ -1206,7 +1205,7 @@ void play_audio(const char *filename, const char * loudnorm_settings, const char
     ++audio_player->request_count;
 }
 
-void stop() {
+void stop_audio() {
     abort_track();
 
     ++audio_player->request_count;
@@ -1231,13 +1230,13 @@ void pause_audio(const bool value) {
     ++audio_player->request_count;
 }
 
-void seek(const double percentPos) {
+void seek_percent(const double percentPos) {
     if (!audio_player) return;
 
     if (!audio_player->current_track || !audio_player->current_track->ic) return;
 
     // Get the total duration of the media file
-    int64_t duration = audio_player->current_track->ic->duration;
+    const int64_t duration = audio_player->current_track->ic->duration;
     if (duration == AV_NOPTS_VALUE) {
         // If duration is unknown, we can't seek by percentage
         return;
@@ -1254,7 +1253,19 @@ void seek(const double percentPos) {
     ++audio_player->request_count;
 }
 
-void set_volume(const int volume) {
+void seek_time(const int64_t milliseconds) {
+    if (!audio_player) return;
+
+    if (!audio_player->current_track || !audio_player->current_track->ic) return;
+
+    int64_t target_pos = milliseconds * 1000;
+
+    if (target_pos < 0) target_pos = 0;
+
+    stream_seek(audio_player->current_track, target_pos, 0, 0);
+}
+
+void set_audio_volume(const int volume) {
     if (!audio_player->current_track || volume > 100 || volume < 0 || volume == audio_player->startup_volume) return;
 
     audio_player->startup_volume = volume;
@@ -1264,7 +1275,13 @@ void set_volume(const int volume) {
     ++audio_player->request_count;
 }
 
-void mute(const bool value) {
+int get_audio_volume() {
+    if (!audio_player) return -1;
+
+    return audio_player->startup_volume;
+}
+
+void mute_audio(const bool value) {
     if (!audio_player) return;
 
     if (!audio_player->current_track || value == audio_player->current_track->muted) return;
@@ -1276,6 +1293,31 @@ void mute(const bool value) {
 
 void set_loop_count(const int loop_count) {
     audio_player->loop = loop_count;
+}
+
+int get_loop_count() {
+    if (!audio_player) return 0;
+
+    return audio_player->loop;
+}
+
+int64_t get_audio_play_time() {
+    if (!audio_player) return -1;
+
+    return audio_player->duration;//Todo this does not seem to updated, it remains AV_NO_OPTS
+}
+
+int64_t get_audio_duration() {
+    if (!audio_player) return -1;
+
+    if (!audio_player->current_track || !audio_player->current_track->ic) return -1;
+
+    const int64_t duration = audio_player->current_track->ic->duration;
+    if (duration == AV_NOPTS_VALUE) {
+        return -1;
+    }
+
+    return duration;
 }
 
 int get_audio_devices(int *out_total, char ***out_devices) {

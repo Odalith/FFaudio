@@ -288,17 +288,27 @@ DLL_EXPORT int configure_audio_device(const char* audio_device, int audio_device
 
 DLL_EXPORT void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting);
 
-DLL_EXPORT void stop();
+DLL_EXPORT void stop_audio();
 
 DLL_EXPORT void pause_audio(const bool value);
 
-DLL_EXPORT void seek(const double percentPos);
+DLL_EXPORT void seek_percent(const double percentPos);
 
-DLL_EXPORT void set_volume(const int volume);
+DLL_EXPORT void seek_time(const int64_t milliseconds);
 
-DLL_EXPORT void mute(const bool value);
+DLL_EXPORT void set_audio_volume(const int volume);
+
+DLL_EXPORT int get_audio_volume();
+
+DLL_EXPORT void mute_audio(const bool value);
 
 DLL_EXPORT void set_loop_count(const int loop_count);
+
+DLL_EXPORT int get_loop_count();
+
+DLL_EXPORT int64_t get_audio_play_time();
+
+DLL_EXPORT int64_t get_audio_duration();
 
 DLL_EXPORT void wait_loop();
 
