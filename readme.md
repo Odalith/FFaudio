@@ -1,3 +1,5 @@
+## ⚠️ This project is in alpha, use at your own risk. Contributions/suggestions welcome
+
 ### FFaudio is a high-level audio player library using FFmpeg & SDL2. 
 It is a heavily modified version of FFplay, so all credit for its general design goes to the FFmpeg team and contributors.
 
@@ -29,3 +31,6 @@ It is a heavily modified version of FFplay, so all credit for its general design
 - Custom channel layouts
 - Support for audio formats with more than two channels
 - Assuming compatible hardware, support playing DSD without conversion to PCM
+
+
+Note; this project is not affiliated with FFmpeg, FFplay, or their Authors.
