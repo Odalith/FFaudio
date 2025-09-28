@@ -149,12 +149,6 @@ static void abort_track() {
 }
 
 
-static void sigterm_handler(int sig)
-{
-    exit(123);
-}
-
-
 /* seek in the stream */
 static void stream_seek(TrackState *is, int64_t pos, int64_t rel, int by_bytes)
 {
@@ -1108,9 +1102,6 @@ int initialize(const char* app_name, const int initial_volume, const int loop_co
 #if CONFIG_AVDEVICE
     avdevice_register_all();
 #endif
-
-    signal(SIGINT , sigterm_handler); /* Interrupt (ANSI).    */
-    signal(SIGTERM, sigterm_handler); /* Termination (ANSI).  */
 
     audio_player->startup_volume = initial_volume;
     audio_player->loop = loop_count;
