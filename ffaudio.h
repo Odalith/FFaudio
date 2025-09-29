@@ -228,8 +228,8 @@ typedef struct AudioPlayer {
     char *audio_filters;               // default NULL
     const char* wanted_stream_spec[AVMEDIA_TYPE_NB]; // default [NULL]
     int seek_by_bytes;                 // default -1
-    int64_t start_time;                // AV_NOPTS_VALUE//Todo should be part of TrackState
-    int64_t duration;                  // AV_NOPTS_VALUE//Todo should be part of TrackState
+    int64_t start_time;                // AV_NOPTS_VALUE, how much to seek before playing
+    int64_t play_duration;             // AV_NOPTS_VALUE, how much to play
     int loop;                          // default 0
     int infinite_buffer;               // default -1
     int find_stream_info;              // default 1
@@ -251,6 +251,8 @@ typedef struct AudioPlayer {
     bool is_init_done;                 // default false
     bool is_audio_device_initialized;  // default false
     bool is_eof_from_skip;             // default false
+    bool reconfigure_audio_device;     // default false
+    bool reset_start_time;             // default false
 
     SDL_AudioDeviceID device_id;       // default 0
     SDL_AudioSpec given_spec;          // default NULL
@@ -278,41 +280,43 @@ static NotifyOfRestart notify_of_restart_callback = NULL;
 extern "C" {
 #endif
 
-enum sample_rates {LOW = 44100, MEDIUM = 48000, HIGH = 96000, ULTRA = 192000};
+    DLL_EXPORT void shutdown();
 
-DLL_EXPORT void shutdown();
+    DLL_EXPORT int initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
 
-DLL_EXPORT int initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
+    DLL_EXPORT int configure_audio_device(const char* audio_device, int audio_device_index, bool use_default);
 
-DLL_EXPORT int configure_audio_device(const char* audio_device, int audio_device_index, bool use_default);
+    DLL_EXPORT void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting);
 
-DLL_EXPORT void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting);
+    DLL_EXPORT void stop_audio();
 
-DLL_EXPORT void stop_audio();
+    DLL_EXPORT void pause_audio(const bool value);
 
-DLL_EXPORT void pause_audio(const bool value);
+    DLL_EXPORT void seek_percent(const double percentPos);
 
-DLL_EXPORT void seek_percent(const double percentPos);
+    DLL_EXPORT void seek_time(const int64_t milliseconds);
 
-DLL_EXPORT void seek_time(const int64_t milliseconds);
+    DLL_EXPORT void set_audio_volume(const int volume);
 
-DLL_EXPORT void set_audio_volume(const int volume);
+    DLL_EXPORT int get_audio_volume();
 
-DLL_EXPORT int get_audio_volume();
+    DLL_EXPORT void mute_audio(const bool value);
 
-DLL_EXPORT void mute_audio(const bool value);
+    DLL_EXPORT void set_loop_count(const int loop_count);
 
-DLL_EXPORT void set_loop_count(const int loop_count);
+    DLL_EXPORT int get_loop_count();
 
-DLL_EXPORT int get_loop_count();
+    //Returns time in seconds
+    DLL_EXPORT double get_audio_play_time();
 
-DLL_EXPORT int64_t get_audio_play_time();
+    //Returns time in seconds
+    DLL_EXPORT double get_audio_duration();
 
-DLL_EXPORT int64_t get_audio_duration();
+    //Convince function to block the main thread
+    DLL_EXPORT void wait_loop();
 
-DLL_EXPORT void wait_loop();
-
-DLL_EXPORT int get_audio_devices(int *out_total, char ***out_devices);
+    //List the user's audio devices
+    DLL_EXPORT int get_audio_devices(int *out_total, char ***out_devices);
 
 #ifdef __cplusplus
 } // extern "C"
