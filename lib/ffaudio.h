@@ -35,13 +35,37 @@
 extern "C" {
 #endif
 
+    typedef struct InitializeConfig {
+        const char* app_name;
+        int initial_volume;          // 0..100
+        int initial_loop_count;              // -1 for infinite
+        NotifyOfError on_error;
+        NotifyOfEndOfFile on_eof;
+        NotifyOfRestart on_restart;
+    } InitializeConfig;
+
+    typedef struct AudioDeviceConfig {
+        const char* audio_device;    // Device name/ID
+        int audio_device_index;      // Index in enumerated list; See get_audio_devices()
+    } AudioDeviceConfig;
+
+    typedef struct PlayAudioConfig {
+        double skip_seconds;            // Optional; Seek this many seconds before starting playback. <= 0 == plays from the start
+        double play_time;               // Optional; How many seconds to play audio before quiting. <= 0 == plays to the end
+        const char* loudnorm_settings;  // Optional; NULL to disable. Add loudness normalization filter. Ex: "I=-16:TP=-1.5:LRA=11:measured_I=-8.9:measured_LRA=5.2:measured_TP=1.1:measured_thresh=-19.1:offset=-0.8"
+        const char* crossfeed_setting;  // Optional; NULL to disable. Add crossfeed filter. Ex: "0.5"
+    } PlayAudioConfig;
+
     DLL_EXPORT void shutdown();
 
-    DLL_EXPORT int initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3);
+    // Call this before anything else. config can be NULL.
+    DLL_EXPORT int initialize(const InitializeConfig* config);
 
-    DLL_EXPORT int configure_audio_device(const char* audio_device, int audio_device_index, bool use_default);
+    // To be called after initialize(); Pass NULL to use the default device
+    DLL_EXPORT int configure_audio_device(const AudioDeviceConfig* custom_config);
 
-    DLL_EXPORT void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting);
+    // Play a file. config can be NULL
+    DLL_EXPORT void play_audio(const char *filename, const PlayAudioConfig* config);
 
     DLL_EXPORT void stop_audio();
 

@@ -1143,16 +1143,25 @@ void shutdown() {
     //Todo avformat_network_deinit();
 }
 
-int initialize(const char* app_name, const int initial_volume, const int loop_count, const NotifyOfError callback, const NotifyOfEndOfFile callback2, const NotifyOfRestart callback3)
+int initialize(const InitializeConfig* config)
 {
-    if (audio_player) return -1;
+    if (audio_player || !config) return -1;
 
     audio_player = (AudioPlayer *)malloc(sizeof(AudioPlayer));
     app_state_init(audio_player);
 
-    audio_player->notify_of_error_callback = callback;
-    audio_player->notify_of_eof_callback = callback2;
-    audio_player->notify_of_restart_callback = callback3;
+    if (config->on_error) {
+        audio_player->notify_of_error_callback = config->on_error;
+    }
+
+    if (config->on_eof) {
+        audio_player->notify_of_eof_callback = config->on_eof;
+    }
+
+    if (config->on_restart) {
+        audio_player->notify_of_restart_callback = config->on_restart;
+    }
+
 
     init_dynload();
 
@@ -1164,18 +1173,24 @@ int initialize(const char* app_name, const int initial_volume, const int loop_co
     avdevice_register_all();
 #endif
 
-    audio_player->startup_volume = initial_volume;
-    audio_player->loop = loop_count;
+    audio_player->startup_volume = config->initial_volume;
+    audio_player->loop = config->initial_loop_count;
 
     /* Try to work around an occasional ALSA buffer underflow issue when the
      * period size is NPOT due to ALSA resampling by forcing the buffer size. */
     if (!SDL_getenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE"))
         SDL_setenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE","1", 1);
 
-    SDL_SetHint(SDL_HINT_APP_NAME, app_name);
-    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, app_name);
+
+    if (config->app_name) {
+        SDL_SetHint(SDL_HINT_APP_NAME, config->app_name);
+        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, config->app_name);
+        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, config->app_name);
+    }
+
+
+    //Todo add these as options to config
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "music");
-    SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, app_name);
     SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
     SDL_SetHint(SDL_HINT_AUDIO_RESAMPLING_MODE, "3");
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
@@ -1211,38 +1226,47 @@ int initialize(const char* app_name, const int initial_volume, const int loop_co
     return 0;
 }
 
-int configure_audio_device(const char* audio_device, const int audio_device_index, const bool use_default) {
+int configure_audio_device(const AudioDeviceConfig* custom_config) {
     if (!audio_player->is_init_done) return -1;
+
     if (audio_player->is_audio_device_initialized) {
         return -1;//Todo setup reconfigure
     }
 
-
-    if (audio_open(audio_device, audio_device_index, use_default) < 0) {
-        SDL_Quit();
-        return -1;
+    if (custom_config) {
+        if (audio_open(custom_config->audio_device, custom_config->audio_device_index, false) < 0) {
+            SDL_Quit();
+            return -1;
+        }
     }
+    else {
+        if (audio_open(NULL, -1, true) < 0) {
+            SDL_Quit();
+            return -1;
+        }
+    }
+
 
     audio_player->is_audio_device_initialized = true;
 
     return 0;
 }
 
-void play_audio(const char *filename, const char * loudnorm_settings, const char * crossfeed_setting) {
+void play_audio(const char *filename, const PlayAudioConfig* config) {
     if (!audio_player || !audio_player->is_init_done) return;
 
     abort_track();
 
     clear_filter_chain(audio_player);
-    // Add loudness normalization filter. Ex: I=-16:TP=-1.5:LRA=11:measured_I=-8.9:measured_LRA=5.2:measured_TP=1.1:measured_thresh=-19.1:offset=-0.8
-    if (loudnorm_settings) {
-        const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", loudnorm_settings);
+
+    if (config && config->loudnorm_settings) {
+        const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", config->loudnorm_settings);
         add_to_filter_chain(audio_player, loudnorm_filter);
         av_freep(&loudnorm_filter);
     }
 
-    if (crossfeed_setting) {
-        const char *crossfeed_filter = av_asprintf("crossfeed=%s", crossfeed_setting);
+    if (config && config->crossfeed_setting) {
+        const char *crossfeed_filter = av_asprintf("crossfeed=%s", config->crossfeed_setting);
         add_to_filter_chain(audio_player, crossfeed_filter);
         av_freep(&crossfeed_filter);
     }

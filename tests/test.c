@@ -137,7 +137,7 @@ static void play_next(void) {
     const char *song = queue_files[queue_pos];
     printf("%zu Playing %s\n", queue_pos + 1, song);
 
-    play_audio(song, NULL, NULL);
+    play_audio(song, NULL);
     ++queue_pos;
 
 #if SKIP_AFTER_SECONDS > 0
@@ -187,7 +187,16 @@ int main(int argc, char **argv) {
     shuffle_queue();
 
     // Setup
-    initialize("Nachtul", 50, 0, error_callback, eof_callback, restart_callback);
+    const InitializeConfig config = {
+        .app_name = "Test App",
+        .initial_volume = 50,
+        .initial_loop_count = 0,
+        .on_error = error_callback,
+        .on_eof = eof_callback,
+        .on_restart = restart_callback
+    };
+
+    initialize(&config);
 
     // Find audio devices
     int n;
@@ -199,7 +208,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    configure_audio_device(NULL, -1, true);
+    configure_audio_device(NULL);
 
 
     play_next();
@@ -207,5 +216,6 @@ int main(int argc, char **argv) {
     wait_loop();
 
     free_queue();
+    shutdown();
     return 0;
 }
