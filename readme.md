@@ -4,7 +4,7 @@
 It is a heavily modified version of FFplay, so all credit for its general design goes to the FFmpeg team and contributors.
 
 ## Features
-- Cross-platform support for Windows, Linux, and macOS
+- Cross-platform support for Windows, Linux, macOS, Android, iOS
 - Thanks to FFmpeg it can decode and play basically any file with an audio component
 - Support for Crossfeed and EBU R128 audio normalization
 - Easy-to-use API for integrating audio playback into applications
@@ -126,6 +126,8 @@ get_audio_duration();
   - [ ] Windows
   - [X] Linux
   - [ ] macOS
+  - [ ] Android
+  - [ ] iOS
 - [ ] Setup Equalizer with filterchain
 - [ ] Setup and test with different formats (Currently fixed to S16 regardless of what the device wants)
 - [ ] Update `audio_player->duration` and make sure it works with read_thread() loop. Ref ffplay
