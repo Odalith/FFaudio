@@ -1,7 +1,7 @@
 /*
 * Copyright (c) 2003 Fabrice Bellard, 2025 Odalith
  *
- * This file was part of FFmpeg, particularly ffplay.
+ * This file was part of FFmpeg, particularly FFplay.
  *
  * ffaudio is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -14,12 +14,13 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with ffaudio; if not, write to the Free Software
+ * License along with FFaudio; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include "ffaudio.h"
 #include <signal.h>
+#include "globals.h"
 #include "cmdutils.h"
 #include "packet_queue_utils.h"
 #include "clock_utils.h"
@@ -600,8 +601,8 @@ static int read_thread(void *arg)
                    set_clock(&is->extclk, seek_target / (double)AV_TIME_BASE, 0);
                 }
 
-                if (notify_of_restart_callback) {
-                    notify_of_restart_callback();
+                if (audio_player->notify_of_restart_callback) {
+                    audio_player->notify_of_restart_callback();
                 }
             }
             is->seek_req = 0;
@@ -1058,8 +1059,8 @@ static int event_thread(void* opaque) {
                     continue;
                 }
 
-                if (notify_of_eof_callback) {
-                    notify_of_eof_callback(audio_player->is_eof_from_skip);
+                if (audio_player->notify_of_eof_callback) {
+                    audio_player->notify_of_eof_callback(audio_player->is_eof_from_skip);
                 }
 
                 if (audio_player->is_eof_from_skip) {
@@ -1149,9 +1150,9 @@ int initialize(const char* app_name, const int initial_volume, const int loop_co
     audio_player = (AudioPlayer *)malloc(sizeof(AudioPlayer));
     app_state_init(audio_player);
 
-    notify_of_error_callback = callback;
-    notify_of_eof_callback = callback2;
-    notify_of_restart_callback = callback3;
+    audio_player->notify_of_error_callback = callback;
+    audio_player->notify_of_eof_callback = callback2;
+    audio_player->notify_of_restart_callback = callback3;
 
     init_dynload();
 

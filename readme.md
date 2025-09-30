@@ -130,11 +130,12 @@ get_audio_duration();
 - [ ] Ensure proper deallocation when stream_open() fails before SDL_CreateThread(read_thread, ..) is called. (read_thread is what sends the cleanup message)
 - [ ] Test with valgrind
 - [ ] Send audio device updates to the user through callback
-- [ ] Cleanup ffaudio.h, use different header for private structs, defines
+- [X] Cleanup ffaudio.h, use different header for private structs, defines
 - [ ] Create public config struct for initialize(), play_audio(), and configure_audio_device()
-- [ ] Put source files into a folder structure
+- [X] Put source files into a folder structure
 - [ ] Callback to update duration (when known) for files that estimate it
 - [ ] Make sure `get_clock(&audio_player->current_track->audclk)` is accurate through pauses and seeks
 - [ ] Upgrade to SDL3
 - [ ] Implement initial seek and play time in play_audio()
+- [ ] Setup logging with call instead of av_log()
 
