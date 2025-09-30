@@ -148,6 +148,17 @@ static void abort_track() {
     }
 }
 
+static void close_audio_device() {
+    if (!audio_player) return;
+
+    if (audio_player->device_id != 0) {
+        SDL_CloseAudioDevice(audio_player->device_id);
+        audio_player->device_id = 0;
+    }
+
+    audio_player->is_audio_device_initialized = false;
+}
+
 
 /* seek in the stream */
 static void stream_seek(TrackState *is, int64_t pos, int64_t rel, int by_bytes)
@@ -501,6 +512,9 @@ static int read_thread(void *arg)
             av_log(NULL, AV_LOG_WARNING, "%s: could not seek to position %0.3f\n",
                     is->filename, (double)timestamp / AV_TIME_BASE);
         }
+        else if (audio_player->reset_start_time) {
+            audio_player->start_time = AV_NOPTS_VALUE;
+        }
     }
 
     is->realtime = is_realtime(ic);
@@ -641,11 +655,13 @@ static int read_thread(void *arg)
         /* check if packet is in play range specified by user, then queue, otherwise discard */
         stream_start_time = ic->streams[pkt->stream_index]->start_time;
         pkt_ts = pkt->pts == AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
-        pkt_in_play_range = audio_player->duration == AV_NOPTS_VALUE ||
-                (pkt_ts - (stream_start_time != AV_NOPTS_VALUE ? stream_start_time : 0)) *
-                av_q2d(ic->streams[pkt->stream_index]->time_base) -
-                (double)(audio_player->start_time != AV_NOPTS_VALUE ? audio_player->start_time : 0) / 1000000
-                <= ((double)audio_player->duration / 1000000);
+        pkt_in_play_range =
+            audio_player->play_duration == AV_NOPTS_VALUE
+        || (pkt_ts - (stream_start_time != AV_NOPTS_VALUE ? stream_start_time : 0))
+            * av_q2d(ic->streams[pkt->stream_index]->time_base)
+            - (double)(audio_player->start_time != AV_NOPTS_VALUE ? audio_player->start_time : 0) / 1000000
+            <= ((double)audio_player->play_duration / 1000000);
+
         if (pkt->stream_index == is->audio_stream && pkt_in_play_range) {
             packet_queue_put(&is->audio_queue, pkt);
         } else {
@@ -714,7 +730,7 @@ static TrackState *stream_open(const char *filename)
     is->audio_volume = audio_player->sdl_volume;
     is->muted = 0;
     is->av_sync_type = AV_SYNC_AUDIO_MASTER;
-    is->read_tid     = SDL_CreateThread(read_thread, "read_thread", is);
+    is->read_tid = SDL_CreateThread(read_thread, "read_thread", is);
 
     if (!is->read_tid) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateThread(): %s\n", SDL_GetError());
@@ -990,10 +1006,57 @@ static int event_thread(void* opaque) {
     SDL_Event e;
     while (SDL_AtomicGet(&audio_player->event_thread_running)) {
         while (SDL_PollEvent(&e)) {
-            if (e.type == audio_player->eof_event && audio_player->current_track) {
+            if (e.type == SDL_AUDIODEVICEADDED && !e.adevice.iscapture) {
+                //In the future, forward this event to user for updating device options
+            }
+            else if (e.type == SDL_AUDIODEVICEREMOVED && !e.adevice.iscapture) {
+                if (e.adevice.which == audio_player->device_id) {
+                    audio_player->reconfigure_audio_device = true;
+                    audio_player->current_track->abort_request = true;
+                }
+                //In the future, forward this event to user for updating device options
+            }
+            else if (e.type == audio_player->eof_event && audio_player->current_track) {
+                const char *filename = NULL;
+                double pos = 0;
+
+                if (audio_player->reconfigure_audio_device) {
+                    filename = av_strdup(audio_player->current_track->filename);
+                    pos = get_clock(&audio_player->current_track->audclk);
+
+                    if (pos == NAN)
+                        pos = 0;
+                }
 
                 cleanup_for_next_track(audio_player->current_track);
                 audio_player->current_track = NULL;
+
+                // If configured audio device is lost, move to the OS default
+                if (audio_player->reconfigure_audio_device) {
+                    audio_player->reconfigure_audio_device = false;
+
+                    close_audio_device();
+
+                    if (audio_open(NULL, -1, true) < 0) {
+                        av_log(NULL, AV_LOG_ERROR, "Failed to open audio device\n");
+                        av_free(filename);
+                        continue;
+                    }
+
+                    audio_player->start_time = (int64_t)(pos * 1000000);
+                    audio_player->reset_start_time = true;
+                    audio_player->current_track = stream_open(filename);
+
+                    if (!audio_player->current_track) {
+                        av_log(NULL, AV_LOG_ERROR, "Failed to initialize TrackState after device reconfiguration\n");
+                        av_free(filename);
+                        continue;
+                    }
+
+                    av_free(filename);
+                    av_log(NULL, AV_LOG_INFO, "Moved audio output to system default as original device was lost\n");
+                    continue;
+                }
 
                 if (notify_of_eof_callback) {
                     notify_of_eof_callback(audio_player->is_eof_from_skip);
@@ -1032,7 +1095,7 @@ static void app_state_init(AudioPlayer *s) {
 
     s->seek_by_bytes = -1;
     s->start_time = AV_NOPTS_VALUE;
-    s->duration = AV_NOPTS_VALUE;
+    s->play_duration = AV_NOPTS_VALUE;
     s->loop = 0;
     s->infinite_buffer = -1;
     s->find_stream_info = 1;
@@ -1054,6 +1117,7 @@ static void app_state_init(AudioPlayer *s) {
     s->is_eof_from_skip = false;
     s->is_init_done = false;
     s->is_audio_device_initialized = false;
+    s->reconfigure_audio_device = false;
 
     s->device_id = (SDL_AudioDeviceID)0;
     s->given_format = AUDIO_S16SYS;
@@ -1068,12 +1132,8 @@ void shutdown() {
 
     abort_track();
 
-    if (audio_player->device_id != 0) {
-        SDL_CloseAudioDevice(audio_player->device_id);
-        audio_player->device_id = 0;
-    }
+    close_audio_device();
 
-    audio_player->is_audio_device_initialized = false;
     audio_player->is_init_done = false;
     SDL_WaitThread(audio_player->event_thread, NULL);
     SDL_DestroyMutex(audio_player->abort_mutex);
@@ -1292,13 +1352,14 @@ int get_loop_count() {
     return audio_player->loop;
 }
 
-int64_t get_audio_play_time() {
-    if (!audio_player) return -1;
+double get_audio_play_time() {
+    if (!audio_player || !audio_player->current_track) return -1;
 
-    return audio_player->duration;//Todo this does not seem to updated, it remains AV_NO_OPTS
+    //audio_player->play_duration is for how long a file *should* play how how long it *has* been playing
+    return get_clock(&audio_player->current_track->audclk);
 }
 
-int64_t get_audio_duration() {
+double get_audio_duration() {
     if (!audio_player) return -1;
 
     if (!audio_player->current_track || !audio_player->current_track->ic) return -1;
@@ -1308,7 +1369,7 @@ int64_t get_audio_duration() {
         return -1;
     }
 
-    return duration;
+    return duration / 1000000.0;
 }
 
 int get_audio_devices(int *out_total, char ***out_devices) {
