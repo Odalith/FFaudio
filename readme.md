@@ -4,7 +4,7 @@
 It is a heavily modified version of FFplay, so all credit for its general design goes to the FFmpeg team and contributors.
 
 ## Features
-- Cross-platform support for Windows, Linux, macOS, Android, iOS
+- Cross-platform support for Windows, Linux, macOS, Android, and iOS
 - Thanks to FFmpeg it can decode and play basically any file with an audio component
 - Support for Crossfeed and EBU R128 audio normalization
 - Easy-to-use API for integrating audio playback into applications
@@ -87,6 +87,10 @@ __Setup Done!__
 play_audio("/path/song.mp3", NULL);
 ```
 
+__For a more complete and functional example, look at tests/test.c__
+
+---
+
 Some other useful functions include:
 ```C
 stop_audio();
@@ -112,14 +116,14 @@ get_audio_play_time();
 get_audio_duration();
 ```
 
-**For a more complete and functional example, look at test.c**
+---
 
 ## Todo 🚧
 - [ ] Write docs for setting up with a custom audio device
 - [ ] Setup audio device reconfigure for users and for when a device is lost during playback/idle (use system default)
   - Does not apply when audio device is configured with system default, SDL follows it but not custom set ones.
   - This will probably involve aborting playback, recreating the audio device, then playing the same stream with a seek to last pos
-- [ ] Write additional public api functions
+- [X] Write additional public api functions
 - [ ] Setup Github Actions for release
 - [ ] Release C# P/Invoke and create nuget packages
 - [ ] Test on more platforms
@@ -130,7 +134,6 @@ get_audio_duration();
   - [ ] iOS
 - [ ] Setup Equalizer with filterchain
 - [ ] Setup and test with different formats (Currently fixed to S16 regardless of what the device wants)
-- [ ] Update `audio_player->duration` and make sure it works with read_thread() loop. Ref ffplay
 - [ ] Create gapless audio playback for non-realtime streams
   - [ ] 'Soon to be done' callback
   - [ ] Set up a second TrackState and swap in audio callback when the first stream is finished
