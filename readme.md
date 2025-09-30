@@ -6,7 +6,7 @@ It is a heavily modified version of FFplay, so all credit for its general design
 ## Features
 - Cross-platform support for Windows, Linux, and macOS
 - Thanks to FFmpeg it can decode and play basically any file with an audio component
-- Support for Crossfeed and EBU128 audio normalization
+- Support for Crossfeed and EBU R128 audio normalization
 - Easy-to-use API for integrating audio playback into applications
 - Performant and memory efficient thanks again to FFmpeg
 - Licensed under the LGPLv2.1 and free to use
@@ -21,7 +21,7 @@ It is a heavily modified version of FFplay, so all credit for its general design
 - User-configurable Equalizer, with realtime updates
 - Crossfade with custom crossfade time (Note that the currently supported Crossfeed is different from Crossfade)
 - Audio mixing of multiple streams
-- Generation of EBU128 audio normalization data (Currently, you have to do this yourself. FFaudio only does the adjustment part)
+- Generation of EBU R128 audio normalization data (Currently, you have to do this yourself. FFaudio only does the adjustment part)
 
 ## Possible Features
 - Audio file conversion
@@ -130,5 +130,11 @@ get_audio_duration();
 - [ ] Ensure proper deallocation when stream_open() fails before SDL_CreateThread(read_thread, ..) is called. (read_thread is what sends the cleanup message)
 - [ ] Test with valgrind
 - [ ] Send audio device updates to the user through callback
-
+- [ ] Cleanup ffaudio.h, use different header for private structs, defines
+- [ ] Create public config struct for initialize(), play_audio(), and configure_audio_device()
+- [ ] Put source files into a folder structure
+- [ ] Callback to update duration (when known) for files that estimate it
+- [ ] Make sure `get_clock(&audio_player->current_track->audclk)` is accurate through pauses and seeks
+- [ ] Upgrade to SDL3
+- [ ] Implement initial seek and play time in play_audio()
 
