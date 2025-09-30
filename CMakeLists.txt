@@ -27,19 +27,21 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libavfilter
 )
 
-add_library(ffaudio SHARED ffaudio.c ffaudio.h
-        cmdutils.c
-        cmdutils.h
-        packet_queue_utils.c
-        packet_queue_utils.h
-        clock_utils.c
-        clock_utils.h
-        frame_queue_utils.c
-        frame_queue_utils.h
-        decoder_utils.c
-        decoder_utils.h
-        filtergraph.c
-        filtergraph.h)
+add_library(ffaudio SHARED lib/ffaudio.c lib/ffaudio.h
+        lib/cmdutils.c
+        lib/cmdutils.h
+        lib/packet_queue_utils.c
+        lib/packet_queue_utils.h
+        lib/clock_utils.c
+        lib/clock_utils.h
+        lib/frame_queue_utils.c
+        lib/frame_queue_utils.h
+        lib/decoder_utils.c
+        lib/decoder_utils.h
+        lib/filtergraph.c
+        lib/filtergraph.h
+        lib/globals.h
+        lib/delagates.h)
 
 if(CMAKE_BUILD_TYPE MATCHES "Debug")
 
@@ -57,7 +59,7 @@ set_target_properties(ffaudio PROPERTIES
 )
 
 # Build the test executable
-add_executable(test_ffaudio test.c)
+add_executable(test_ffaudio tests/test.c)
 
 find_library(AVFORMAT_LIB avformat)
 find_library(AVCODEC_LIB avcodec)

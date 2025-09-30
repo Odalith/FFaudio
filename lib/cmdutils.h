@@ -1,7 +1,7 @@
 /*
 * Copyright (c) 2003 Fabrice Bellard, 2025 Odalith
  *
- * This file was part of FFmpeg, particularly cmdutils.
+ * This file was part of FFmpeg, particularly FFplay.
  *
  * ffaudio is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -14,7 +14,7 @@
  * Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public
- * License along with FFmpeg; if not, write to the Free Software
+ * License along with FFaudio; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 

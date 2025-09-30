@@ -6,7 +6,7 @@ It is a heavily modified version of FFplay, so all credit for its general design
 ## Features
 - Cross-platform support for Windows, Linux, and macOS
 - Thanks to FFmpeg it can decode and play basically any file with an audio component
-- Support for Crossfeed and EBU128 audio normalization
+- Support for Crossfeed and EBU R128 audio normalization
 - Easy-to-use API for integrating audio playback into applications
 - Performant and memory efficient thanks again to FFmpeg
 - Licensed under the LGPLv2.1 and free to use
@@ -21,7 +21,7 @@ It is a heavily modified version of FFplay, so all credit for its general design
 - User-configurable Equalizer, with realtime updates
 - Crossfade with custom crossfade time (Note that the currently supported Crossfeed is different from Crossfade)
 - Audio mixing of multiple streams
-- Generation of EBU128 audio normalization data (Currently, you have to do this yourself. FFaudio only does the adjustment part)
+- Generation of EBU R128 audio normalization data (Currently, you have to do this yourself. FFaudio only does the adjustment part)
 
 ## Possible Features
 - Audio file conversion
@@ -35,7 +35,7 @@ It is a heavily modified version of FFplay, so all credit for its general design
 Note; this project is not affiliated with FFmpeg, FFplay, or their Authors.
 
 ## Usage
-After compiling and linking to your project, you will need to initialize the audio system before playing anything:
+(1) After compiling and linking to your project, you will need to initialize the audio system before playing anything:
 ```C
 #include "ffaudio.h"
 
@@ -51,11 +51,20 @@ static void restart_callback(void) {
     printf("Restart\n");
 }
 
-...
+// In your main()..
 
-initialize("Music Player", 50, 0, error_callback, eof_callback, restart_callback);
+const InitializeConfig config = {
+    .app_name = "Test App",
+    .initial_volume = 50,
+    .initial_loop_count = 0,
+    .on_error = error_callback,
+    .on_eof = eof_callback,
+    .on_restart = restart_callback
+};
+
+initialize(config);
 ```
-The parameters are as follows:
+The config parameters are as follows:
 1. App name. This will be what shows up in your system
 2. Initial volume. 0-100
 3. Initial loop count. -1 is infinite looping, 0 is no looping.
@@ -65,37 +74,36 @@ The parameters are as follows:
 
 You can pass null into any of the callbacks if you don't want to use them.
 
-Next, you will need to set up your audio device. This can be as simple as calling:
+(2) Next, you will need to set up your audio device. This can be as simple as calling:
 ```C
-configure_audio_device(NULL, -1, true);
+configure_audio_device(NULL);
 ```
-This will create an audio device with the default settings. 
-The first two parameters are ignored when the last one is `true` like above.
+This will create an audio device with the default settings.
 
-### Setup Done!
+__Setup Done!__
 
-Now you can play your audio with:
+(3) Now you can play your audio with:
 ```C
-play_audio("/path/song.mp3", NULL, NULL);
+play_audio("/path/song.mp3", NULL);
 ```
 
 Some other useful functions include:
 ```C
 stop_audio();
 
-pause_audio(const bool value);
+pause_audio();
 
-seek_percent(const double percentPos);
+seek_percent();
 
-seek_time(const int64_t milliseconds);
+seek_time();
 
-set_audio_volume(const int volume);
+set_audio_volume();
 
 get_audio_volume();
 
-mute_audio(const bool value);
+mute_audio();
 
-set_loop_count(const int loop_count);
+set_loop_count();
 
 get_loop_count();
 
@@ -130,5 +138,12 @@ get_audio_duration();
 - [ ] Ensure proper deallocation when stream_open() fails before SDL_CreateThread(read_thread, ..) is called. (read_thread is what sends the cleanup message)
 - [ ] Test with valgrind
 - [ ] Send audio device updates to the user through callback
-
+- [X] Cleanup ffaudio.h, use different header for private structs, defines
+- [X] Create public config struct for initialize(), play_audio(), and configure_audio_device()
+- [X] Put source files into a folder structure
+- [ ] Callback to update duration (when known) for files that estimate it
+- [ ] Make sure `get_clock(&audio_player->current_track->audclk)` is accurate through pauses and seeks
+- [ ] Upgrade to SDL3
+- [ ] Implement initial seek and play time in play_audio()
+- [ ] Setup logging with call instead of av_log()
 

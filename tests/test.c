@@ -1,5 +1,22 @@
-// Converted from C++ to C
-// Created by malkj on 27/07/25. Converted to C on 24/09/25.
+/*
+* Copyright (c) 2003 Fabrice Bellard, 2025 Odalith
+ *
+ * This file was part of FFmpeg, particularly FFplay.
+ *
+ * ffaudio is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * ffaudio is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with FFaudio; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
 
 #define _XOPEN_SOURCE 700
 #define DEFAULT_SOURCE
@@ -14,7 +31,7 @@
 #include <ftw.h>
 #include <sys/stat.h>
 
-#include "ffaudio.h"
+#include "../lib/ffaudio.h"
 
 #define PLAY_COUNT 100 // -1 == play all
 #define SKIP_AFTER_SECONDS -1 // -1 == disable
@@ -120,7 +137,7 @@ static void play_next(void) {
     const char *song = queue_files[queue_pos];
     printf("%zu Playing %s\n", queue_pos + 1, song);
 
-    play_audio(song, NULL, NULL);
+    play_audio(song, NULL);
     ++queue_pos;
 
 #if SKIP_AFTER_SECONDS > 0
@@ -170,7 +187,16 @@ int main(int argc, char **argv) {
     shuffle_queue();
 
     // Setup
-    initialize("Nachtul", 50, 0, error_callback, eof_callback, restart_callback);
+    const InitializeConfig config = {
+        .app_name = "Test App",
+        .initial_volume = 50,
+        .initial_loop_count = 0,
+        .on_error = error_callback,
+        .on_eof = eof_callback,
+        .on_restart = restart_callback
+    };
+
+    initialize(&config);
 
     // Find audio devices
     int n;
@@ -182,7 +208,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    configure_audio_device(NULL, -1, true);
+    configure_audio_device(NULL);
 
 
     play_next();
@@ -190,5 +216,6 @@ int main(int argc, char **argv) {
     wait_loop();
 
     free_queue();
+    shutdown();
     return 0;
 }
