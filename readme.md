@@ -120,9 +120,12 @@ get_audio_duration();
 
 ## Todo 🚧
 - [ ] Write docs for setting up with a custom audio device
-- [ ] Setup audio device reconfigure for users and for when a device is lost during playback/idle (use system default)
+- [X] Setup audio device reconfigure for users and for when a device is lost during playback/idle (use system default)
   - Does not apply when audio device is configured with system default, SDL follows it but not custom set ones.
   - This will probably involve aborting playback, recreating the audio device, then playing the same stream with a seek to last pos
+  - [X] Test with non audio file
+  - [ ] Try to resolve "Could not open input stream." error when playing a new song directly after reconfiguring. avformat_open_input failing is most likely because is->abort is set to true. Would be best to try and not play the original file if the user is waiting for the next one to play
+  - [X] Calling configure_audio_device(&AudConfig) then configure_audio_device(NULL) directly after causes segfault in strcmp().
 - [X] Write additional public api functions
 - [ ] Setup Github Actions for release
 - [ ] Release C# P/Invoke and create nuget packages
@@ -151,4 +154,5 @@ get_audio_duration();
 - [ ] Upgrade to SDL3
 - [ ] Implement initial seek and play time in play_audio()
 - [ ] Setup logging with call instead of av_log()
+- [ ] Add is_from_error flag to eof_callback
 
