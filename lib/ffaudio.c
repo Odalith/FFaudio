@@ -149,6 +149,14 @@ static void abort_track() {
     }
 }
 
+static void wait_for_audio_reconfigure() {
+    SDL_LockMutex(audio_player->reconfigure_mutex);
+    while (audio_player->reconfigure_audio_device) {
+        SDL_CondWait(audio_player->reconfigure_cond, audio_player->reconfigure_mutex);
+    }
+    SDL_UnlockMutex(audio_player->reconfigure_mutex);
+}
+
 static void close_audio_device() {
     if (!audio_player) return;
 
@@ -1001,6 +1009,39 @@ void wait_loop() {
     }
 }
 
+static bool reconfigure_audio_device(const double orig_pos, const char* orig_file) {
+    close_audio_device();
+
+    bool custom_device = audio_player->audio_device_index > -1 && audio_player->audio_device_name != NULL;
+
+    if (custom_device && audio_open(audio_player->audio_device_name, audio_player->audio_device_index, false) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Failed to open custom audio device %s trying default\n", audio_player->audio_device_name);
+        custom_device = false;
+    }
+
+    if (!custom_device && audio_open(NULL, -1, true) < 0) {
+        av_log(NULL, AV_LOG_ERROR, "Failed to open default audio device\n");
+        return false;
+    }
+
+    audio_player->start_time = (int64_t)(orig_pos * 1000000);
+    audio_player->reset_start_time = true;
+    audio_player->current_track = stream_open(orig_file);
+
+    if (!audio_player->current_track) {
+        av_log(NULL, AV_LOG_ERROR, "Failed to initialize TrackState after device reconfiguration\n");
+        return false;
+    }
+
+    audio_player->is_audio_device_initialized = true;
+    audio_player->reconfigure_audio_device = false;
+    SDL_LockMutex(audio_player->reconfigure_mutex);
+    SDL_CondBroadcast(audio_player->reconfigure_cond);
+    SDL_UnlockMutex(audio_player->reconfigure_mutex);
+
+    return true;
+}
+
 static int event_thread(void* opaque) {
     SDL_AtomicSet(&audio_player->event_thread_running, true);
 
@@ -1032,30 +1073,11 @@ static int event_thread(void* opaque) {
                 cleanup_for_next_track(audio_player->current_track);
                 audio_player->current_track = NULL;
 
-                // If configured audio device is lost, move to the OS default
                 if (audio_player->reconfigure_audio_device) {
-                    audio_player->reconfigure_audio_device = false;
-
-                    close_audio_device();
-
-                    if (audio_open(NULL, -1, true) < 0) {
-                        av_log(NULL, AV_LOG_ERROR, "Failed to open audio device\n");
-                        av_free(filename);
-                        continue;
+                    if (!reconfigure_audio_device(pos, filename)) {
+                        av_log(NULL, AV_LOG_ERROR, "Failed to reconfigure audio device\n");
                     }
-
-                    audio_player->start_time = (int64_t)(pos * 1000000);
-                    audio_player->reset_start_time = true;
-                    audio_player->current_track = stream_open(filename);
-
-                    if (!audio_player->current_track) {
-                        av_log(NULL, AV_LOG_ERROR, "Failed to initialize TrackState after device reconfiguration\n");
-                        av_free(filename);
-                        continue;
-                    }
-
-                    av_free(filename);
-                    av_log(NULL, AV_LOG_INFO, "Moved audio output to system default as original device was lost\n");
+                    av_free((void*)filename);
                     continue;
                 }
 
@@ -1119,7 +1141,11 @@ static void app_state_init(AudioPlayer *s) {
     s->is_init_done = false;
     s->is_audio_device_initialized = false;
     s->reconfigure_audio_device = false;
+    s->reset_start_time = false;
 
+
+    s->audio_device_index = -1;
+    s->audio_device_name  = NULL;
     s->device_id = (SDL_AudioDeviceID)0;
     s->given_format = AUDIO_S16SYS;
     s->audio_target = (AudioParams *)malloc(sizeof(AudioParams));
@@ -1135,10 +1161,21 @@ void shutdown() {
 
     close_audio_device();
 
+    if (audio_player->audio_target) {
+        free(audio_player->audio_target);
+    }
+
+    if (audio_player->audio_device_name) {
+        av_free((void*)audio_player->audio_device_name);
+    }
+
     audio_player->is_init_done = false;
     SDL_WaitThread(audio_player->event_thread, NULL);
+    SDL_DestroyMutex(audio_player->reconfigure_mutex);
+    SDL_DestroyCond(audio_player->reconfigure_cond);
     SDL_DestroyMutex(audio_player->abort_mutex);
     SDL_DestroyCond(audio_player->abort_cond);
+
     SDL_Quit();
     //Todo avformat_network_deinit();
 }
@@ -1227,13 +1264,46 @@ int initialize(const InitializeConfig* config)
 }
 
 int configure_audio_device(const AudioDeviceConfig* custom_config) {
-    if (!audio_player->is_init_done) return -1;
+    if (!audio_player || !audio_player->is_init_done) return -1;
+
+    wait_for_audio_reconfigure();
 
     if (audio_player->is_audio_device_initialized) {
-        return -1;//Todo setup reconfigure
+
+        if (custom_config) {
+
+            if (custom_config->audio_device == NULL || custom_config->audio_device_index < 0) {
+                return -1;
+            }
+
+            if (audio_player->audio_device_index == custom_config->audio_device_index
+                || (audio_player->audio_device_name != NULL && strcmp(audio_player->audio_device_name, custom_config->audio_device) == 0)) {
+                return -1;
+            }
+
+            av_free((void*)audio_player->audio_device_name);
+            audio_player->audio_device_index = custom_config->audio_device_index;
+            audio_player->audio_device_name = av_strdup(custom_config->audio_device);
+        }
+        else {
+            if (audio_player->audio_device_name == NULL || audio_player->audio_device_index < 0) {
+                return -1;
+            }
+
+            av_free((void*)audio_player->audio_device_name);
+            audio_player->audio_device_index = -1;
+            audio_player->audio_device_name = NULL;
+        }
+
+        audio_player->reconfigure_audio_device = true;
+        audio_player->current_track->abort_request = true;
+
+        return 0;
     }
 
     if (custom_config) {
+        audio_player->audio_device_index = custom_config->audio_device_index;
+        audio_player->audio_device_name = av_strdup(custom_config->audio_device);
         if (audio_open(custom_config->audio_device, custom_config->audio_device_index, false) < 0) {
             SDL_Quit();
             return -1;
@@ -1254,6 +1324,8 @@ int configure_audio_device(const AudioDeviceConfig* custom_config) {
 
 void play_audio(const char *filename, const PlayAudioConfig* config) {
     if (!audio_player || !audio_player->is_init_done) return;
+
+    wait_for_audio_reconfigure();
 
     abort_track();
 
@@ -1282,6 +1354,9 @@ void play_audio(const char *filename, const PlayAudioConfig* config) {
 }
 
 void stop_audio() {
+
+    wait_for_audio_reconfigure();
+
     abort_track();
 
     ++audio_player->request_count;
@@ -1291,6 +1366,7 @@ void pause_audio(const bool value) {
 
     if (!audio_player->current_track || value == audio_player->current_track->paused) return;
 
+    wait_for_audio_reconfigure();
 
     if (value) {
         SDL_PauseAudioDevice(audio_player->device_id, 1);

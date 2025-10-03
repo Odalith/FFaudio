@@ -34,7 +34,7 @@
 #include "../lib/ffaudio.h"
 
 #define PLAY_COUNT 100 // -1 == play all
-#define SKIP_AFTER_SECONDS -1 // -1 == disable
+#define SKIP_AFTER_SECONDS 5 // -1 == disable
 
 static char **queue_files = NULL;
 static size_t queue_count = 0;
@@ -89,39 +89,6 @@ static void shuffle_queue(void) {
     }
 }
 
-static void play_next(void);
-
-static void* timer_thread_routine(void *arg) {
-    int delay_seconds = *(int*)arg;
-    free(arg);
-
-    if (skip_next_timer) {
-        skip_next_timer = false;
-        return NULL;
-    }
-
-    sleep((unsigned int)delay_seconds);
-    play_next();
-    return NULL;
-}
-
-static void schedule_after_seconds(int seconds) {
-    pthread_t tid;
-    int *arg = (int*)malloc(sizeof(int));
-    if (!arg) return;
-    *arg = seconds;
-
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-    if (pthread_create(&tid, &attr, timer_thread_routine, arg) != 0) {
-        pthread_attr_destroy(&attr);
-        free(arg);
-        return;
-    }
-    pthread_attr_destroy(&attr);
-}
-
 static void error_callback(const char* message, int request) {
     (void)request;
     fprintf(stdout, "Error: %s\n", message ? message : "(null)");
@@ -139,10 +106,6 @@ static void play_next(void) {
 
     play_audio(song, NULL);
     ++queue_pos;
-
-#if SKIP_AFTER_SECONDS > 0
-    schedule_after_seconds(SKIP_AFTER_SECONDS);
-#endif
 }
 
 static void eof_callback(bool is_eof_from_skip) {
@@ -151,10 +114,6 @@ static void eof_callback(bool is_eof_from_skip) {
     if (is_eof_from_skip) {
         printf("Skipped\n");
         return;
-    }
-
-    if (SKIP_AFTER_SECONDS > 0) {
-        skip_next_timer = true;
     }
 
     play_next();
@@ -208,12 +167,23 @@ int main(int argc, char **argv) {
         }
     }
 
+
     configure_audio_device(NULL);
 
 
     play_next();
 
-    wait_loop();
+    if (SKIP_AFTER_SECONDS > 0) {
+        for (int i = 0; i < PLAY_COUNT; ++i) {
+            sleep((unsigned int)SKIP_AFTER_SECONDS);
+
+            play_next();
+        }
+    }
+    else {
+        wait_loop();
+    }
+
 
     free_queue();
     shutdown();

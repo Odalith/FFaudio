@@ -241,6 +241,9 @@ typedef struct AudioPlayer {
     SDL_mutex *abort_mutex;            // default SDL_CreateMutex
     SDL_cond *abort_cond;              // default SDL_CreateCond
 
+    SDL_mutex *reconfigure_mutex;       // default SDL_CreateMutex
+    SDL_cond *reconfigure_cond;         // default SDL_CreateCond
+
     int64_t request_count;             // default 0
     bool is_init_done;                 // default false
     bool is_audio_device_initialized;  // default false
@@ -248,6 +251,9 @@ typedef struct AudioPlayer {
     bool reconfigure_audio_device;     // default false
     bool reset_start_time;             // default false
 
+
+    const char *audio_device_name;     // default NULL
+    int audio_device_index;            // default -1
     SDL_AudioDeviceID device_id;       // default 0
     SDL_AudioSpec given_spec;          // default NULL
     SDL_AudioFormat given_format;      // AUDIO_S16SYS
