@@ -707,11 +707,12 @@ static int read_thread(void *arg)
     return 0;
 }
 
-static TrackState *stream_open(const char *filename)
+static TrackState *stream_open(const char *filename, const int32_t handle)
 {
     TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
         return NULL;
+    is->handle = handle;
     is->last_audio_stream = is->audio_stream = -1;
     is->filename = av_strdup(filename);
     if (!is->filename)
@@ -1026,7 +1027,7 @@ static bool reconfigure_audio_device(const double orig_pos, const char* orig_fil
 
     audio_player->start_time = (int64_t)(orig_pos * 1000000);
     audio_player->reset_start_time = true;
-    audio_player->current_track = stream_open(orig_file);
+    audio_player->current_track = stream_open(orig_file, audio_player->handle_count);
 
     if (!audio_player->current_track) {
         av_log(NULL, AV_LOG_ERROR, "Failed to initialize TrackState after device reconfiguration\n");
@@ -1082,16 +1083,33 @@ static int event_thread(void* opaque) {
                 }
 
                 if (audio_player->notify_of_eof_callback) {
-                    audio_player->notify_of_eof_callback(audio_player->is_eof_from_skip);
+                    audio_player->notify_of_eof_callback(audio_player->is_eof_from_skip, audio_player->is_eof_from_error, audio_player->current_track->handle);
                 }
 
                 if (audio_player->is_eof_from_skip) {
                     audio_player->is_eof_from_skip = false;
                 }
 
+                if (audio_player->is_eof_from_error) {
+                    audio_player->is_eof_from_error = false;
+                }
+
                 SDL_LockMutex(audio_player->abort_mutex);
                 SDL_CondSignal(audio_player->abort_cond);
                 SDL_UnlockMutex(audio_player->abort_mutex);
+            }
+            else if (e.type == audio_player->log_event && audio_player->notify_of_log_callback) {
+                audio_player->notify_of_log_callback(e.user.data1, audio_player->request_count, e.user.code);
+            }
+            else if (e.type == audio_player->restart_event && audio_player->notify_of_restart_callback) {
+                audio_player->notify_of_restart_callback();
+            }
+            else if (e.type == audio_player->duration_update_event && audio_player->notify_of_duration_update_callback) {
+                audio_player->notify_of_duration_update_callback(*(double*)e.user.data1);
+            }
+            else if (e.type == audio_player->prepare_next_event && audio_player->notify_of_prepare_next_callback) {
+                char* next_file = audio_player->notify_of_prepare_next_callback();
+                //Todo
             }
         }
 
@@ -1102,8 +1120,8 @@ static int event_thread(void* opaque) {
     return 0;
 }
 
-static void app_state_init(AudioPlayer *s) {
-    if (!s) return;
+static int app_state_init(AudioPlayer *s) {
+    if (!s) return -1;
 
     // Zero everything first
     memset(s, 0, sizeof(*s));
@@ -1123,6 +1141,7 @@ static void app_state_init(AudioPlayer *s) {
     s->infinite_buffer = -1;
     s->find_stream_info = 1;
 
+    s->handle_count = 0;
     s->current_track = NULL;
     s->format_opts_n = NULL;
     s->codec_opts_n = NULL;
@@ -1131,7 +1150,19 @@ static void app_state_init(AudioPlayer *s) {
 
     SDL_AtomicSet(&s->event_thread_running, false);
     s->event_thread = NULL;
-    s->eof_event = SDL_RegisterEvents(1);
+
+    const Uint32 base = SDL_RegisterEvents(5);
+    if (base == (Uint32)-1 && s->notify_of_log_callback) {
+        s->notify_of_log_callback("Could not create SDL events", s->request_count, FATAL);
+        return -1;
+    }
+
+    s->eof_event = base;
+    s->log_event = base + 1;
+    s->restart_event = base + 2;
+    s->duration_update_event = base + 3;
+    s->prepare_next_event = base + 4;
+
 
     s->abort_mutex = SDL_CreateMutex();
     s->abort_cond = SDL_CreateCond();
@@ -1152,6 +1183,8 @@ static void app_state_init(AudioPlayer *s) {
 
     s->fast = 0;
     s->genpts = 0;
+
+    return 0;
 }
 
 void shutdown() {
@@ -1185,10 +1218,13 @@ int initialize(const InitializeConfig* config)
     if (audio_player || !config) return -1;
 
     audio_player = (AudioPlayer *)malloc(sizeof(AudioPlayer));
-    app_state_init(audio_player);
+    if (app_state_init(audio_player) < 0) {
+        free(audio_player);
+        return -1;
+    }
 
-    if (config->on_error) {
-        audio_player->notify_of_error_callback = config->on_error;
+    if (config->on_log) {
+        audio_player->notify_of_log_callback = config->on_log;
     }
 
     if (config->on_eof) {
@@ -1197,6 +1233,14 @@ int initialize(const InitializeConfig* config)
 
     if (config->on_restart) {
         audio_player->notify_of_restart_callback = config->on_restart;
+    }
+
+    if (config->on_duration_update) {
+        audio_player->notify_of_duration_update_callback = config->on_duration_update;
+    }
+
+    if (config->on_prepare_next) {
+        audio_player->notify_of_prepare_next_callback = config->on_prepare_next;
     }
 
 
@@ -1343,7 +1387,7 @@ void play_audio(const char *filename, const PlayAudioConfig* config) {
         av_freep(&crossfeed_filter);
     }
 
-    audio_player->current_track = stream_open(filename);
+    audio_player->current_track = stream_open(filename, ++audio_player->handle_count);
 
     if (!audio_player->current_track) {
         av_log(NULL, AV_LOG_FATAL, "Failed to initialize TrackState!\n");

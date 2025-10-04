@@ -39,9 +39,11 @@ extern "C" {
         const char* app_name;
         int initial_volume;          // 0..100
         int initial_loop_count;              // -1 for infinite
-        NotifyOfError on_error;
+        NotifyOfLog on_log;
         NotifyOfEndOfFile on_eof;
         NotifyOfRestart on_restart;
+        NotifyOfDurationUpdate on_duration_update;
+        NotifyOfPrepareNext on_prepare_next;
     } InitializeConfig;
 
     typedef struct AudioDeviceConfig {
