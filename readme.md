@@ -140,7 +140,7 @@ get_audio_duration();
 - [ ] Setup Equalizer with filterchain
 - [ ] Setup and test with different formats (Currently fixed to S16 regardless of what the device wants)
 - [ ] Create gapless audio playback for non-realtime streams
-  - [ ] 'Soon to be done' callback
+  - [X] 'Soon to be done' callback
   - [ ] Set up a second TrackState and swap in audio callback when the first stream is finished
   - [ ] AV network init/de-init
   - [ ] Cancel TrackState when the user changes stream after callback is called
@@ -151,10 +151,10 @@ get_audio_duration();
 - [X] Cleanup ffaudio.h, use different header for private structs, defines
 - [X] Create public config struct for initialize(), play_audio(), and configure_audio_device()
 - [X] Put source files into a folder structure
-- [ ] Callback to update duration (when known) for files that estimate it
+- [X] Callback to update duration (when known) for files that estimate it
 - [ ] Make sure `get_clock(&audio_player->current_track->audclk)` is accurate through pauses and seeks
 - [ ] Upgrade to SDL3
 - [ ] Implement initial seek and play time in play_audio()
-- [ ] Setup logging with call instead of av_log()
+- [X] Setup logging with call instead of av_log()
 - [ ] Add is_from_error flag to eof_callback
 
