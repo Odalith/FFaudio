@@ -9,6 +9,7 @@ It is a heavily modified version of FFplay, so all credit for its general design
 - Support for Crossfeed and EBU R128 audio normalization
 - Easy-to-use API for integrating audio playback into applications
 - Performant and memory efficient thanks again to FFmpeg
+- Supports playing audio through a custom audio device
 - Licensed under the LGPLv2.1 and free to use
 
 ## Who It's For
@@ -20,15 +21,15 @@ It is a heavily modified version of FFplay, so all credit for its general design
 - Gapless playback for non-realtime streams via 'soon to be done callback'
 - User-configurable Equalizer, with realtime updates
 - Crossfade with custom crossfade time (Note that the currently supported Crossfeed is different from Crossfade)
-- Audio mixing of multiple streams
-- Generation of EBU R128 audio normalization data (Currently, you have to do this yourself. FFaudio only does the adjustment part)
 
 ## Possible Features
+- Audio mixing of multiple streams
 - Audio file conversion
 - OS integration. Linux MPRIS support, for example.
 - Custom channel layouts
 - Support for audio formats with more than two channels
 - Assuming compatible hardware, support playing DSD without conversion to PCM
+- Generation of EBU R128 audio normalization data (Currently, you have to do this yourself. FFaudio only does the adjustment part)
 - Multiple simultaneous audio devices
 
 
@@ -120,6 +121,7 @@ get_audio_duration();
 
 ## Todo 🚧
 - [ ] Write docs for setting up with a custom audio device
+- [ ] Create a test suite
 - [X] Setup audio device reconfigure for users and for when a device is lost during playback/idle (use system default)
   - Does not apply when audio device is configured with system default, SDL follows it but not custom set ones.
   - This will probably involve aborting playback, recreating the audio device, then playing the same stream with a seek to last pos
@@ -138,7 +140,7 @@ get_audio_duration();
 - [ ] Setup Equalizer with filterchain
 - [ ] Setup and test with different formats (Currently fixed to S16 regardless of what the device wants)
 - [ ] Create gapless audio playback for non-realtime streams
-  - [ ] 'Soon to be done' callback
+  - [X] 'Soon to be done' callback
   - [ ] Set up a second TrackState and swap in audio callback when the first stream is finished
   - [ ] AV network init/de-init
   - [ ] Cancel TrackState when the user changes stream after callback is called
@@ -149,10 +151,10 @@ get_audio_duration();
 - [X] Cleanup ffaudio.h, use different header for private structs, defines
 - [X] Create public config struct for initialize(), play_audio(), and configure_audio_device()
 - [X] Put source files into a folder structure
-- [ ] Callback to update duration (when known) for files that estimate it
+- [X] Callback to update duration (when known) for files that estimate it
 - [ ] Make sure `get_clock(&audio_player->current_track->audclk)` is accurate through pauses and seeks
 - [ ] Upgrade to SDL3
 - [ ] Implement initial seek and play time in play_audio()
-- [ ] Setup logging with call instead of av_log()
+- [X] Setup logging with call instead of av_log()
 - [ ] Add is_from_error flag to eof_callback
 

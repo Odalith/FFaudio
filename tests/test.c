@@ -89,9 +89,22 @@ static void shuffle_queue(void) {
     }
 }
 
-static void error_callback(const char* message, int request) {
-    (void)request;
-    fprintf(stdout, "Error: %s\n", message ? message : "(null)");
+static void error_callback(const char* message, int64_t request, enum LOG_LEVEL level) {
+
+    switch (level) {
+        case FATAL:
+            fprintf(stdout, "Fatal: %s\n", message ? message : "(null)");
+            break;
+        case ERROR:
+            fprintf(stderr, "Error: %s\n", message ? message : "(null)");
+            break;
+        case WARNING:
+            fprintf(stderr, "Warning: %s\n", message ? message : "(null)");
+            break;
+        case INFO:
+            fprintf(stdout, "Info: %s\n", message ? message : "(null)");
+            break;
+    }
 }
 
 static void play_next(void) {
@@ -108,8 +121,12 @@ static void play_next(void) {
     ++queue_pos;
 }
 
-static void eof_callback(bool is_eof_from_skip) {
+static void eof_callback(bool is_eof_from_skip, bool is_from_error, int32_t handle) {
     printf("EOF\n");
+
+    if (is_from_error) {
+        printf("Error\n");
+    }
 
     if (is_eof_from_skip) {
         printf("Skipped\n");
@@ -150,9 +167,11 @@ int main(int argc, char **argv) {
         .app_name = "Test App",
         .initial_volume = 50,
         .initial_loop_count = 0,
-        .on_error = error_callback,
+        .on_log = error_callback,
         .on_eof = eof_callback,
-        .on_restart = restart_callback
+        .on_restart = restart_callback,
+        .on_duration_update = NULL,
+        .on_prepare_next = NULL,
     };
 
     initialize(&config);
@@ -167,6 +186,12 @@ int main(int argc, char **argv) {
         }
     }
 
+    /*const AudioDeviceConfig AudConfig1 = {
+          .audio_device = "Navi 10 HDMI Audio Digital Stereo (HDMI 3)",
+          .audio_device_index = 2
+      };
+
+      configure_audio_device(&AudConfig1);*/
 
     configure_audio_device(NULL);
 
@@ -176,6 +201,17 @@ int main(int argc, char **argv) {
     if (SKIP_AFTER_SECONDS > 0) {
         for (int i = 0; i < PLAY_COUNT; ++i) {
             sleep((unsigned int)SKIP_AFTER_SECONDS);
+
+            /*const AudioDeviceConfig AudConfig2 = {
+                .audio_device = "Bose QC Ultra Headphones",
+                .audio_device_index = 3
+            };
+
+            configure_audio_device(&AudConfig2);
+
+            configure_audio_device(NULL);*/
+
+            //sleep((unsigned int)SKIP_AFTER_SECONDS);
 
             play_next();
         }

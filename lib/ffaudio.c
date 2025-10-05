@@ -43,6 +43,75 @@ const int program_birth_year = 2025;
 
 static AudioPlayer *audio_player = NULL;
 
+static char * fmt_string(const char *fmt, ...) {
+    if (!fmt) return NULL;
+
+    va_list args;
+    va_start(args, fmt);
+
+    va_list args_copy;
+    va_copy(args_copy, args);
+    const int needed = vsnprintf(NULL, 0, fmt, args_copy);
+    va_end(args_copy);
+
+    if (needed < 0) {
+        va_end(args);
+        return NULL;
+    }
+
+    char *buf = (char*)malloc((size_t)needed + 1);
+    if (!buf) {
+        va_end(args);
+        return NULL;
+    }
+
+    vsnprintf(buf, (size_t)needed + 1, fmt, args);
+    va_end(args);
+
+    return buf;
+}
+
+// Note: The formatted string is heap-allocated and is not freed here; the
+// receiver of the log event should free it when appropriate.
+static void send_log_event(enum LOG_LEVEL level, const char *fmt, ...) {
+
+    if (!fmt) return;
+
+    va_list args;
+    va_start(args, fmt);
+
+    va_list args_copy;
+    va_copy(args_copy, args);
+    const int needed = vsnprintf(NULL, 0, fmt, args_copy);
+    va_end(args_copy);
+
+    if (needed < 0) {
+        va_end(args);
+        return;
+    }
+
+    char *buf = (char*)malloc((size_t)needed + 1);
+    if (!buf) {
+        va_end(args);
+        return;
+    }
+
+    vsnprintf(buf, (size_t)needed + 1, fmt, args);
+    va_end(args);
+
+    int64_t req = audio_player ? audio_player->request_count : 0;
+
+    SDL_Event event;
+    SDL_memset(&event, 0, sizeof(event));
+
+    event.type = audio_player->log_event;
+    event.user.data1 = (void*)buf;
+    event.user.data2 = (void*)req;
+    event.user.code = level;
+    //event.user.timestamp = SDL_GetTicks64();
+    SDL_PushEvent(&event);
+}
+
 static void remove_avoptions_n(AVDictionary **a, const AVDictionary *b)
 {
     const AVDictionaryEntry *t = NULL;
@@ -56,12 +125,14 @@ static int check_avoptions_n(const AVDictionary *m)
 {
     const AVDictionaryEntry *t = av_dict_iterate(m, NULL);
     if (t) {
-        av_log(NULL, AV_LOG_FATAL, "Option %s not found.\n", t->key);
+        send_log_event(FATAL, "Option %s not found.", t->key);
         return AVERROR_OPTION_NOT_FOUND;
     }
 
     return 0;
 }
+
+
 
 static void track_state_clear(TrackState *is)
 {
@@ -255,10 +326,10 @@ static int audio_thread(void *arg)
                     char buf1[1024], buf2[1024];
                     av_channel_layout_describe(&is->audio_filter_src.ch_layout, buf1, sizeof(buf1));
                     av_channel_layout_describe(&frame->ch_layout, buf2, sizeof(buf2));
-                    av_log(NULL, AV_LOG_DEBUG,
-                           "Audio frame changed from rate:%d ch:%d fmt:%s layout:%s serial:%d to rate:%d ch:%d fmt:%s layout:%s serial:%d\n",
+                    /*send_log_event(INFO,
+                           "Audio frame changed from rate:%d ch:%d fmt:%s layout:%s serial:%d to rate:%d ch:%d fmt:%s layout:%s serial:%d",
                            is->audio_filter_src.freq, is->audio_filter_src.ch_layout.nb_channels, av_get_sample_fmt_name(is->audio_filter_src.fmt), buf1, last_serial,
-                           frame->sample_rate, frame->ch_layout.nb_channels, av_get_sample_fmt_name(frame->format), buf2, is->audio_decoder.pkt_serial);
+                           frame->sample_rate, frame->ch_layout.nb_channels, av_get_sample_fmt_name(frame->format), buf2, is->audio_decoder.pkt_serial);*/
 
                     is->audio_filter_src.fmt            = frame->format;
                     ret = av_channel_layout_copy(&is->audio_filter_src.ch_layout, &frame->ch_layout);
@@ -330,7 +401,7 @@ static int stream_component_open(TrackState *is, const int stream_index)
     codec = avcodec_find_decoder(avctx->codec_id);
 
     if (avctx->codec_type != AVMEDIA_TYPE_AUDIO) {
-        av_log(NULL, AV_LOG_ERROR, "Unsupported codec type %d!\n", avctx->codec_type);
+        send_log_event(ERROR, "Unsupported codec type %d!", avctx->codec_type);
         goto fail;
     }
 
@@ -339,10 +410,10 @@ static int stream_component_open(TrackState *is, const int stream_index)
     if (forced_codec_name)
         codec = avcodec_find_decoder_by_name(forced_codec_name);
     if (!codec) {
-        if (forced_codec_name) av_log(NULL, AV_LOG_WARNING,
-                                      "No codec could be found with name '%s'\n", forced_codec_name);
-        else                   av_log(NULL, AV_LOG_WARNING,
-                                      "No decoder could be found for codec %s\n", avcodec_get_name(avctx->codec_id));
+        if (forced_codec_name) send_log_event(WARNING,
+                                      "No codec could be found with name '%s'", forced_codec_name);
+        else                   send_log_event(WARNING,
+                                      "No decoder could be found for codec %s", avcodec_get_name(avctx->codec_id));
         ret = AVERROR(EINVAL);
         goto fail;
     }
@@ -422,7 +493,7 @@ static int read_thread(void *arg)
     int64_t pkt_ts;
 
     if (!wait_mutex) {
-        av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());
+        send_log_event(FATAL, "SDL_CreateMutex(): %s", SDL_GetError());
         ret = AVERROR(ENOMEM);
         goto fail;
     }
@@ -432,13 +503,13 @@ static int read_thread(void *arg)
 
     pkt = av_packet_alloc();
     if (!pkt) {
-        av_log(NULL, AV_LOG_FATAL, "Could not allocate packet.\n");
+        send_log_event(FATAL, "Could not allocate packet.");
         ret = AVERROR(ENOMEM);
         goto fail;
     }
     ic = avformat_alloc_context();
     if (!ic) {
-        av_log(NULL, AV_LOG_FATAL, "Could not allocate context.\n");
+        send_log_event(FATAL, "Could not allocate context.");
         ret = AVERROR(ENOMEM);
         goto fail;
     }
@@ -454,7 +525,7 @@ static int read_thread(void *arg)
 
     err = avformat_open_input(&ic, is->filename, is->iformat, &audio_player->format_opts_n);
     if (err < 0) {
-        av_log(NULL, AV_LOG_ERROR, "Could not open input stream.\n");
+        send_log_event(ERROR, "Could not open input stream.");
         ret = -1;
         goto fail;
     }
@@ -479,8 +550,8 @@ static int read_thread(void *arg)
 
         err = setup_find_stream_info_opts_n(ic, audio_player->codec_opts_n, &opts);
         if (err < 0) {
-            av_log(NULL, AV_LOG_ERROR,
-                   "Error setting up avformat_find_stream_info() options\n");
+            send_log_event(ERROR,
+                   "Error setting up avformat_find_stream_info() options");
             ret = err;
             goto fail;
         }
@@ -492,8 +563,8 @@ static int read_thread(void *arg)
         av_freep(&opts);
 
         if (err < 0) {
-            av_log(NULL, AV_LOG_WARNING,
-                   "%s: could not find codec parameters\n", is->filename);
+            send_log_event(WARNING,
+                   "%s: could not find codec parameters", is->filename);
             ret = -1;
             goto fail;
         }
@@ -518,7 +589,7 @@ static int read_thread(void *arg)
             timestamp += ic->start_time;
         ret = avformat_seek_file(ic, -1, INT64_MIN, timestamp, INT64_MAX, 0);
         if (ret < 0) {
-            av_log(NULL, AV_LOG_WARNING, "%s: could not seek to position %0.3f\n",
+            send_log_event(WARNING, "%s: could not seek to position %0.3f",
                     is->filename, (double)timestamp / AV_TIME_BASE);
         }
         else if (audio_player->reset_start_time) {
@@ -538,7 +609,7 @@ static int read_thread(void *arg)
     }
     for (i = 0; i < AVMEDIA_TYPE_NB; i++) {
         if (audio_player->wanted_stream_spec[i] && st_index[i] == -1) {
-            av_log(NULL, AV_LOG_ERROR, "Stream specifier %s does not match any %s stream\n", audio_player->wanted_stream_spec[i], av_get_media_type_string(i));
+            send_log_event(ERROR, "Stream specifier %s does not match any %s stream", audio_player->wanted_stream_spec[i], av_get_media_type_string(i));
             st_index[i] = INT_MAX;
         }
     }
@@ -558,7 +629,7 @@ static int read_thread(void *arg)
 
 
     if (is->audio_stream < 0) {
-        av_log(NULL, AV_LOG_FATAL, "Failed to open file '%s' or configure filtergraph\n",
+        send_log_event(ERROR, "Failed to open file '%s' or configure filtergraph",
                is->filename);
         ret = -1;
         goto fail;
@@ -598,8 +669,8 @@ static int read_thread(void *arg)
             ret = avformat_seek_file(is->ic, -1, seek_min, seek_target, seek_max, is->seek_flags);
 
             if (ret < 0) {
-                av_log(NULL, AV_LOG_ERROR,
-                       "%s: error while seeking\n", is->ic->url);
+                send_log_event(ERROR,
+                       "%s: error while seeking", is->ic->url);
             } else {
                 if (is->audio_stream >= 0)
                     packet_queue_flush(&is->audio_queue);
@@ -684,6 +755,10 @@ static int read_thread(void *arg)
         avformat_close_input(&ic);
     }
 
+    if (ret != 0) {
+        audio_player->is_eof_from_error = true;
+    }
+
     av_packet_free(&pkt);
     /*if (ret != 0) {
         SDL_Event event;
@@ -707,11 +782,12 @@ static int read_thread(void *arg)
     return 0;
 }
 
-static TrackState *stream_open(const char *filename)
+static TrackState *stream_open(const char *filename, const int32_t handle)
 {
     TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
         return NULL;
+    is->handle = handle;
     is->last_audio_stream = is->audio_stream = -1;
     is->filename = av_strdup(filename);
     if (!is->filename)
@@ -726,7 +802,7 @@ static TrackState *stream_open(const char *filename)
         goto fail;
 
     if (!((is->continue_read_thread = SDL_CreateCond()))) {
-        av_log(NULL, AV_LOG_FATAL, "SDL_CreateCond(): %s\n", SDL_GetError());
+        send_log_event(FATAL, "SDL_CreateCond(): %s", SDL_GetError());
         goto fail;
     }
 
@@ -742,14 +818,10 @@ static TrackState *stream_open(const char *filename)
     is->read_tid = SDL_CreateThread(read_thread, "read_thread", is);
 
     if (!is->read_tid) {
-        av_log(NULL, AV_LOG_FATAL, "SDL_CreateThread(): %s\n", SDL_GetError());
+        send_log_event(FATAL, "SDL_CreateThread(): %s", SDL_GetError());
 fail:
-        /*SDL_Event event;
-        SDL_memset(&event, 0, sizeof(event));
-
-        event.type = audio_player->eof_event;
-        event.user.data1 = is;
-        SDL_PushEvent(&event); Todo send event here?*/
+        audio_player->is_eof_from_error = true;
+        //Todo cleanup is on fail
         return NULL;
     }
     return is;
@@ -803,8 +875,8 @@ static int audio_decode_frame(TrackState *is)
                                       0, NULL);
 
         if (ret < 0 || swr_init(is->swr_ctx) < 0) {
-            av_log(NULL, AV_LOG_ERROR,
-                   "Cannot create sample rate converter for conversion of %d Hz %s %d channels to %d Hz %s %d channels!\n",
+            send_log_event(ERROR,
+                   "Cannot create sample rate converter for conversion of %d Hz %s %d channels to %d Hz %s %d channels!",
                     frame->frame->sample_rate, av_get_sample_fmt_name(frame->frame->format), frame->frame->ch_layout.nb_channels,
                     audio_player->audio_target->freq, av_get_sample_fmt_name(audio_player->audio_target->fmt), audio_player->audio_target->ch_layout.nb_channels);
             swr_free(&is->swr_ctx);
@@ -822,13 +894,13 @@ static int audio_decode_frame(TrackState *is)
         const unsigned int out_count = (int64_t)wanted_nb_samples * audio_player->audio_target->freq / frame->frame->sample_rate + 256;
         const int out_size  = av_samples_get_buffer_size(NULL, audio_player->audio_target->ch_layout.nb_channels, out_count, audio_player->audio_target->fmt, 0);
         if (out_size < 0) {
-            av_log(NULL, AV_LOG_ERROR, "av_samples_get_buffer_size() failed\n");
+            send_log_event(ERROR, "av_samples_get_buffer_size() failed");
             return -1;
         }
         if (wanted_nb_samples != frame->frame->nb_samples) {
             if (swr_set_compensation(is->swr_ctx, (wanted_nb_samples - frame->frame->nb_samples) * audio_player->audio_target->freq / frame->frame->sample_rate,
                                         wanted_nb_samples * audio_player->audio_target->freq / frame->frame->sample_rate) < 0) {
-                av_log(NULL, AV_LOG_ERROR, "swr_set_compensation() failed\n");
+                send_log_event(ERROR, "swr_set_compensation() failed");
                 return -1;
             }
         }
@@ -837,11 +909,11 @@ static int audio_decode_frame(TrackState *is)
             return AVERROR(ENOMEM);
         const int len2 = swr_convert(is->swr_ctx, out, out_count, in, frame->frame->nb_samples);
         if (len2 < 0) {
-            av_log(NULL, AV_LOG_ERROR, "swr_convert() failed\n");
+            send_log_event(ERROR, "swr_convert() failed");
             return -1;
         }
         if (len2 == out_count) {
-            av_log(NULL, AV_LOG_WARNING, "audio buffer is probably too small\n");
+            send_log_event(WARNING, "audio buffer is probably too small");
             if (swr_init(is->swr_ctx) < 0)
                 swr_free(&is->swr_ctx);
         }
@@ -862,7 +934,7 @@ static int audio_decode_frame(TrackState *is)
 #ifdef DEBUG
     {
         static double last_clock;
-        printf("audio: delay=%0.3f clock=%0.3f clock0=%0.3f\n",
+        printf("audio: delay=%0.3f clock=%0.3f clock0=%0.3f",
                is->audio_clock - last_clock,
                is->audio_clock, audio_clock0);
         last_clock = is->audio_clock;
@@ -920,7 +992,7 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
     if (audio_player->is_audio_device_initialized) return audio_player->given_spec.size;
 
     if (!use_default && (!audio_device || audio_device_index < 0)) {
-        av_log(NULL, AV_LOG_ERROR, "Audio device cannot be null or index cannot be negative\n");
+        send_log_event(ERROR, "Audio device cannot be null or index cannot be negative");
     }
 
     SDL_AudioSpec preferred_spec, spec;
@@ -929,7 +1001,7 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
     if (use_default) {
         char *default_device = {0};
         if (SDL_GetDefaultAudioInfo(&default_device, &preferred_spec, false) != 0) {//Todo inform user of chosen audio device? So far it only has "System default"
-            av_log(NULL, AV_LOG_ERROR, "Failed to get default preferred audio device spec for %s\n", audio_device);
+            send_log_event(ERROR, "Failed to get default preferred audio device spec for %s", audio_device);
             free(default_device);
             return -1;
         }
@@ -937,7 +1009,7 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
     }
     else {
         if (SDL_GetAudioDeviceSpec(audio_device_index, false, &preferred_spec) != 0) {
-            av_log(NULL, AV_LOG_ERROR, "Failed to get preferred audio device spec\n");
+            send_log_event(ERROR, "Failed to get preferred audio device spec");
             return -1;
         }
     }
@@ -947,7 +1019,7 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
     av_channel_layout_default(&wanted_channel_layout, preferred_spec.channels);
 
     if (preferred_spec.freq <= 0 || preferred_spec.channels <= 0) {
-        av_log(NULL, AV_LOG_ERROR, "Invalid sample rate or channel count!\n");
+        send_log_event(ERROR, "Invalid sample rate or channel count!");
         av_channel_layout_uninit(&wanted_channel_layout);
         return -1;
     }
@@ -958,15 +1030,15 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
     preferred_spec.userdata = NULL;
 
     if (!((audio_player->device_id = SDL_OpenAudioDevice(use_default ? NULL : audio_device, false, &preferred_spec, &spec, 0)))) {
-        av_log(NULL, AV_LOG_ERROR, "SDL_OpenAudioDevice (%d channels, %d Hz): %s\n", preferred_spec.channels, preferred_spec.freq, SDL_GetError());
+        send_log_event(ERROR, "SDL_OpenAudioDevice (%d channels, %d Hz): %s", preferred_spec.channels, preferred_spec.freq, SDL_GetError());
         av_channel_layout_uninit(&wanted_channel_layout);
         return -1;
     }
 
 
     if (spec.format != audio_player->given_format) {
-        av_log(NULL, AV_LOG_ERROR,
-               "SDL advised audio format %d is not supported!\n", spec.format);
+        send_log_event(ERROR,
+               "SDL advised audio format %d is not supported!", spec.format);
         av_channel_layout_uninit(&wanted_channel_layout);
         return -1;
     }
@@ -975,8 +1047,8 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
         av_channel_layout_default(&wanted_channel_layout, spec.channels);
 
         if (wanted_channel_layout.order != AV_CHANNEL_ORDER_NATIVE) {
-            av_log(NULL, AV_LOG_ERROR,
-                   "SDL advised channel count %d is not supported!\n", spec.channels);
+            send_log_event(ERROR,
+                   "SDL advised channel count %d is not supported!", spec.channels);
             av_channel_layout_uninit(&wanted_channel_layout);
             return -1;
         }
@@ -991,7 +1063,7 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
     audio_player->audio_target->frame_size = av_samples_get_buffer_size(NULL, audio_player->audio_target->ch_layout.nb_channels, 1, audio_player->audio_target->fmt, 1);
     audio_player->audio_target->bytes_per_sec = av_samples_get_buffer_size(NULL, audio_player->audio_target->ch_layout.nb_channels, audio_player->audio_target->freq, audio_player->audio_target->fmt, 1);
     if (audio_player->audio_target->bytes_per_sec <= 0 || audio_player->audio_target->frame_size <= 0) {
-        av_log(NULL, AV_LOG_ERROR, "av_samples_get_buffer_size failed\n");
+        send_log_event(ERROR, "av_samples_get_buffer_size failed");
         av_channel_layout_uninit(&wanted_channel_layout);
         return -1;
     }
@@ -1015,21 +1087,21 @@ static bool reconfigure_audio_device(const double orig_pos, const char* orig_fil
     bool custom_device = audio_player->audio_device_index > -1 && audio_player->audio_device_name != NULL;
 
     if (custom_device && audio_open(audio_player->audio_device_name, audio_player->audio_device_index, false) < 0) {
-        av_log(NULL, AV_LOG_ERROR, "Failed to open custom audio device %s trying default\n", audio_player->audio_device_name);
+        send_log_event(ERROR, "Failed to open custom audio device %s trying default", audio_player->audio_device_name);
         custom_device = false;
     }
 
     if (!custom_device && audio_open(NULL, -1, true) < 0) {
-        av_log(NULL, AV_LOG_ERROR, "Failed to open default audio device\n");
+        send_log_event(ERROR, "Failed to open default audio device");
         return false;
     }
 
     audio_player->start_time = (int64_t)(orig_pos * 1000000);
     audio_player->reset_start_time = true;
-    audio_player->current_track = stream_open(orig_file);
+    audio_player->current_track = stream_open(orig_file, audio_player->handle_count);
 
     if (!audio_player->current_track) {
-        av_log(NULL, AV_LOG_ERROR, "Failed to initialize TrackState after device reconfiguration\n");
+        send_log_event(ERROR, "Failed to initialize TrackState after device reconfiguration");
         return false;
     }
 
@@ -1061,6 +1133,8 @@ static int event_thread(void* opaque) {
             else if (e.type == audio_player->eof_event && audio_player->current_track) {
                 const char *filename = NULL;
                 double pos = 0;
+                int32_t handle = audio_player->current_track->handle;
+
 
                 if (audio_player->reconfigure_audio_device) {
                     filename = av_strdup(audio_player->current_track->filename);
@@ -1075,23 +1149,42 @@ static int event_thread(void* opaque) {
 
                 if (audio_player->reconfigure_audio_device) {
                     if (!reconfigure_audio_device(pos, filename)) {
-                        av_log(NULL, AV_LOG_ERROR, "Failed to reconfigure audio device\n");
+                        send_log_event(ERROR, "Failed to reconfigure audio device");
                     }
                     av_free((void*)filename);
                     continue;
                 }
 
                 if (audio_player->notify_of_eof_callback) {
-                    audio_player->notify_of_eof_callback(audio_player->is_eof_from_skip);
+                    audio_player->notify_of_eof_callback(audio_player->is_eof_from_skip, audio_player->is_eof_from_error, handle);
                 }
 
                 if (audio_player->is_eof_from_skip) {
                     audio_player->is_eof_from_skip = false;
                 }
 
+                if (audio_player->is_eof_from_error) {
+                    audio_player->is_eof_from_error = false;
+                }
+
                 SDL_LockMutex(audio_player->abort_mutex);
                 SDL_CondSignal(audio_player->abort_cond);
                 SDL_UnlockMutex(audio_player->abort_mutex);
+            }
+            else if (e.type == audio_player->log_event && audio_player->notify_of_log_callback) {
+                audio_player->notify_of_log_callback(e.user.data1, audio_player->request_count, e.user.code);
+                free(e.user.data1);
+                e.user.data1 = NULL;
+            }
+            else if (e.type == audio_player->restart_event && audio_player->notify_of_restart_callback) {
+                audio_player->notify_of_restart_callback();
+            }
+            else if (e.type == audio_player->duration_update_event && audio_player->notify_of_duration_update_callback) {
+                audio_player->notify_of_duration_update_callback(*(double*)e.user.data1);
+            }
+            else if (e.type == audio_player->prepare_next_event && audio_player->notify_of_prepare_next_callback) {
+                char* next_file = audio_player->notify_of_prepare_next_callback();
+                //Todo
             }
         }
 
@@ -1102,8 +1195,8 @@ static int event_thread(void* opaque) {
     return 0;
 }
 
-static void app_state_init(AudioPlayer *s) {
-    if (!s) return;
+static int app_state_init(AudioPlayer *s) {
+    if (!s) return -1;
 
     // Zero everything first
     memset(s, 0, sizeof(*s));
@@ -1123,6 +1216,7 @@ static void app_state_init(AudioPlayer *s) {
     s->infinite_buffer = -1;
     s->find_stream_info = 1;
 
+    s->handle_count = 0;
     s->current_track = NULL;
     s->format_opts_n = NULL;
     s->codec_opts_n = NULL;
@@ -1131,7 +1225,6 @@ static void app_state_init(AudioPlayer *s) {
 
     SDL_AtomicSet(&s->event_thread_running, false);
     s->event_thread = NULL;
-    s->eof_event = SDL_RegisterEvents(1);
 
     s->abort_mutex = SDL_CreateMutex();
     s->abort_cond = SDL_CreateCond();
@@ -1152,6 +1245,8 @@ static void app_state_init(AudioPlayer *s) {
 
     s->fast = 0;
     s->genpts = 0;
+
+    return 0;
 }
 
 void shutdown() {
@@ -1185,10 +1280,13 @@ int initialize(const InitializeConfig* config)
     if (audio_player || !config) return -1;
 
     audio_player = (AudioPlayer *)malloc(sizeof(AudioPlayer));
-    app_state_init(audio_player);
+    if (app_state_init(audio_player) < 0) {
+        free(audio_player);
+        return -1;
+    }
 
-    if (config->on_error) {
-        audio_player->notify_of_error_callback = config->on_error;
+    if (config->on_log) {
+        audio_player->notify_of_log_callback = config->on_log;
     }
 
     if (config->on_eof) {
@@ -1199,10 +1297,18 @@ int initialize(const InitializeConfig* config)
         audio_player->notify_of_restart_callback = config->on_restart;
     }
 
+    if (config->on_duration_update) {
+        audio_player->notify_of_duration_update_callback = config->on_duration_update;
+    }
+
+    if (config->on_prepare_next) {
+        audio_player->notify_of_prepare_next_callback = config->on_prepare_next;
+    }
+
 
     init_dynload();
 
-    av_log_set_flags(AV_LOG_SKIP_REPEATED);
+    //av_log_set_flags(AV_LOG_SKIP_REPEATED);
     av_log_set_level(AV_LOG_INFO);
 
     /* register all codecs, demux and protocols */
@@ -1233,17 +1339,27 @@ int initialize(const InitializeConfig* config)
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
 
     if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_TIMER | SDL_INIT_EVENTS)) {
-        av_log(NULL, AV_LOG_FATAL, "Could not initialize SDL - %s\n", SDL_GetError());
+        if (audio_player->notify_of_log_callback) {
+            audio_player->notify_of_log_callback(fmt_string("Could not initialize SDL - %s", SDL_GetError()), audio_player->request_count, FATAL);
+        }
         SDL_Quit();
         return -1;
     }
 
-    audio_player->eof_event = SDL_RegisterEvents(1);
-    if (audio_player->eof_event  == (Uint32)-1) {
-        SDL_Log("Failed to register custom events");
-        SDL_Quit();
+    const Uint32 base = SDL_RegisterEvents(5);
+    if (base == (Uint32)-1) {
+        if (audio_player->notify_of_log_callback) {
+            audio_player->notify_of_log_callback(fmt_string("Could not create SDL events - %s", SDL_GetError()), audio_player->request_count, FATAL);
+        }
+
         return -1;
     }
+
+    audio_player->eof_event = base;
+    audio_player->log_event = base + 1;
+    audio_player->restart_event = base + 2;
+    audio_player->duration_update_event = base + 3;
+    audio_player->prepare_next_event = base + 4;
 
     SDL_EventState(SDL_SYSWMEVENT, SDL_IGNORE);
     SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
@@ -1252,7 +1368,10 @@ int initialize(const InitializeConfig* config)
     // Start the event thread
     audio_player->event_thread = SDL_CreateThread(event_thread, "Event_Thread", NULL);
     if (!audio_player->event_thread) {
-        SDL_Log("SDL_CreateThread Error: %s", SDL_GetError());
+        if (audio_player->notify_of_log_callback) {
+            audio_player->notify_of_log_callback(fmt_string("SDL_CreateThread Error: %s", SDL_GetError()), audio_player->request_count, FATAL);
+        }
+
         SDL_Quit();
         return -1;
     }
@@ -1343,10 +1462,10 @@ void play_audio(const char *filename, const PlayAudioConfig* config) {
         av_freep(&crossfeed_filter);
     }
 
-    audio_player->current_track = stream_open(filename);
+    audio_player->current_track = stream_open(filename, ++audio_player->handle_count);
 
     if (!audio_player->current_track) {
-        av_log(NULL, AV_LOG_FATAL, "Failed to initialize TrackState!\n");
+        send_log_event(FATAL, "Failed to initialize TrackState!");
         //do_exit(NULL);
     }
 

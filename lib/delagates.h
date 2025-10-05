@@ -21,8 +21,17 @@
 #ifndef FFAUDIO_DELAGATES_H
 #define FFAUDIO_DELAGATES_H
 
-typedef void (*NotifyOfError)(const char* message, int request);
-typedef void (*NotifyOfEndOfFile)(bool is_eof_from_skip);
+enum LOG_LEVEL {
+ INFO = 0,
+ WARNING = 1,
+ ERROR = 2,
+ FATAL = 3
+};
+
+typedef void (*NotifyOfLog)(const char* message, int64_t request, enum LOG_LEVEL level);
+typedef void (*NotifyOfEndOfFile)(bool is_eof_from_skip, bool is_from_error, int32_t handle);
 typedef void (*NotifyOfRestart)();
+typedef void (*NotifyOfDurationUpdate)(double new_duration);
+typedef char* (*NotifyOfPrepareNext)();
 
 #endif //FFAUDIO_DELAGATES_H

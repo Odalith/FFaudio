@@ -148,6 +148,7 @@ typedef struct Decoder {
 } Decoder;
 
 typedef struct TrackState {
+    int32_t handle;
     SDL_Thread *read_tid;
     int abort_request;
     int paused;
@@ -228,7 +229,7 @@ typedef struct AudioPlayer {
     int infinite_buffer;               // default -1
     int find_stream_info;              // default 1
 
-
+    int32_t handle_count;              // default 0
     TrackState *current_track;         // default NULL
     AVDictionary *format_opts_n;       // default NULL
     AVDictionary *codec_opts_n;        // default NULL
@@ -236,7 +237,12 @@ typedef struct AudioPlayer {
 
     SDL_Thread *event_thread;          // default NULL
     SDL_atomic_t event_thread_running; // default false
+
     Uint32 eof_event;                  // default SDL_RegisterEvents
+    Uint32 log_event;                  // default SDL_RegisterEvents
+    Uint32 restart_event;              // default SDL_RegisterEvents
+    Uint32 duration_update_event;      // default SDL_RegisterEvents
+    Uint32 prepare_next_event;         // default SDL_RegisterEvents
 
     SDL_mutex *abort_mutex;            // default SDL_CreateMutex
     SDL_cond *abort_cond;              // default SDL_CreateCond
@@ -248,6 +254,7 @@ typedef struct AudioPlayer {
     bool is_init_done;                 // default false
     bool is_audio_device_initialized;  // default false
     bool is_eof_from_skip;             // default false
+    bool is_eof_from_error;            // default false
     bool reconfigure_audio_device;     // default false
     bool reset_start_time;             // default false
 
@@ -260,9 +267,11 @@ typedef struct AudioPlayer {
     AudioParams *audio_target;         // default malloc
 
     //Callbacks
-    NotifyOfError notify_of_error_callback;    // default NULL
-    NotifyOfEndOfFile notify_of_eof_callback;  // default NULL
-    NotifyOfRestart notify_of_restart_callback;// default NULL
+    NotifyOfLog notify_of_log_callback;                  // default NULL
+    NotifyOfEndOfFile notify_of_eof_callback;            // default NULL
+    NotifyOfRestart notify_of_restart_callback;          // default NULL
+    NotifyOfDurationUpdate notify_of_duration_update_callback;    // default NULL
+    NotifyOfPrepareNext notify_of_prepare_next_callback; // default NULL
 
     // Likely to be removed
     int fast;                          // default 0
