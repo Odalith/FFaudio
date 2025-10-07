@@ -338,7 +338,7 @@ static int audio_thread(void *arg)
                     is->audio_filter_src.freq           = frame->sample_rate;
                     last_serial                         = is->audio_decoder.pkt_serial;
 
-                    if ((ret = configure_audio_filters(audio_player, is, audio_player->audio_filters, true)) < 0)
+                    if ((ret = configure_audio_filters(audio_player, is, audio_player->track_filters, true)) < 0)
                         goto the_end;
                 }
 
@@ -1082,6 +1082,7 @@ void wait_loop() {
 }
 
 static bool reconfigure_audio_device(const double orig_pos, const char* orig_file) {
+    const Uint8 orig_channels = audio_player->given_spec.channels;
     close_audio_device();
 
     bool custom_device = audio_player->audio_device_index > -1 && audio_player->audio_device_name != NULL;
@@ -1094,6 +1095,13 @@ static bool reconfigure_audio_device(const double orig_pos, const char* orig_fil
     if (!custom_device && audio_open(NULL, -1, true) < 0) {
         send_log_event(ERROR, "Failed to open default audio device");
         return false;
+    }
+
+    //Update EQ filter to match channel count
+    if (orig_channels != audio_player->given_spec.channels && audio_player->anequalizer_filter) {
+        av_free(audio_player->anequalizer_filter);
+        audio_player->anequalizer_filter = NULL;
+        update_anequalizer_str(audio_player, audio_player->given_spec.channels);
     }
 
     audio_player->start_time = (int64_t)(orig_pos * 1000000);
@@ -1133,7 +1141,7 @@ static int event_thread(void* opaque) {
             else if (e.type == audio_player->eof_event && audio_player->current_track) {
                 const char *filename = NULL;
                 double pos = 0;
-                int32_t handle = audio_player->current_track->handle;
+                const int32_t handle = audio_player->current_track->handle;
 
 
                 if (audio_player->reconfigure_audio_device) {
@@ -1206,7 +1214,8 @@ static int app_state_init(AudioPlayer *s) {
     s->sdl_volume = 0;
     s->filter_nbthreads = 0;
     s->audio_callback_time = 0;
-    s->audio_filters = NULL;
+    s->track_filters = NULL;
+    s->anequalizer_filter = NULL;
 
 
     s->seek_by_bytes = -1;
@@ -1452,13 +1461,13 @@ void play_audio(const char *filename, const PlayAudioConfig* config) {
 
     if (config && config->loudnorm_settings) {
         const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", config->loudnorm_settings);
-        add_to_filter_chain(audio_player, loudnorm_filter);
+        add_to_filter_chain_end(audio_player, loudnorm_filter);
         av_freep(&loudnorm_filter);
     }
 
     if (config && config->crossfeed_setting) {
         const char *crossfeed_filter = av_asprintf("crossfeed=%s", config->crossfeed_setting);
-        add_to_filter_chain(audio_player, crossfeed_filter);
+        add_to_filter_chain_end(audio_player, crossfeed_filter);
         av_freep(&crossfeed_filter);
     }
 
@@ -1643,5 +1652,24 @@ int get_audio_devices(int *out_total, char ***out_devices) {
     *out_total = count;
     *out_devices = devices;
     return 0;
+}
+
+bool set_equalizer(const EqualizerConfig params) {
+    if (!audio_player || !audio_player->is_audio_device_initialized) return false;
+
+    wait_for_audio_reconfigure();
+
+    update_anequalizer_array(audio_player, &params);
+
+    if (audio_player->anequalizer_filter) {
+        av_free(audio_player->anequalizer_filter);
+        audio_player->anequalizer_filter = NULL;
+        
+        //Todo update EQ during runtime
+    }
+
+    update_anequalizer_str(audio_player, audio_player->given_spec.channels);
+
+    return true;
 }
 

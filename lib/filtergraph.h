@@ -22,14 +22,21 @@
 #define FFAUDIO_FILTERGRAPH_H
 
 #include "globals.h"
+#include "ffaudio.h"
 
-void add_to_filter_chain(AudioPlayer *ap, const char *filter_name);
+void add_to_filter_chain_end(AudioPlayer *ap, const char *filter_name);
+
+void add_to_filter_chain_start(AudioPlayer *ap, const char *filter_name);
 
 void clear_filter_chain(AudioPlayer *ap);
+
+void update_anequalizer_array(AudioPlayer *ap, const EqualizerConfig* params);
+
+void update_anequalizer_str(AudioPlayer *ap, const int16_t channels);
 
 int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
                                  AVFilterContext *source_ctx, AVFilterContext *sink_ctx);
 
-int configure_audio_filters(AudioPlayer *ap, TrackState *is, const char *afilters, int force_output_format);
+int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const char *track_filters, const bool force_output_format);
 
 #endif //FFAUDIO_FILTERGRAPH_H

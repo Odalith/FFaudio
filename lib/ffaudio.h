@@ -51,6 +51,20 @@ extern "C" {
         int audio_device_index;      // Index in enumerated list; See get_audio_devices()
     } AudioDeviceConfig;
 
+    // Values can be positive (amplification) or negative (attenuation). Measured in Decibels
+    typedef struct EqualizerConfig {
+        double one_31Hz;
+        double two_63Hz;
+        double three_125Hz;
+        double four_250Hz;
+        double five_500Hz;
+        double six_1000Hz;
+        double seven_2000Hz;
+        double eight_4000Hz;
+        double nine_8000Hz;
+        double ten_16000Hz;
+    } EqualizerConfig;
+
     typedef struct PlayAudioConfig {
         double skip_seconds;            // Optional; Seek this many seconds before starting playback. <= 0 == plays from the start
         double play_time;               // Optional; How many seconds to play audio before quiting. <= 0 == plays to the end
@@ -98,6 +112,9 @@ extern "C" {
 
     //List the user's audio devices
     DLL_EXPORT int get_audio_devices(int *out_total, char ***out_devices);
+
+    //Set or update equalizer settings; Persists through tracks
+    DLL_EXPORT bool set_equalizer(const EqualizerConfig params);
 
 #ifdef __cplusplus
 } // extern "C"
