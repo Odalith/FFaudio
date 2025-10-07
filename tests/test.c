@@ -34,7 +34,7 @@
 #include "../lib/ffaudio.h"
 
 #define PLAY_COUNT 100 // -1 == play all
-#define SKIP_AFTER_SECONDS 5 // -1 == disable
+#define SKIP_AFTER_SECONDS -1 // -1 == disable
 
 static char **queue_files = NULL;
 static size_t queue_count = 0;
@@ -186,15 +186,22 @@ int main(int argc, char **argv) {
         }
     }
 
-    /*const AudioDeviceConfig AudConfig1 = {
-          .audio_device = "Navi 10 HDMI Audio Digital Stereo (HDMI 3)",
-          .audio_device_index = 2
-      };
-
-      configure_audio_device(&AudConfig1);*/
-
     configure_audio_device(NULL);
 
+    const EqualizerConfig params = {
+        .one_31Hz = 2.0,
+        .two_63Hz = 1.5,
+        .three_125Hz = 1,
+        .four_250Hz = -0.5,
+        .five_500Hz = -0.5,
+        .six_1000Hz = 0.5,
+        .seven_2000Hz = 1.5,
+        .eight_4000Hz = 2,
+        .nine_8000Hz = 2.5,
+        .ten_16000Hz = 3
+    };
+
+    set_equalizer(params);
 
     play_next();
 

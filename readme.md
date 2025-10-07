@@ -6,7 +6,7 @@ It is a heavily modified version of FFplay, so all credit for its general design
 ## Features
 - Cross-platform support for Windows, Linux, macOS, Android, and iOS
 - Thanks to FFmpeg it can decode and play basically any file with an audio component
-- Support for Crossfeed and EBU R128 audio normalization
+- Support for 10 band Equalizer, Crossfeed, and EBU R128 audio normalization
 - Easy-to-use API for integrating audio playback into applications
 - Performant and memory efficient thanks again to FFmpeg
 - Supports playing audio through a custom audio device
@@ -19,7 +19,7 @@ It is a heavily modified version of FFplay, so all credit for its general design
 ## Planned Features
 - Fully support playback of rtp, rtsp, udp, and sdp (non-realtime) audio streams
 - Gapless playback for non-realtime streams via 'soon to be done callback'
-- User-configurable Equalizer, with realtime updates
+- Realtime updates to Equalizer
 - Crossfade with custom crossfade time (Note that the currently supported Crossfeed is different from Crossfade)
 
 ## Possible Features
@@ -137,7 +137,8 @@ get_audio_duration();
   - [ ] macOS
   - [ ] Android
   - [ ] iOS
-- [ ] Setup Equalizer with filterchain
+- [X] Setup Equalizer with filterchain
+- [ ] Setup updates for Equalizer values during playback with `change` command: https://ffmpeg.org/ffmpeg-filters.html#anequalizer
 - [ ] Setup and test with different formats (Currently fixed to S16 regardless of what the device wants)
 - [ ] Create gapless audio playback for non-realtime streams
   - [X] 'Soon to be done' callback
@@ -156,5 +157,8 @@ get_audio_duration();
 - [ ] Upgrade to SDL3
 - [ ] Implement initial seek and play time in play_audio()
 - [X] Setup logging with call instead of av_log()
-- [ ] Add is_from_error flag to eof_callback
+- [X] Add is_from_error flag to eof_callback
+- [ ] Fix error flag == true when no errors
+- [ ] Remove CrossFeed from 'track_filters' and add them in a similar fashion to Equalizer
+- [ ] Add/test support for audio formats with more than two channels
 

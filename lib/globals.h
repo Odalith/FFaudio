@@ -25,6 +25,7 @@
 #define SUBPICTURE_QUEUE_SIZE 16
 #define SAMPLE_QUEUE_SIZE 9
 #define FRAME_QUEUE_SIZE FFMAX(SAMPLE_QUEUE_SIZE, FFMAX(VIDEO_PICTURE_QUEUE_SIZE, SUBPICTURE_QUEUE_SIZE))
+#define EQ_BAND_COUNT 10
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -220,7 +221,9 @@ typedef struct AudioPlayer {
     int sdl_volume;                    // default 0
     int filter_nbthreads;              // default 0
     int64_t audio_callback_time;       // default 0
-    char *audio_filters;               // default NULL
+    char *track_filters;               // default NULL
+    char *anequalizer_filter;          // default NULL
+    int16_t anequalizer_values[EQ_BAND_COUNT]; //default [0, ...]
     const char* wanted_stream_spec[AVMEDIA_TYPE_NB]; // default [NULL]
     int seek_by_bytes;                 // default -1
     int64_t start_time;                // AV_NOPTS_VALUE, how much to seek before playing
