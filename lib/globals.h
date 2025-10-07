@@ -26,6 +26,8 @@
 #define SAMPLE_QUEUE_SIZE 9
 #define FRAME_QUEUE_SIZE FFMAX(SAMPLE_QUEUE_SIZE, FFMAX(VIDEO_PICTURE_QUEUE_SIZE, SUBPICTURE_QUEUE_SIZE))
 #define EQ_BAND_COUNT 10
+#define SecondsToMicroseconds(x) ((x) * 1000000)
+#define AV_TIME_BASE_DOUBLE 1000000.0
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -158,6 +160,8 @@ typedef struct TrackState {
     int seek_flags;
     int64_t seek_pos;
     int64_t seek_rel;
+    int64_t start_time;                // AV_NOPTS_VALUE, how much to seek before playing
+    int64_t play_duration;             // AV_NOPTS_VALUE, how much to play
     int read_pause_return;
     AVFormatContext *ic;
     int realtime;
@@ -226,8 +230,6 @@ typedef struct AudioPlayer {
     int16_t anequalizer_values[EQ_BAND_COUNT]; //default [0, ...]
     const char* wanted_stream_spec[AVMEDIA_TYPE_NB]; // default [NULL]
     int seek_by_bytes;                 // default -1
-    int64_t start_time;                // AV_NOPTS_VALUE, how much to seek before playing
-    int64_t play_duration;             // AV_NOPTS_VALUE, how much to play
     int loop;                          // default 0
     int infinite_buffer;               // default -1
     int find_stream_info;              // default 1
@@ -259,7 +261,7 @@ typedef struct AudioPlayer {
     bool is_eof_from_skip;             // default false
     bool is_eof_from_error;            // default false
     bool reconfigure_audio_device;     // default false
-    bool reset_start_time;             // default false
+    int64_t audio_reconfigure_time;    // AV_NOPTS_VALUE, where to seek after reconfigure is complete
 
 
     const char *audio_device_name;     // default NULL

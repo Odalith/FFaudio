@@ -582,8 +582,8 @@ static int read_thread(void *arg)
 
 
     /* if seeking requested, we execute it */
-    if (audio_player->start_time != AV_NOPTS_VALUE) {
-        int64_t timestamp = audio_player->start_time;
+    if (audio_player->audio_reconfigure_time != AV_NOPTS_VALUE || is->start_time != AV_NOPTS_VALUE) {
+        int64_t timestamp = audio_player->audio_reconfigure_time != AV_NOPTS_VALUE ? audio_player->audio_reconfigure_time : is->start_time;
         /* add the stream start time */
         if (ic->start_time != AV_NOPTS_VALUE)
             timestamp += ic->start_time;
@@ -592,8 +592,9 @@ static int read_thread(void *arg)
             send_log_event(WARNING, "%s: could not seek to position %0.3f",
                     is->filename, (double)timestamp / AV_TIME_BASE);
         }
-        else if (audio_player->reset_start_time) {
-            audio_player->start_time = AV_NOPTS_VALUE;
+
+        if (audio_player->audio_reconfigure_time != AV_NOPTS_VALUE) {
+            audio_player->audio_reconfigure_time = AV_NOPTS_VALUE;
         }
     }
 
@@ -707,7 +708,7 @@ static int read_thread(void *arg)
                 if (audio_player->loop >= 1) {
                     audio_player->loop--;
                 }
-                stream_seek(is, audio_player->start_time != AV_NOPTS_VALUE ? audio_player->start_time : 0, 0, 0);
+                stream_seek(is, is->start_time != AV_NOPTS_VALUE ? is->start_time : 0, 0, 0);
             }
             else {
                 ret = AVERROR_EOF;
@@ -736,11 +737,11 @@ static int read_thread(void *arg)
         stream_start_time = ic->streams[pkt->stream_index]->start_time;
         pkt_ts = pkt->pts == AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
         pkt_in_play_range =
-            audio_player->play_duration == AV_NOPTS_VALUE
+            is->play_duration == AV_NOPTS_VALUE
         || (pkt_ts - (stream_start_time != AV_NOPTS_VALUE ? stream_start_time : 0))
             * av_q2d(ic->streams[pkt->stream_index]->time_base)
-            - (double)(audio_player->start_time != AV_NOPTS_VALUE ? audio_player->start_time : 0) / 1000000
-            <= ((double)audio_player->play_duration / 1000000);
+            - (double)(is->start_time != AV_NOPTS_VALUE ? is->start_time : 0) / AV_TIME_BASE
+            <= ((double)is->play_duration / AV_TIME_BASE);
 
         if (pkt->stream_index == is->audio_stream && pkt_in_play_range) {
             packet_queue_put(&is->audio_queue, pkt);
@@ -755,7 +756,7 @@ static int read_thread(void *arg)
         avformat_close_input(&ic);
     }
 
-    if (ret != 0) {
+    if (ret != AVERROR_EOF && ret != 0) {
         audio_player->is_eof_from_error = true;
     }
 
@@ -782,7 +783,7 @@ static int read_thread(void *arg)
     return 0;
 }
 
-static TrackState *stream_open(const char *filename, const int32_t handle)
+static TrackState *stream_open(const char *filename, const int64_t start_time, const int64_t play_duration, const int32_t handle)
 {
     TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
@@ -794,6 +795,8 @@ static TrackState *stream_open(const char *filename, const int32_t handle)
         goto fail;
     is->iformat = av_find_input_format(filename);
     is->forced_audio_codec_name = NULL;
+    is->start_time = start_time;
+    is->play_duration = play_duration;
 
     if (frame_queue_init(&is->sampq, &is->audio_queue, SAMPLE_QUEUE_SIZE, 1) < 0)
         goto fail;
@@ -982,7 +985,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
     is->audio_write_buf_size = is->audio_buf0_size - is->audio_buf_index;
     /* Let's assume the audio driver that is used by SDL has two periods. */
     if (!isnan(is->audio_clock)) {
-        set_clock_at(&is->audclk, is->audio_clock - (double)(2 * is->audio_hw_buf_size + is->audio_write_buf_size) / audio_player->audio_target->bytes_per_sec, is->audio_clock_serial, audio_player->audio_callback_time / 1000000.0);
+        set_clock_at(&is->audclk, is->audio_clock - (double)(2 * is->audio_hw_buf_size + is->audio_write_buf_size) / audio_player->audio_target->bytes_per_sec, is->audio_clock_serial, (double)audio_player->audio_callback_time / AV_TIME_BASE_DOUBLE);
         sync_clock_to_slave(&is->extclk, &is->audclk);
     }
 }
@@ -1076,12 +1079,12 @@ void wait_loop() {
     double remaining_time = 0.0;
     while (1) {
         if (remaining_time > 0.0)
-            av_usleep((int64_t)(remaining_time * 1000000.0));
+            av_usleep((int64_t)(remaining_time * AV_TIME_BASE_DOUBLE));
         remaining_time = REFRESH_RATE;
     }
 }
 
-static bool reconfigure_audio_device(const double orig_pos, const char* orig_file) {
+static bool reconfigure_audio_device(const double orig_pos, const int64_t start_time, const int64_t play_duration, const char* orig_file) {
     const Uint8 orig_channels = audio_player->given_spec.channels;
     close_audio_device();
 
@@ -1104,9 +1107,11 @@ static bool reconfigure_audio_device(const double orig_pos, const char* orig_fil
         update_anequalizer_str(audio_player, audio_player->given_spec.channels);
     }
 
-    audio_player->start_time = (int64_t)(orig_pos * 1000000);
-    audio_player->reset_start_time = true;
-    audio_player->current_track = stream_open(orig_file, audio_player->handle_count);
+    if (orig_pos > 0) {
+        audio_player->audio_reconfigure_time = SecondsToMicroseconds(orig_pos);
+    }
+
+    audio_player->current_track = stream_open(orig_file, start_time, play_duration, audio_player->handle_count);
 
     if (!audio_player->current_track) {
         send_log_event(ERROR, "Failed to initialize TrackState after device reconfiguration");
@@ -1141,6 +1146,8 @@ static int event_thread(void* opaque) {
             else if (e.type == audio_player->eof_event && audio_player->current_track) {
                 const char *filename = NULL;
                 double pos = 0;
+                int64_t start_time = AV_NOPTS_VALUE;
+                int64_t play_duration = AV_NOPTS_VALUE;
                 const int32_t handle = audio_player->current_track->handle;
 
 
@@ -1150,13 +1157,16 @@ static int event_thread(void* opaque) {
 
                     if (pos == NAN)
                         pos = 0;
+
+                    start_time = audio_player->current_track->start_time;
+                    play_duration = audio_player->current_track->play_duration;
                 }
 
                 cleanup_for_next_track(audio_player->current_track);
                 audio_player->current_track = NULL;
 
                 if (audio_player->reconfigure_audio_device) {
-                    if (!reconfigure_audio_device(pos, filename)) {
+                    if (!reconfigure_audio_device(pos, start_time, play_duration, filename)) {
                         send_log_event(ERROR, "Failed to reconfigure audio device");
                     }
                     av_free((void*)filename);
@@ -1219,8 +1229,6 @@ static int app_state_init(AudioPlayer *s) {
 
 
     s->seek_by_bytes = -1;
-    s->start_time = AV_NOPTS_VALUE;
-    s->play_duration = AV_NOPTS_VALUE;
     s->loop = 0;
     s->infinite_buffer = -1;
     s->find_stream_info = 1;
@@ -1243,7 +1251,7 @@ static int app_state_init(AudioPlayer *s) {
     s->is_init_done = false;
     s->is_audio_device_initialized = false;
     s->reconfigure_audio_device = false;
-    s->reset_start_time = false;
+    s->audio_reconfigure_time = AV_NOPTS_VALUE;
 
 
     s->audio_device_index = -1;
@@ -1459,19 +1467,34 @@ void play_audio(const char *filename, const PlayAudioConfig* config) {
 
     clear_filter_chain(audio_player);
 
-    if (config && config->loudnorm_settings) {
-        const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", config->loudnorm_settings);
-        add_to_filter_chain_end(audio_player, loudnorm_filter);
-        av_freep(&loudnorm_filter);
+    int64_t start_time = AV_NOPTS_VALUE;
+    int64_t play_duration = AV_NOPTS_VALUE;
+
+    if (config) {
+        if (config->loudnorm_settings) {
+            const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", config->loudnorm_settings);
+            add_to_filter_chain_end(audio_player, loudnorm_filter);
+            av_freep(&loudnorm_filter);
+        }
+
+        if (config->crossfeed_setting) {
+            const char *crossfeed_filter = av_asprintf("crossfeed=%s", config->crossfeed_setting);
+            add_to_filter_chain_end(audio_player, crossfeed_filter);
+            av_freep(&crossfeed_filter);
+        }
+
+        if (config->play_duration > 0) {
+            play_duration = SecondsToMicroseconds(config->play_duration);
+        }
+
+        if (config->skip_seconds > 0) {
+            start_time = SecondsToMicroseconds(config->skip_seconds);
+        }
+
     }
 
-    if (config && config->crossfeed_setting) {
-        const char *crossfeed_filter = av_asprintf("crossfeed=%s", config->crossfeed_setting);
-        add_to_filter_chain_end(audio_player, crossfeed_filter);
-        av_freep(&crossfeed_filter);
-    }
 
-    audio_player->current_track = stream_open(filename, ++audio_player->handle_count);
+    audio_player->current_track = stream_open(filename, start_time, play_duration, ++audio_player->handle_count);
 
     if (!audio_player->current_track) {
         send_log_event(FATAL, "Failed to initialize TrackState!");
@@ -1598,7 +1621,7 @@ double get_audio_duration() {
         return -1;
     }
 
-    return duration / 1000000.0;
+    return duration / AV_TIME_BASE_DOUBLE;
 }
 
 int get_audio_devices(int *out_total, char ***out_devices) {
