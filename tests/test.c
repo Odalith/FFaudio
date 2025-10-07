@@ -117,7 +117,13 @@ static void play_next(void) {
     const char *song = queue_files[queue_pos];
     printf("%zu Playing %s\n", queue_pos + 1, song);
 
-    play_audio(song, NULL);
+    const PlayAudioConfig config = {
+        .skip_seconds = 10.0,
+        .play_duration = 10.0,
+        .crossfeed_setting = NULL
+    };
+
+    play_audio(song, &config);
     ++queue_pos;
 }
 

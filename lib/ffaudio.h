@@ -67,7 +67,7 @@ extern "C" {
 
     typedef struct PlayAudioConfig {
         double skip_seconds;            // Optional; Seek this many seconds before starting playback. <= 0 == plays from the start
-        double play_time;               // Optional; How many seconds to play audio before quiting. <= 0 == plays to the end
+        double play_duration;           // Optional; How many seconds to play audio before quiting. <= 0 == plays to the end
         const char* loudnorm_settings;  // Optional; NULL to disable. Add loudness normalization filter. Ex: "I=-16:TP=-1.5:LRA=11:measured_I=-8.9:measured_LRA=5.2:measured_TP=1.1:measured_thresh=-19.1:offset=-0.8"
         const char* crossfeed_setting;  // Optional; NULL to disable. Add crossfeed filter. Ex: "0.5"
     } PlayAudioConfig;
