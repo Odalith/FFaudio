@@ -756,7 +756,7 @@ static int read_thread(void *arg)
         avformat_close_input(&ic);
     }
 
-    if (ret != 0) {
+    if (ret != AVERROR_EOF && ret != 0) {
         audio_player->is_eof_from_error = true;
     }
 
