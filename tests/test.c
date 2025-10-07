@@ -215,6 +215,17 @@ int main(int argc, char **argv) {
         for (int i = 0; i < PLAY_COUNT; ++i) {
             sleep((unsigned int)SKIP_AFTER_SECONDS);
 
+            /*const AudioDeviceConfig AudConfig2 = {
+                .audio_device = "Bose QC Ultra Headphones",
+                .audio_device_index = 3
+            };
+
+            configure_audio_device(&AudConfig2);
+
+            configure_audio_device(NULL);*/
+
+            //sleep((unsigned int)SKIP_AFTER_SECONDS);
+
             play_next();
         }
     }
