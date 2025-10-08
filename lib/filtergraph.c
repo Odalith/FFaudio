@@ -189,7 +189,7 @@ int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const char *t
     av_bprint_init(&bp, 0, AV_BPRINT_SIZE_AUTOMATIC);
 
     //Todo swr_opts was empty so swr_opts_n is left null but this should probably be implemented at some point
-    while ((e = av_dict_iterate(ap->swr_opts_n, e))) {
+    while ((e = av_dict_iterate(is->swr_opts_n, e))) {
         av_strlcatf(aresample_swr_opts, sizeof(aresample_swr_opts), "%s=%s:", e->key, e->value);
     }
 
