@@ -163,7 +163,8 @@ static void track_state_clear(TrackState *is)
         }
     }
 
-    free(is->forced_audio_codec_name);
+
+    av_free(is->forced_audio_codec_name);
     is->forced_audio_codec_name = NULL;
 
     avformat_close_input(&is->ic);
@@ -185,8 +186,13 @@ static void track_state_clear(TrackState *is)
     avfilter_free(is->out_audio_filter);
     avfilter_graph_free(&is->agraph);*/
 
-    free((void*)is->filename);
+    av_free((void*)is->filename);
     SDL_DestroyCond(is->continue_read_thread);
+
+    //All of these are NULL
+    av_dict_free(&is->swr_opts_n);
+    av_dict_free(&is->format_opts_n);
+    av_dict_free(&is->codec_opts_n);
 
     av_free(is);
 
@@ -200,10 +206,6 @@ static void cleanup_for_next_track(TrackState *is) {
         is = NULL;
     }
 
-    //All of these are NULL
-    av_dict_free(&audio_player->swr_opts_n);
-    av_dict_free(&audio_player->format_opts_n);
-    av_dict_free(&audio_player->codec_opts_n);
     SDL_PauseAudioDevice(audio_player->device_id, 1);
 }
 
@@ -518,12 +520,12 @@ static int read_thread(void *arg)
 
 
     //Adds scan_all_pmts = 1 then removes it
-    if (!av_dict_get(audio_player->format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
-        av_dict_set(&audio_player->format_opts_n, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
+    if (!av_dict_get(is->format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE)) {
+        av_dict_set(&is->format_opts_n, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
         scan_all_pmts_set = 1;//This is set
     }
 
-    err = avformat_open_input(&ic, is->filename, is->iformat, &audio_player->format_opts_n);
+    err = avformat_open_input(&ic, is->filename, is->iformat, &is->format_opts_n);
     if (err < 0) {
         send_log_event(ERROR, "Could not open input stream.");
         ret = -1;
@@ -531,11 +533,11 @@ static int read_thread(void *arg)
     }
 
     if (scan_all_pmts_set)
-        av_dict_set(&audio_player->format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
+        av_dict_set(&is->format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
 
-    remove_avoptions_n(&audio_player->format_opts_n, audio_player->codec_opts_n);
+    remove_avoptions_n(&is->format_opts_n, is->codec_opts_n);
 
-    ret = check_avoptions_n(audio_player->format_opts_n);
+    ret = check_avoptions_n(is->format_opts_n);
     if (ret < 0)
         goto fail;
 
@@ -548,7 +550,7 @@ static int read_thread(void *arg)
         AVDictionary **opts;
         const unsigned int orig_nb_streams = ic->nb_streams;
 
-        err = setup_find_stream_info_opts_n(ic, audio_player->codec_opts_n, &opts);
+        err = setup_find_stream_info_opts_n(ic, is->codec_opts_n, &opts);
         if (err < 0) {
             send_log_event(ERROR,
                    "Error setting up avformat_find_stream_info() options");
@@ -761,14 +763,6 @@ static int read_thread(void *arg)
     }
 
     av_packet_free(&pkt);
-    /*if (ret != 0) {
-        SDL_Event event;
-        SDL_memset(&event, 0, sizeof(event));
-
-        event.type = audio_player->eof_event;
-        event.user.data1 = is;
-        SDL_PushEvent(&event);
-    }*/
     SDL_DestroyMutex(wait_mutex);
 
 
@@ -787,7 +781,7 @@ static TrackState *stream_open(const char *filename, const int64_t start_time, c
 {
     TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
-        return NULL;
+        return NULL;//Todo send EOF here? If this ever fails, no EOF event is sent. But chances are if this could not be allocated then neither will the next
     is->handle = handle;
     is->last_audio_stream = is->audio_stream = -1;
     is->filename = av_strdup(filename);
@@ -797,6 +791,9 @@ static TrackState *stream_open(const char *filename, const int64_t start_time, c
     is->forced_audio_codec_name = NULL;
     is->start_time = start_time;
     is->play_duration = play_duration;
+    is->format_opts_n = NULL;
+    is->codec_opts_n = NULL;
+    is->swr_opts_n = NULL;
 
     if (frame_queue_init(&is->sampq, &is->audio_queue, SAMPLE_QUEUE_SIZE, 1) < 0)
         goto fail;
@@ -823,8 +820,14 @@ static TrackState *stream_open(const char *filename, const int64_t start_time, c
     if (!is->read_tid) {
         send_log_event(FATAL, "SDL_CreateThread(): %s", SDL_GetError());
 fail:
+        audio_player->errored_handle = audio_player->handle_count;
         audio_player->is_eof_from_error = true;
-        //Todo cleanup is on fail
+        SDL_Event event;
+        SDL_memset(&event, 0, sizeof(event));
+
+        event.type = audio_player->eof_event;
+        event.user.data1 = is;
+        SDL_PushEvent(&event);
         return NULL;
     }
     return is;
@@ -1143,7 +1146,23 @@ static int event_thread(void* opaque) {
                 }
                 //In the future, forward this event to user for updating device options
             }
-            else if (e.type == audio_player->eof_event && audio_player->current_track) {
+            else if (e.type == audio_player->eof_event && audio_player->current_track == NULL) {// Cleanup for the error case
+                const int32_t handle = audio_player->handle_count;
+                cleanup_for_next_track(e.user.data1);
+
+                if (audio_player->notify_of_eof_callback) {
+                    audio_player->notify_of_eof_callback(audio_player->is_eof_from_skip, audio_player->is_eof_from_error, audio_player->errored_handle);
+                }
+
+                if (audio_player->is_eof_from_skip) {
+                    audio_player->is_eof_from_skip = false;
+                }
+
+                if (audio_player->is_eof_from_error) {
+                    audio_player->is_eof_from_error = false;
+                }
+            }
+            else if (e.type == audio_player->eof_event && audio_player->current_track) {// Cleanup for the skip && EOF case
                 const char *filename = NULL;
                 double pos = 0;
                 int64_t start_time = AV_NOPTS_VALUE;
@@ -1235,9 +1254,6 @@ static int app_state_init(AudioPlayer *s) {
 
     s->handle_count = 0;
     s->current_track = NULL;
-    s->format_opts_n = NULL;
-    s->codec_opts_n = NULL;
-    s->swr_opts_n = NULL;
 
 
     SDL_AtomicSet(&s->event_thread_running, false);
