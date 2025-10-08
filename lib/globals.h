@@ -72,26 +72,26 @@
 
 typedef struct MyAVPacketList {
     AVPacket *pkt;
-    int serial;
+    int32_t serial;
 } MyAVPacketList;
 
 typedef struct PacketQueue {
     AVFifo *pkt_list;
-    int nb_packets;
-    int size;
+    int32_t nb_packets;
+    int32_t size;
     int64_t duration;
-    int abort_request;
-    int serial;
+    int32_t abort_request;
+    int32_t serial;
     SDL_mutex *mutex;
     SDL_cond *cond;
 } PacketQueue;
 
 typedef struct AudioParams {
-    int freq;
+    int32_t freq;
     AVChannelLayout ch_layout;
     enum AVSampleFormat fmt;
-    int frame_size;
-    int bytes_per_sec;
+    int32_t frame_size;
+    int32_t bytes_per_sec;
 } AudioParams;
 
 typedef struct Clock {
@@ -99,9 +99,9 @@ typedef struct Clock {
     double pts_drift;     /* clock base minus time at which we updated the clock */
     double last_updated;
     double speed;
-    int serial;           /* clock is based on a packet with this serial */
-    int paused;
-    int *queue_serial;    /* pointer to the current packet queue serial, used for obsolete clock detection */
+    int32_t serial;           /* clock is based on a packet with this serial */
+    int32_t paused;
+    int32_t *queue_serial;    /* pointer to the current packet queue serial, used for obsolete clock detection */
 } Clock;
 
 typedef struct FrameData {
@@ -111,21 +111,21 @@ typedef struct FrameData {
 /* Common struct for handling all types of decoded data and allocated render buffers. */
 typedef struct Frame {
     AVFrame *frame;
-    int serial;
+    int32_t serial;
     double pts;           /* presentation timestamp for the frame */
     double duration;      /* estimated duration of the frame */
     int64_t pos;          /* byte position of the frame in the input file */
-    int format;
+    int32_t format;
 } Frame;
 
 typedef struct FrameQueue {
     Frame queue[FRAME_QUEUE_SIZE];
-    int rindex;
-    int windex;
-    int size;
-    int max_size;
-    int keep_last;
-    int rindex_shown;
+    int32_t rindex;
+    int32_t windex;
+    int32_t size;
+    int32_t max_size;
+    int32_t keep_last;
+    int32_t rindex_shown;
     SDL_mutex *mutex;
     SDL_cond *cond;
     PacketQueue *pktq;
@@ -139,9 +139,9 @@ typedef struct Decoder {
     AVPacket *pkt;
     PacketQueue *queue;
     AVCodecContext *avctx;
-    int pkt_serial;
-    int finished;
-    int packet_pending;
+    int32_t pkt_serial;
+    int32_t finished;
+    int32_t packet_pending;
     SDL_cond *empty_queue_cond;
     int64_t start_pts;
     AVRational start_pts_tb;
@@ -153,18 +153,18 @@ typedef struct Decoder {
 typedef struct TrackState {
     int32_t handle;
     SDL_Thread *read_tid;
-    int abort_request;
-    int paused;
-    int last_paused;
-    int seek_req;
-    int seek_flags;
+    int32_t abort_request;
+    int32_t paused;
+    int32_t last_paused;
+    int32_t seek_req;
+    int32_t seek_flags;
     int64_t seek_pos;
     int64_t seek_rel;
     int64_t start_time;                // AV_NOPTS_VALUE, how much to seek before playing
     int64_t play_duration;             // AV_NOPTS_VALUE, how much to play
-    int read_pause_return;
+    int32_t read_pause_return;
     AVFormatContext *ic;
-    int realtime;
+    int32_t realtime;
 
     Clock audclk;
     Clock extclk;
@@ -174,24 +174,24 @@ typedef struct TrackState {
     Decoder audio_decoder;
     char *forced_audio_codec_name;     // default NULL
 
-    int audio_stream;
+    int32_t audio_stream;
 
-    int av_sync_type;
+    int32_t av_sync_type;
     double audio_clock;
-    int audio_clock_serial;
+    int32_t audio_clock_serial;
 
 
     AVStream *audio_st;
     PacketQueue audio_queue;
-    int audio_hw_buf_size;
+    int32_t audio_hw_buf_size;
     uint8_t *audio_buf0;
     uint8_t *audio_buf1;
     unsigned int audio_buf0_size; /* in bytes */
     unsigned int audio_buf1_size;
-    int audio_buf_index; /* in bytes */
-    int audio_write_buf_size;
-    int audio_volume;
-    int muted;
+    int32_t audio_buf_index; /* in bytes */
+    int32_t audio_write_buf_size;
+    int32_t audio_volume;
+    int32_t muted;
 
     struct SwrContext *swr_ctx;
     //struct AudioParams audio_target; /*This is set to the global 'audio_target' not sure if this is needed*/
@@ -212,29 +212,29 @@ typedef struct TrackState {
     //float *real_data; ~553KD
     //AVComplexFloat *rdft_data; ~553KD
 
-    int eof;
+    int32_t eof;
     const char *filename;
     const AVInputFormat *iformat;
 
-    int last_audio_stream;
+    int32_t last_audio_stream;
 
     SDL_cond *continue_read_thread;
 } TrackState;
 
 
 typedef struct AudioPlayer {
-    int startup_volume;                // default 100
-    int sdl_volume;                    // default 0
-    int filter_nbthreads;              // default 0
+    int32_t startup_volume;                // default 100
+    int32_t sdl_volume;                    // default 0
+    int32_t filter_nbthreads;              // default 0
     int64_t audio_callback_time;       // default 0
     char *track_filters;               // default NULL
     char *anequalizer_filter;          // default NULL
     int16_t anequalizer_values[EQ_BAND_COUNT]; //default [0, ...]
     const char* wanted_stream_spec[AVMEDIA_TYPE_NB]; // default [NULL]
-    int seek_by_bytes;                 // default -1
-    int loop;                          // default 0
-    int infinite_buffer;               // default -1
-    int find_stream_info;              // default 1
+    int32_t seek_by_bytes;                 // default -1
+    int32_t loop;                          // default 0
+    int32_t infinite_buffer;               // default -1
+    int32_t find_stream_info;              // default 1
 
     int32_t handle_count;              // default 0
     int32_t errored_handle;            // default -1, used when stream_open() fails
@@ -265,7 +265,7 @@ typedef struct AudioPlayer {
 
 
     const char *audio_device_name;     // default NULL
-    int audio_device_index;            // default -1
+    int32_t audio_device_index;            // default -1
     SDL_AudioDeviceID device_id;       // default 0
     SDL_AudioSpec given_spec;          // default NULL
     SDL_AudioFormat given_format;      // AUDIO_S16SYS
@@ -279,8 +279,8 @@ typedef struct AudioPlayer {
     NotifyOfPrepareNext notify_of_prepare_next_callback; // default NULL
 
     // Likely to be removed
-    int fast;                          // default 0
-    int genpts;                        // default 0
+    int32_t fast;                          // default 0
+    int32_t genpts;                        // default 0
 } AudioPlayer;
 
 #endif //FFAUDIO_GLOBALS_H
