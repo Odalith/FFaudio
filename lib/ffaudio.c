@@ -99,14 +99,14 @@ static void send_log_event(enum LOG_LEVEL level, const char *fmt, ...) {
     vsnprintf(buf, (size_t)needed + 1, fmt, args);
     va_end(args);
 
-    int64_t req = audio_player ? audio_player->request_count : 0;
+    const int64_t req = audio_player ? audio_player->request_count : 0;
 
     SDL_Event event;
     SDL_memset(&event, 0, sizeof(event));
 
     event.type = audio_player->log_event;
     event.user.data1 = (void*)buf;
-    event.user.data2 = (void*)req;
+    event.user.data2 = (void*)(uintptr_t)req;
     event.user.code = level;
     //event.user.timestamp = SDL_GetTicks64();
     SDL_PushEvent(&event);
@@ -674,18 +674,24 @@ static int read_thread(void *arg)
             if (ret < 0) {
                 send_log_event(ERROR,
                        "%s: error while seeking", is->ic->url);
-            } else {
+            }
+            else {
                 if (is->audio_stream >= 0)
                     packet_queue_flush(&is->audio_queue);
+
                 if (is->seek_flags & AVSEEK_FLAG_BYTE) {
                    set_clock(&is->extclk, NAN, 0);
-                } else {
-                   set_clock(&is->extclk, seek_target / (double)AV_TIME_BASE, 0);
+                }
+                else {
+                   set_clock(&is->extclk, seek_target / AV_TIME_BASE_DOUBLE, 0);
                 }
 
-                if (audio_player->notify_of_restart_callback) {
-                    audio_player->notify_of_restart_callback();
-                }
+
+                SDL_Event e;
+                SDL_memset(&e, 0, sizeof(e));
+                e.type = audio_player->restart_event;
+                e.user.data1 = (void*)(uintptr_t)is->seek_pos;
+                SDL_PushEvent(&e);
             }
             is->seek_req = 0;
             is->eof = 0;
@@ -707,10 +713,13 @@ static int read_thread(void *arg)
             (!is->audio_st || (is->audio_decoder.finished == is->audio_queue.serial && frame_queue_nb_remaining(&is->sampq) == 0))) {
             if (audio_player->loop != 0) {
 
+                audio_player->is_restart_from_looping = audio_player->loop;
+
                 if (audio_player->loop >= 1) {
                     audio_player->loop--;
                 }
                 stream_seek(is, is->start_time != AV_NOPTS_VALUE ? is->start_time : 0, 0, 0);
+
             }
             else {
                 ret = AVERROR_EOF;
@@ -1209,12 +1218,23 @@ static int event_thread(void* opaque) {
                 SDL_UnlockMutex(audio_player->abort_mutex);
             }
             else if (e.type == audio_player->log_event && audio_player->notify_of_log_callback) {
-                audio_player->notify_of_log_callback(e.user.data1, audio_player->request_count, e.user.code);
+                const int64_t req_count = (int64_t)(uintptr_t)e.user.data2;
+                audio_player->notify_of_log_callback(e.user.data1, req_count, e.user.code);
                 free(e.user.data1);
                 e.user.data1 = NULL;
             }
             else if (e.type == audio_player->restart_event && audio_player->notify_of_restart_callback) {
-                audio_player->notify_of_restart_callback();
+                const double seek_pos = (int64_t)(uintptr_t)e.user.data1 / AV_TIME_BASE_DOUBLE;
+
+                if (audio_player->is_restart_from_looping == 0) {
+                    audio_player->notify_of_restart_callback(seek_pos, false, 0);
+                }
+                else {
+                    const int32_t loop_count = audio_player->is_restart_from_looping <= -1 ? -1 : audio_player->is_restart_from_looping - 1;
+                    audio_player->notify_of_restart_callback(seek_pos, true, loop_count);
+                    audio_player->is_restart_from_looping = 0;
+                }
+
             }
             else if (e.type == audio_player->duration_update_event && audio_player->notify_of_duration_update_callback) {
                 audio_player->notify_of_duration_update_callback(*(double*)e.user.data1);
@@ -1267,6 +1287,7 @@ static int app_state_init(AudioPlayer *s) {
     s->is_init_done = false;
     s->is_audio_device_initialized = false;
     s->reconfigure_audio_device = false;
+    s->is_restart_from_looping = 0;
     s->audio_reconfigure_time = AV_NOPTS_VALUE;
 
 
