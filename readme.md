@@ -64,8 +64,8 @@ static void eof_callback(bool is_eof_from_skip, bool is_from_error, int32_t hand
     printf("EOF\n");
 }
 
-static void restart_callback(void) { 
-    printf("Restart\n");
+static void restart_callback(const double position, const bool is_from_looping, const int32_t remaining_loop_count) {
+    printf("Restarting playback to %f. Is from loop: %d, Remaining loops: %d\n", position, is_from_looping, remaining_loop_count);
 }
 
 static void duration_callback(double new_duration) {
@@ -87,8 +87,8 @@ const InitializeConfig config = {
     .on_log = log_callback,
     .on_eof = eof_callback,
     .on_restart = restart_callback,
-    .on_duration_update = NULL,
-    .on_prepare_next = NULL,
+    .on_duration_update = duration_callback,
+    .on_prepare_next = prepare_next_callback,
 };
 
 initialize(config);
@@ -200,5 +200,6 @@ bool set_equalizer(const EqualizerConfig params);
 - [ ] Remove CrossFeed from 'track_filters' and add them in a similar fashion to Equalizer
 - [ ] Add/test support for audio formats with more than two channels
 - [ ] Compare the current audio spec to the new audio spec and only restart the stream if values differ
-- [ ] Add flags for was from loop (as opposed to a seek) and send the restart position notify_of_restart_callback
+- [X] Add flags for was from loop (as opposed to a seek) and send the restart position notify_of_restart_callback
+- [ ] Find what to do about seek_*() not working immediately after play_audio() is called. (TrackState is not initialized yet)
 

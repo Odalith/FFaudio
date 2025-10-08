@@ -260,6 +260,7 @@ typedef struct AudioPlayer {
     bool is_audio_device_initialized;  // default false
     bool is_eof_from_skip;             // default false
     bool is_eof_from_error;            // default false
+    int32_t is_restart_from_looping;   // default 0, contains loop remaining loop count if != 0
     bool reconfigure_audio_device;     // default false
     int64_t audio_reconfigure_time;    // AV_NOPTS_VALUE, where to seek after reconfigure is complete
 
