@@ -97,8 +97,10 @@ void packet_queue_flush(PacketQueue *q)
     MyAVPacketList pkt1;
 
     SDL_LockMutex(q->mutex);
-    while (av_fifo_read(q->pkt_list, &pkt1, 1) >= 0)
-        av_packet_free(&pkt1.pkt);
+    if (q->pkt_list) {
+        while (av_fifo_read(q->pkt_list, &pkt1, 1) >= 0)
+            av_packet_free(&pkt1.pkt);
+    }
     q->nb_packets = 0;
     q->size = 0;
     q->duration = 0;
@@ -108,6 +110,8 @@ void packet_queue_flush(PacketQueue *q)
 
 void packet_queue_destroy(PacketQueue *q)
 {
+    if (!q) return;
+
     packet_queue_flush(q);
     av_fifo_freep2(&q->pkt_list);
     SDL_DestroyMutex(q->mutex);
