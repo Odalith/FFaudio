@@ -198,7 +198,9 @@ typedef struct TrackState {
     struct AudioParams audio_filter_src; /*This is the parameters of the current file */
 
     AVChannelLayout channel_layout;
-
+    AVDictionary *format_opts_n;       // default NULL
+    AVDictionary *codec_opts_n;        // default NULL
+    AVDictionary *swr_opts_n;          // default NULL
 
     AVFilterContext *in_audio_filter;   // the first filter in the audio chain
     AVFilterContext *out_audio_filter;  // the last filter in the audio chain
@@ -235,10 +237,8 @@ typedef struct AudioPlayer {
     int find_stream_info;              // default 1
 
     int32_t handle_count;              // default 0
+    int32_t errored_handle;            // default -1, used when stream_open() fails
     TrackState *current_track;         // default NULL
-    AVDictionary *format_opts_n;       // default NULL
-    AVDictionary *codec_opts_n;        // default NULL
-    AVDictionary *swr_opts_n;          // default NULL
 
     SDL_Thread *event_thread;          // default NULL
     SDL_atomic_t event_thread_running; // default false

@@ -146,7 +146,7 @@ get_audio_duration();
   - [ ] AV network init/de-init
   - [ ] Cancel TrackState when the user changes stream after callback is called
 - [ ] Regulate audio spec samples?
-- [ ] Ensure proper deallocation when stream_open() fails before SDL_CreateThread(read_thread, ..) is called. (read_thread is what sends the cleanup message)
+- [X] Ensure proper deallocation when stream_open() fails before SDL_CreateThread(read_thread, ..) is called. (read_thread is what sends the cleanup message)
 - [ ] Test with valgrind
 - [ ] Send audio device updates to the user through callback
 - [X] Cleanup ffaudio.h, use different header for private structs, defines
@@ -155,10 +155,10 @@ get_audio_duration();
 - [X] Callback to update duration (when known) for files that estimate it
 - [ ] Make sure `get_clock(&audio_player->current_track->audclk)` is accurate through pauses and seeks
 - [ ] Upgrade to SDL3
-- [ ] Implement initial seek and play time in play_audio()
+- [X] Implement initial seek and play time in play_audio()
 - [X] Setup logging with call instead of av_log()
 - [X] Add is_from_error flag to eof_callback
-- [ ] Fix error flag == true when no errors
+- [X] Fix error flag == true when no errors
 - [ ] Remove CrossFeed from 'track_filters' and add them in a similar fashion to Equalizer
 - [ ] Add/test support for audio formats with more than two channels
 
