@@ -1,20 +1,35 @@
-### ⚠️ This project is in alpha, use at your own risk. Contributions/suggestions welcome
+⚠️ This project is in alpha, and alot of testing is needed. Use at your own risk.
 
 ### FFaudio is a high-level audio player library using FFmpeg & SDL2. 
 It is a heavily modified version of FFplay, so all credit for its general design goes to the FFmpeg team and contributors.
 
 ## Features
-- Cross-platform support for Windows, Linux, macOS, Android, and iOS
-- Thanks to FFmpeg it can decode and play basically any file with an audio component
-- Support for 10 band Equalizer, Crossfeed, and EBU R128 audio normalization
-- Easy-to-use API for integrating audio playback into applications
+- Cross-platform can potentially support Windows, Linux, macOS, Android, and iOS
+- Thanks to FFmpeg it can decode and play basically any file with an audio component:
+  - Tested to work with mp3, flac, wav, aiff, m4a, wma, oga, ogg, aac, and dsf (dsd64)
+- Plentiful list of options and filters for customizing playback:
+  - Volume 0-100
+  - Looping infinite, 0, or a specific number of times
+  - Mute
+  - Pause/Resume
+  - Seek
+  - Seek percentage
+  - 10 band Equalizer
+  - Crossfeed
+  - EBU R128 audio normalization
+  - More if you know how to set up FFmpeg filters (Send PR!)
+- BEEFY callbacks with flags for easy integration into your application:
+  - End of file callback
+  - Logging callback
+  - Stream restarted callback
+  - Duration updated callback
+- Sumptuous API for integrating audio playback into anything that can run C 11
 - Performant and memory efficient thanks again to FFmpeg
-- Supports playing audio through a custom audio device
+- Supports playing audio through a custom audio device and runtime reconfiguration
 - Licensed under the LGPLv2.1 and free to use
 
 ## Who It's For
-- Anyone making audio/music applications; It is primarily made for use with music players.
-- Anyone who wants to integrate audio playback into their applications without having to worry about file formats
+Want audio playback and don't need to mix audio? Yes? Fabulous.
 
 ## Planned Features
 - Fully support playback of rtp, rtsp, udp, and sdp (non-realtime) audio streams
@@ -40,11 +55,12 @@ Note; this project is not affiliated with FFmpeg, FFplay, or their Authors.
 ```C
 #include "ffaudio.h"
 
-static void error_callback(const char* message, int request) {
+// Callbacks (All Optional)
+static void log_callback(const char* message, int64_t request, enum LOG_LEVEL level) {
    printf(message);
 }
 
-static void eof_callback(bool is_eof_from_skip) {
+static void eof_callback(bool is_eof_from_skip, bool is_from_error, int32_t handle) {
     printf("EOF\n");
 }
 
@@ -52,15 +68,27 @@ static void restart_callback(void) {
     printf("Restart\n");
 }
 
-// In your main()..
+static void duration_callback(double new_duration) {
+    printf("Duration: %f\n", new_duration);
+}
+
+static char* prepare_next_callback(void) {
+    printf("Prepare next\n");
+    return NULL;
+}
+
+
+// Now, in your main()..
 
 const InitializeConfig config = {
     .app_name = "Test App",
     .initial_volume = 50,
     .initial_loop_count = 0,
-    .on_error = error_callback,
+    .on_log = log_callback,
     .on_eof = eof_callback,
-    .on_restart = restart_callback
+    .on_restart = restart_callback,
+    .on_duration_update = NULL,
+    .on_prepare_next = NULL,
 };
 
 initialize(config);
@@ -72,6 +100,8 @@ The config parameters are as follows:
 4. Error callback. Called when an error occurs.
 5. EOF callback. Called when the end of the file is reached. This can used to play the next file.
 6. Restart callback. Called when the file is restarted after seeking. Useful to update UI when a file is looping.
+7. Duration callback. Called when the duration of the file is known. Useful to update UI when a file is looping.
+8. Prepare next callback. Called when the file is finished playing and the next file is about to be played. Useful to update UI when a file is looping.
 
 You can pass null into any of the callbacks if you don't want to use them.
 
@@ -94,27 +124,35 @@ __For a more complete and functional example, look at tests/test.c__
 
 Some other useful functions include:
 ```C
-stop_audio();
+void stop_audio();
 
-pause_audio();
+void pause_audio(const bool value);
 
-seek_percent();
+void seek_percent(const double percentPos);
 
-seek_time();
+void seek_time(const int64_t milliseconds);
 
-set_audio_volume();
+void set_audio_volume(const int volume);
 
-get_audio_volume();
+int get_audio_volume();
 
-mute_audio();
+void mute_audio(const bool value);
 
-set_loop_count();
+void set_loop_count(const int loop_count);
 
-get_loop_count();
+int get_loop_count();
 
-get_audio_play_time();
+//Returns time in seconds
+double get_audio_play_time();
 
-get_audio_duration();
+//Returns time in seconds
+double get_audio_duration();
+
+//List the user's audio devices
+int get_audio_devices(int *out_total, char ***out_devices);
+
+//Set or update equalizer settings; Persists through tracks
+bool set_equalizer(const EqualizerConfig params);
 ```
 
 ---
@@ -154,11 +192,13 @@ get_audio_duration();
 - [X] Put source files into a folder structure
 - [X] Callback to update duration (when known) for files that estimate it
 - [ ] Make sure `get_clock(&audio_player->current_track->audclk)` is accurate through pauses and seeks
-- [ ] Upgrade to SDL3
+- [ ] Upgrade to SDL3?
 - [X] Implement initial seek and play time in play_audio()
 - [X] Setup logging with call instead of av_log()
 - [X] Add is_from_error flag to eof_callback
 - [X] Fix error flag == true when no errors
 - [ ] Remove CrossFeed from 'track_filters' and add them in a similar fashion to Equalizer
 - [ ] Add/test support for audio formats with more than two channels
+- [ ] Compare the current audio spec to the new audio spec and only restart the stream if values differ
+- [ ] Add flags for was from loop (as opposed to a seek) and send the restart position notify_of_restart_callback
 
