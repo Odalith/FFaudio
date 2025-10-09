@@ -23,7 +23,7 @@ It is a heavily modified version of FFplay, so all credit for its general design
   - Logging callback
   - Stream restarted callback
   - Duration updated callback
-- Sumptuous API for integrating audio playback into anything that can run C 11
+- Sumptuous API for integrating audio playback into anything that can run C99
 - Performant and memory efficient thanks again to FFmpeg
 - Supports playing audio through a custom audio device and runtime reconfiguration
 - Licensed under the LGPLv2.1 and free to use
