@@ -202,6 +202,7 @@ typedef struct TrackState {
     AVDictionary *codec_opts_n;        // default NULL
     AVDictionary *swr_opts_n;          // default NULL
 
+    char *filtergraph_override;         // default NULL
     AVFilterContext *in_audio_filter;   // the first filter in the audio chain
     AVFilterContext *out_audio_filter;  // the last filter in the audio chain
     AVFilterGraph *agraph;              // audio filter graph

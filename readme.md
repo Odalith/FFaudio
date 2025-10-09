@@ -203,4 +203,5 @@ bool au_set_equalizer(const EqualizerConfig params);
 - [ ] Compare the current audio spec to the new audio spec and only restart the stream if values differ
 - [X] Add flags for was from loop (as opposed to a seek) and send the restart position notify_of_restart_callback
 - [ ] Find what to do about seek_*() not working immediately after play_audio() is called. (TrackState is not initialized yet)
+- [X] Add av_filtergraph_override to PlayAudioConfig
 
