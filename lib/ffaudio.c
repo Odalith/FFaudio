@@ -897,6 +897,7 @@ static int audio_decode_frame(TrackState *is)
             swr_free(&is->swr_ctx);
             return -1;
         }
+        //Todo these may be problematic?
         if (av_channel_layout_copy(&audio_player->audio_target->ch_layout, &frame->frame->ch_layout) < 0)
             return -1;
         audio_player->audio_target->freq = frame->frame->sample_rate;
@@ -934,7 +935,8 @@ static int audio_decode_frame(TrackState *is)
         }
         is->audio_buf0 = is->audio_buf1;
         resampled_data_size = len2 * audio_player->audio_target->ch_layout.nb_channels * av_get_bytes_per_sample(audio_player->audio_target->fmt);
-    } else {
+    }
+    else {
         is->audio_buf0 = frame->frame->data[0];
         resampled_data_size = data_size;
     }
@@ -1017,10 +1019,10 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
         char *default_device = {0};
         if (SDL_GetDefaultAudioInfo(&default_device, &preferred_spec, false) != 0) {//Todo inform user of chosen audio device? So far it only has "System default"
             send_log_event(ERROR, "Failed to get default preferred audio device spec for %s", audio_device);
-            free(default_device);
+            SDL_free(default_device);
             return -1;
         }
-        free(default_device);
+        SDL_free(default_device);
     }
     else {
         if (SDL_GetAudioDeviceSpec(audio_device_index, false, &preferred_spec) != 0) {
@@ -1039,7 +1041,20 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
         return -1;
     }
 
-    preferred_spec.format = audio_player->given_format;
+    // Guard against formats that ffmpeg does not have
+    const bool is_unsigned_16 = preferred_spec.format == AUDIO_U16LSB || preferred_spec.format == AUDIO_U16MSB;
+    const bool is_signed_8 = preferred_spec.format == AUDIO_S8;
+
+    if (is_unsigned_16 || is_signed_8) {
+        send_log_event(WARNING, "SDL advised audio format %d is not supported! Using closest equivalent instead", preferred_spec.format);
+        if (is_unsigned_16) {
+            preferred_spec.format = AUDIO_S16;
+        }
+        else {
+            preferred_spec.format = AUDIO_U8;
+        }
+    }
+
     //preferred_spec.samples = FFMAX(SDL_AUDIO_MIN_BUFFER_SIZE, 2 << av_log2(wanted_spec.freq / SDL_AUDIO_MAX_CALLBACKS_PER_SEC)); Todo use this?
     preferred_spec.callback = sdl_audio_callback;
     preferred_spec.userdata = NULL;
@@ -1050,13 +1065,6 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
         return -1;
     }
 
-
-    if (spec.format != audio_player->given_format) {
-        send_log_event(ERROR,
-               "SDL advised audio format %d is not supported!", spec.format);
-        av_channel_layout_uninit(&wanted_channel_layout);
-        return -1;
-    }
     if (spec.channels != preferred_spec.channels) {
         av_channel_layout_uninit(&wanted_channel_layout);
         av_channel_layout_default(&wanted_channel_layout, spec.channels);
@@ -1069,7 +1077,47 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
         }
     }
 
-    audio_player->audio_target->fmt = AV_SAMPLE_FMT_S16;//Todo make this have a switch for sdl formats
+    switch (spec.format) {
+        case AUDIO_U8:
+            audio_player->audio_target->fmt = AV_SAMPLE_FMT_U8;
+            break;
+
+        // 16-bit signed
+        case AUDIO_S16LSB:
+        case AUDIO_S16MSB:
+            audio_player->audio_target->fmt = AV_SAMPLE_FMT_S16;
+            break;
+
+        // 32-bit signed
+        case AUDIO_S32LSB:
+        case AUDIO_S32MSB:
+            audio_player->audio_target->fmt = AV_SAMPLE_FMT_S32;
+            break;
+
+        // 32-bit float
+        case AUDIO_F32LSB:
+        case AUDIO_F32MSB:
+            audio_player->audio_target->fmt = AV_SAMPLE_FMT_FLT;
+
+            break;
+
+#ifdef AUDIO_F64LSB
+        case AUDIO_F64LSB:
+        case AUDIO_F64MSB:
+            audio_player->audio_target->fmt = AV_SAMPLE_FMT_DBL;
+            break;
+#endif
+        case AUDIO_S8:
+        // 16-bit unsigned
+        case AUDIO_U16LSB:
+        case AUDIO_U16MSB:
+        default:
+            // Should never reach here
+            send_log_event(FATAL, "Unsupported audio format %d!\n", spec.format);
+            av_channel_layout_uninit(&wanted_channel_layout);
+            return -1;
+    }
+    audio_player->given_format = spec.format;
     audio_player->audio_target->freq = spec.freq;
     if (av_channel_layout_copy(&audio_player->audio_target->ch_layout, &wanted_channel_layout) < 0) {
         av_channel_layout_uninit(&wanted_channel_layout);
@@ -1294,7 +1342,7 @@ static int app_state_init(AudioPlayer *s) {
     s->audio_device_index = -1;
     s->audio_device_name  = NULL;
     s->device_id = (SDL_AudioDeviceID)0;
-    s->given_format = AUDIO_S16SYS;
+    s->given_format = -1;
     s->audio_target = (AudioParams *)malloc(sizeof(AudioParams));
 
     s->fast = 0;
