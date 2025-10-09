@@ -73,7 +73,7 @@ static char * fmt_string(const char *fmt, ...) {
 
 // Note: The formatted string is heap-allocated and is not freed here; the
 // receiver of the log event should free it when appropriate.
-static void send_log_event(enum LOG_LEVEL level, const char *fmt, ...) {
+static void send_log_event(enum AU_LOG_LEVEL level, const char *fmt, ...) {
 
     if (!fmt) return;
 
@@ -1135,7 +1135,7 @@ static Uint32 audio_open(const char* audio_device, const int audio_device_index,
     return audio_player->given_spec.size;
 }
 
-void wait_loop() {
+void au_wait_loop() {
     double remaining_time = 0.0;
     while (1) {
         if (remaining_time > 0.0)
@@ -1351,7 +1351,7 @@ static int app_state_init(AudioPlayer *s) {
     return 0;
 }
 
-void shutdown() {
+void au_shutdown() {
     if (!audio_player) return;
 
     abort_track();
@@ -1377,7 +1377,7 @@ void shutdown() {
     //Todo avformat_network_deinit();
 }
 
-int initialize(const InitializeConfig* config)
+int au_initialize(const InitializeConfig* config)
 {
     if (audio_player || !config) return -1;
 
@@ -1484,7 +1484,7 @@ int initialize(const InitializeConfig* config)
     return 0;
 }
 
-int configure_audio_device(const AudioDeviceConfig* custom_config) {
+int au_configure_audio_device(const AudioDeviceConfig* custom_config) {
     if (!audio_player || !audio_player->is_init_done) return -1;
 
     wait_for_audio_reconfigure();
@@ -1543,7 +1543,7 @@ int configure_audio_device(const AudioDeviceConfig* custom_config) {
     return 0;
 }
 
-void play_audio(const char *filename, const PlayAudioConfig* config) {
+void au_play_audio(const char *filename, const PlayAudioConfig* config) {
     if (!audio_player || !audio_player->is_init_done) return;
 
     wait_for_audio_reconfigure();
@@ -1589,7 +1589,7 @@ void play_audio(const char *filename, const PlayAudioConfig* config) {
     ++audio_player->request_count;
 }
 
-void stop_audio() {
+void au_stop_audio() {
 
     wait_for_audio_reconfigure();
 
@@ -1598,7 +1598,7 @@ void stop_audio() {
     ++audio_player->request_count;
 }
 
-void pause_audio(const bool value) {
+void au_pause_audio(const bool value) {
 
     if (!audio_player->current_track || value == audio_player->current_track->paused) return;
 
@@ -1618,7 +1618,7 @@ void pause_audio(const bool value) {
     ++audio_player->request_count;
 }
 
-void seek_percent(const double percentPos) {
+void au_seek_percent(const double percentPos) {
     if (!audio_player) return;
 
     if (!audio_player->current_track || !audio_player->current_track->ic) return;
@@ -1641,7 +1641,7 @@ void seek_percent(const double percentPos) {
     ++audio_player->request_count;
 }
 
-void seek_time(const int64_t milliseconds) {
+void au_seek_time(const int64_t milliseconds) {
     if (!audio_player) return;
 
     if (!audio_player->current_track || !audio_player->current_track->ic) return;
@@ -1653,7 +1653,7 @@ void seek_time(const int64_t milliseconds) {
     stream_seek(audio_player->current_track, target_pos, 0, 0);
 }
 
-void set_audio_volume(const int volume) {
+void au_set_audio_volume(const int volume) {
     if (!audio_player->current_track || volume > 100 || volume < 0 || volume == audio_player->startup_volume) return;
 
     audio_player->startup_volume = volume;
@@ -1663,13 +1663,13 @@ void set_audio_volume(const int volume) {
     ++audio_player->request_count;
 }
 
-int get_audio_volume() {
+int au_get_audio_volume() {
     if (!audio_player) return -1;
 
     return audio_player->startup_volume;
 }
 
-void mute_audio(const bool value) {
+void au_mute_audio(const bool value) {
     if (!audio_player) return;
 
     if (!audio_player->current_track || value == audio_player->current_track->muted) return;
@@ -1679,24 +1679,24 @@ void mute_audio(const bool value) {
     ++audio_player->request_count;
 }
 
-void set_loop_count(const int loop_count) {
+void au_set_loop_count(const int loop_count) {
     audio_player->loop = loop_count;
 }
 
-int get_loop_count() {
+int au_get_loop_count() {
     if (!audio_player) return 0;
 
     return audio_player->loop;
 }
 
-double get_audio_play_time() {
+double au_get_audio_play_time() {
     if (!audio_player || !audio_player->current_track) return -1;
 
     //audio_player->play_duration is for how long a file *should* play how how long it *has* been playing
     return get_clock(&audio_player->current_track->audclk);
 }
 
-double get_audio_duration() {
+double au_get_audio_duration() {
     if (!audio_player) return -1;
 
     if (!audio_player->current_track || !audio_player->current_track->ic) return -1;
@@ -1709,7 +1709,7 @@ double get_audio_duration() {
     return duration / AV_TIME_BASE_DOUBLE;
 }
 
-int get_audio_devices(int *out_total, char ***out_devices) {
+int au_get_audio_devices(int *out_total, char ***out_devices) {
     if (!out_total || !out_devices) {
         return -1;
     }
@@ -1762,7 +1762,7 @@ int get_audio_devices(int *out_total, char ***out_devices) {
     return 0;
 }
 
-bool set_equalizer(const EqualizerConfig params) {
+bool au_set_equalizer(const EqualizerConfig params) {
     if (!audio_player || !audio_player->is_audio_device_initialized) return false;
 
     wait_for_audio_reconfigure();

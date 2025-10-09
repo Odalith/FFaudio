@@ -21,14 +21,14 @@
 #ifndef FFAUDIO_DELAGATES_H
 #define FFAUDIO_DELAGATES_H
 
-enum LOG_LEVEL {
+enum AU_LOG_LEVEL {
  INFO = 0,
  WARNING = 1,
  ERROR = 2,
  FATAL = 3
 };
 
-typedef void (*NotifyOfLog)(const char* message, int64_t request, enum LOG_LEVEL level);
+typedef void (*NotifyOfLog)(const char* message, int64_t request, enum AU_LOG_LEVEL level);
 typedef void (*NotifyOfEndOfFile)(bool is_eof_from_skip, bool is_from_error, int32_t handle);
 typedef void (*NotifyOfRestart)(double position, bool is_from_looping, int32_t remaining_loop_count);
 typedef void (*NotifyOfDurationUpdate)(double new_duration);

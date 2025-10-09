@@ -70,51 +70,52 @@ extern "C" {
         double play_duration;           // Optional; How many seconds to play audio before quiting. <= 0 == plays to the end
         const char* loudnorm_settings;  // Optional; NULL to disable. Add loudness normalization filter. Ex: "I=-16:TP=-1.5:LRA=11:measured_I=-8.9:measured_LRA=5.2:measured_TP=1.1:measured_thresh=-19.1:offset=-0.8"
         const char* crossfeed_setting;  // Optional; NULL to disable. Add crossfeed filter. Ex: "0.5"
+        //todo seek % and loop count?
     } PlayAudioConfig;
 
-    DLL_EXPORT void shutdown();
+    DLL_EXPORT void au_shutdown();
 
     // Call this before anything else. config can be NULL.
-    DLL_EXPORT int initialize(const InitializeConfig* config);
+    DLL_EXPORT int au_initialize(const InitializeConfig* config);
 
     // To be called after initialize(); Pass NULL to use the default device
-    DLL_EXPORT int configure_audio_device(const AudioDeviceConfig* custom_config);
+    DLL_EXPORT int au_configure_audio_device(const AudioDeviceConfig* custom_config);
 
     // Play a file. config can be NULL
-    DLL_EXPORT void play_audio(const char *filename, const PlayAudioConfig* config);
+    DLL_EXPORT void au_play_audio(const char *filename, const PlayAudioConfig* config);
 
-    DLL_EXPORT void stop_audio();
+    DLL_EXPORT void au_stop_audio();
 
-    DLL_EXPORT void pause_audio(const bool value);
+    DLL_EXPORT void au_pause_audio(const bool value);
 
-    DLL_EXPORT void seek_percent(const double percentPos);
+    DLL_EXPORT void au_seek_percent(const double percentPos);
 
-    DLL_EXPORT void seek_time(const int64_t milliseconds);
+    DLL_EXPORT void au_seek_time(const int64_t milliseconds);
 
-    DLL_EXPORT void set_audio_volume(const int volume);
+    DLL_EXPORT void au_set_audio_volume(const int volume);
 
-    DLL_EXPORT int get_audio_volume();
+    DLL_EXPORT int au_get_audio_volume();
 
-    DLL_EXPORT void mute_audio(const bool value);
+    DLL_EXPORT void au_mute_audio(const bool value);
 
-    DLL_EXPORT void set_loop_count(const int loop_count);
+    DLL_EXPORT void au_set_loop_count(const int loop_count);
 
-    DLL_EXPORT int get_loop_count();
-
-    //Returns time in seconds
-    DLL_EXPORT double get_audio_play_time();
+    DLL_EXPORT int au_get_loop_count();
 
     //Returns time in seconds
-    DLL_EXPORT double get_audio_duration();
+    DLL_EXPORT double au_get_audio_play_time();
+
+    //Returns time in seconds
+    DLL_EXPORT double au_get_audio_duration();
 
     //Convince function to block the main thread
-    DLL_EXPORT void wait_loop();
+    DLL_EXPORT void au_wait_loop();
 
     //List the user's audio devices
-    DLL_EXPORT int get_audio_devices(int *out_total, char ***out_devices);
+    DLL_EXPORT int au_get_audio_devices(int *out_total, char ***out_devices);
 
     //Set or update equalizer settings; Persists through tracks
-    DLL_EXPORT bool set_equalizer(const EqualizerConfig params);
+    DLL_EXPORT bool au_set_equalizer(const EqualizerConfig params);
 
 #ifdef __cplusplus
 } // extern "C"

@@ -89,7 +89,7 @@ static void shuffle_queue(void) {
     }
 }
 
-static void error_callback(const char* message, int64_t request, enum LOG_LEVEL level) {
+static void error_callback(const char* message, int64_t request, enum AU_LOG_LEVEL level) {
 
     switch (level) {
         case FATAL:
@@ -118,12 +118,13 @@ static void play_next(void) {
     printf("%zu Playing %s\n", queue_pos + 1, song);
 
     const PlayAudioConfig config = {
-        .skip_seconds = 10.0,
-        .play_duration = 10.0,
-        .crossfeed_setting = NULL
+        .skip_seconds = 0.0,
+        .play_duration = 0.0,
+        .crossfeed_setting = NULL,
+        .loudnorm_settings = NULL
     };
 
-    play_audio(song, &config);
+    au_play_audio(song, &config);
     ++queue_pos;
 }
 
@@ -182,12 +183,12 @@ int main(int argc, char **argv) {
         .on_prepare_next = NULL,
     };
 
-    initialize(&config);
+    au_initialize(&config);
 
     // Find audio devices
     int n;
     char **devs;
-    if (get_audio_devices(&n, &devs)==0) {
+    if (au_get_audio_devices(&n, &devs)==0) {
         for (int i = 0; i < n; ++i) {
             printf("%d %s\n", i, devs[i]);
             free(devs[i]);
@@ -232,11 +233,11 @@ int main(int argc, char **argv) {
         }
     }
     else {
-        wait_loop();
+        au_wait_loop();
     }
 
 
     free_queue();
-    shutdown();
+    au_shutdown();
     return 0;
 }
