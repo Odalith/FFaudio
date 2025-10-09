@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.30)
 project(ffAudio LANGUAGES C)
 
-set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD 99)
 
 
 if(CMAKE_BUILD_TYPE MATCHES "Debug")
 
 set(SAN_FLAGS -fsanitize=address)
-set(SAN_COMPILE_FLAGS -g -O1 -fno-omit-frame-pointer ${SAN_FLAGS})
+set(SAN_COMPILE_FLAGS -g -O0 -fno-omit-frame-pointer ${SAN_FLAGS})
 set(SAN_LINK_FLAGS ${SAN_FLAGS})
 
 endif()

@@ -266,10 +266,10 @@ typedef struct AudioPlayer {
 
 
     const char *audio_device_name;     // default NULL
-    int32_t audio_device_index;            // default -1
+    int32_t audio_device_index;        // default -1
     SDL_AudioDeviceID device_id;       // default 0
     SDL_AudioSpec given_spec;          // default NULL
-    SDL_AudioFormat given_format;      // AUDIO_S16SYS
+    SDL_AudioFormat given_format;      // -1
     AudioParams *audio_target;         // default malloc
 
     //Callbacks

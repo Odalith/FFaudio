@@ -142,7 +142,9 @@ static void eof_callback(bool is_eof_from_skip, bool is_from_error, int32_t hand
     play_next();
 }
 
-static void restart_callback(void) { /* no-op */ }
+static void restart_callback(const double position, const bool is_from_looping, const int32_t remaining_loop_count) {
+    printf("Restarting playback to %f. Is from loop: %d, Remaining loops: %d\n", position, is_from_looping, remaining_loop_count);
+}
 
 int main(int argc, char **argv) {
     if (argc < 2) {
