@@ -56,7 +56,7 @@ Note; this project is not affiliated with FFmpeg, FFplay, or their Authors.
 #include "ffaudio.h"
 
 // Callbacks (All Optional)
-static void log_callback(const char* message, int64_t request, enum LOG_LEVEL level) {
+static void log_callback(const char* message, int64_t request, enum AU_LOG_LEVEL level) {
    printf(message);
 }
 
@@ -91,7 +91,7 @@ const InitializeConfig config = {
     .on_prepare_next = prepare_next_callback,
 };
 
-initialize(config);
+au_initialize(config);
 ```
 The config parameters are as follows:
 1. App name. This will be what shows up in your system
@@ -107,7 +107,7 @@ You can pass null into any of the callbacks if you don't want to use them.
 
 (2) Next, you will need to set up your audio device. This can be as simple as calling:
 ```C
-configure_audio_device(NULL);
+au_configure_audio_device(NULL);
 ```
 This will create an audio device with the default settings.
 
@@ -115,7 +115,7 @@ __Setup Done!__
 
 (3) Now you can play your audio with:
 ```C
-play_audio("/path/song.mp3", NULL);
+au_play_audio("/path/song.mp3", NULL);
 ```
 
 __For a more complete and functional example, look at tests/test.c__
@@ -124,35 +124,35 @@ __For a more complete and functional example, look at tests/test.c__
 
 Some other useful functions include:
 ```C
-void stop_audio();
+void au_stop_audio();
 
-void pause_audio(const bool value);
+void au_pause_audio(const bool value);
 
-void seek_percent(const double percentPos);
+void au_seek_percent(const double percentPos);
 
-void seek_time(const int64_t milliseconds);
+void au_seek_time(const int64_t milliseconds);
 
-void set_audio_volume(const int volume);
+void au_set_audio_volume(const int volume);
 
-int get_audio_volume();
+int au_get_audio_volume();
 
-void mute_audio(const bool value);
+void au_mute_audio(const bool value);
 
-void set_loop_count(const int loop_count);
+void au_set_loop_count(const int loop_count);
 
-int get_loop_count();
-
-//Returns time in seconds
-double get_audio_play_time();
+int au_get_loop_count();
 
 //Returns time in seconds
-double get_audio_duration();
+double au_get_audio_play_time();
+
+//Returns time in seconds
+double au_get_audio_duration();
 
 //List the user's audio devices
-int get_audio_devices(int *out_total, char ***out_devices);
+int au_get_audio_devices(int *out_total, char ***out_devices);
 
 //Set or update equalizer settings; Persists through tracks
-bool set_equalizer(const EqualizerConfig params);
+bool au_set_equalizer(const EqualizerConfig params);
 ```
 
 ---
