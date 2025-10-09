@@ -20,8 +20,7 @@
 
 #include "filtergraph.h"
 
-void add_to_filter_chain_end(AudioPlayer *ap, const char *filter_name)
-{
+void add_to_filter_chain_end(AudioPlayer *ap, const char *filter_name) {
     if (ap->track_filters && strlen(ap->track_filters) > 0) {
 
         ap->track_filters = av_asprintf("%s,%s", ap->track_filters, filter_name);
@@ -30,8 +29,7 @@ void add_to_filter_chain_end(AudioPlayer *ap, const char *filter_name)
     }
 }
 
-void add_to_filter_chain_start(AudioPlayer *ap, const char *filter_name)
-{
+void add_to_filter_chain_start(AudioPlayer *ap, const char *filter_name) {
     if (ap->track_filters && strlen(ap->track_filters) > 0) {
 
         ap->track_filters = av_asprintf("%s,%s", filter_name, ap->track_filters);
@@ -76,8 +74,7 @@ void update_anequalizer_array(AudioPlayer *ap, const EqualizerConfig* params) {
     ap->anequalizer_values[9] = params->ten_16000Hz;
 }
 
-void update_anequalizer_str(AudioPlayer *ap, const int16_t channels)
-{
+void update_anequalizer_str(AudioPlayer *ap, const int16_t channels) {
 
     bool is_first_set = false;
     char *filter = NULL;
@@ -109,8 +106,7 @@ void update_anequalizer_str(AudioPlayer *ap, const int16_t channels)
 
 
 int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
-                                 AVFilterContext *source_ctx, AVFilterContext *sink_ctx)
-{
+                                 AVFilterContext *source_ctx, AVFilterContext *sink_ctx) {
     int ret;
     const int nb_filters = graph->nb_filters;
 
@@ -156,9 +152,10 @@ int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
     return ret;
 }
 
-int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const char *track_filters, const bool force_output_format)
-{
-    static const enum AVSampleFormat sample_fmts[] = { AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_NONE };
+int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const char *track_filters, const bool force_output_format) {
+    if (!ap || !is || !ap->audio_target || ap->audio_target->fmt == -1) return -1;
+
+    const enum AVSampleFormat sample_fmts[] = { ap->audio_target->fmt, AV_SAMPLE_FMT_NONE };
     int sample_rates[2] = { 0, -1 };
     AVFilterContext *audio_source_filter = NULL, *audio_sink_filter = NULL;
     char aresample_swr_opts[512] = "";
