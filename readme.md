@@ -178,7 +178,7 @@ bool au_set_equalizer(const EqualizerConfig params);
 - [X] Setup Equalizer with filterchain
 - [ ] Setup updates for Equalizer values during playback with `change` command: https://ffmpeg.org/ffmpeg-filters.html#anequalizer
 - [X] Setup and test with different formats (Currently fixed to S16 regardless of what the device wants)
-  - [ ] Try to test this, all my devices seem to prefer S16
+  - [X] Try to test this, all my devices seem to prefer S16
 - [ ] Create gapless audio playback for non-realtime streams
   - [X] 'Soon to be done' callback
   - [ ] Set up a second TrackState and swap in audio callback when the first stream is finished
