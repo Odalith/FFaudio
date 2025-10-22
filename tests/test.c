@@ -195,7 +195,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    configure_audio_device(NULL);
+    au_configure_audio_device(NULL);
 
     const EqualizerConfig params = {
         .one_31Hz = 2.0,
@@ -210,7 +210,7 @@ int main(int argc, char **argv) {
         .ten_16000Hz = 3
     };
 
-    set_equalizer(params);
+    au_set_equalizer(params);
 
     play_next();
 
