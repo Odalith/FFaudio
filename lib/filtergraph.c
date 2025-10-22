@@ -165,17 +165,22 @@ int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const char *t
     const char* audio_filters = NULL;
     int ret;
 
-    if (ap->anequalizer_filter) {
-        if (track_filters) {
-            audio_filters = av_asprintf("%s,%s", ap->anequalizer_filter, track_filters);
-        }
-        else {
-            audio_filters = av_strdup(ap->anequalizer_filter);
-        }
-
+    if (is->filtergraph_override) {
+        audio_filters = av_strdup(is->filtergraph_override);
     }
-    else if (track_filters) {
-        audio_filters = av_strdup(track_filters);
+    else {
+        if (ap->anequalizer_filter) {
+            if (track_filters) {
+                audio_filters = av_asprintf("%s,%s", ap->anequalizer_filter, track_filters);
+            }
+            else {
+                audio_filters = av_strdup(ap->anequalizer_filter);
+            }
+
+        }
+        else if (track_filters) {
+            audio_filters = av_strdup(track_filters);
+        }
     }
 
     avfilter_graph_free(&is->agraph);

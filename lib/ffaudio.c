@@ -354,6 +354,7 @@ static void track_state_clear(TrackState *is)
     avfilter_graph_free(&is->agraph);*/
 
     av_free((void*)is->filename);
+    av_free((void*)is->filtergraph_override);
     SDL_DestroyCond(is->continue_read_thread);
 
     //All of these are NULL
@@ -393,7 +394,7 @@ static void abort_track() {
 //| Init Functions                                      |
 //+-----------------------------------------------------+
 
-static TrackState *track_state_init(const char *filename, const int64_t start_time, const int64_t play_duration, const int32_t handle) {
+static TrackState *track_state_init(const char *filename, const char* filtergraph_override, const int64_t start_time, const int64_t play_duration, const int32_t handle) {
     TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
         return NULL;//Todo send EOF here? If this ever fails, no EOF event is sent. But chances are if this could not be allocated then neither will the next
@@ -409,6 +410,7 @@ static TrackState *track_state_init(const char *filename, const int64_t start_ti
     is->format_opts_n = NULL;
     is->codec_opts_n = NULL;
     is->swr_opts_n = NULL;
+    is->filtergraph_override = filtergraph_override;
 
     if (frame_queue_init(&is->sampq, &is->audio_queue, SAMPLE_QUEUE_SIZE, 1) < 0)
         goto fail;
@@ -810,7 +812,7 @@ static Uint32 open_audio_device(const char* audio_device, const int audio_device
     return audio_player->given_spec.size;
 }
 
-static bool reconfigure_audio_device(const double orig_pos, const int64_t start_time, const int64_t play_duration, const char* orig_file) {
+static bool reconfigure_audio_device(const double orig_pos, const int64_t start_time, const int64_t play_duration, const char* orig_file, const char* filtergraph_override) {
     const Uint8 orig_channels = audio_player->given_spec.channels;
     close_audio_device();
 
@@ -837,7 +839,7 @@ static bool reconfigure_audio_device(const double orig_pos, const int64_t start_
         audio_player->audio_reconfigure_time = SecondsToMicroseconds(orig_pos);
     }
 
-    audio_player->current_track = track_state_init(orig_file, start_time, play_duration, audio_player->handle_count);
+    audio_player->current_track = track_state_init(orig_file, filtergraph_override, start_time, play_duration, audio_player->handle_count);
 
     if (!audio_player->current_track) {
         send_log_event(ERROR, "Failed to initialize TrackState after device reconfiguration");
@@ -1306,6 +1308,7 @@ static int event_thread(void* arg) {
             }
             else if (e.type == audio_player->eof_event && audio_player->current_track) {// Cleanup for the skip && EOF case
                 const char *filename = NULL;
+                const char *filtergraph_override = NULL;
                 double pos = 0;
                 int64_t start_time = AV_NOPTS_VALUE;
                 int64_t play_duration = AV_NOPTS_VALUE;
@@ -1314,6 +1317,10 @@ static int event_thread(void* arg) {
 
                 if (audio_player->reconfigure_audio_device) {
                     filename = av_strdup(audio_player->current_track->filename);
+                    if (audio_player->current_track->filtergraph_override) {
+                        filtergraph_override = av_strdup(audio_player->current_track->filtergraph_override);
+                    }
+
                     pos = get_clock(&audio_player->current_track->audclk);
 
                     if (pos == NAN)
@@ -1327,7 +1334,7 @@ static int event_thread(void* arg) {
                 audio_player->current_track = NULL;
 
                 if (audio_player->reconfigure_audio_device) {
-                    if (!reconfigure_audio_device(pos, start_time, play_duration, filename)) {
+                    if (!reconfigure_audio_device(pos, start_time, play_duration, filename, filtergraph_override)) {
                         send_log_event(ERROR, "Failed to reconfigure audio device");
                     }
                     av_free((void*)filename);
@@ -1593,18 +1600,24 @@ void au_play_audio(const char *filename, const PlayAudioConfig* config) {
 
     int64_t start_time = AV_NOPTS_VALUE;
     int64_t play_duration = AV_NOPTS_VALUE;
+    const char *filtergraph_override = NULL;
 
     if (config) {
-        if (config->loudnorm_settings) {
-            const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", config->loudnorm_settings);
-            add_to_filter_chain_end(audio_player, loudnorm_filter);
-            av_freep(&loudnorm_filter);
+        if (config->av_filtergraph_override) {
+            filtergraph_override = av_strdup(config->av_filtergraph_override);
         }
+        else  {
+            if (config->loudnorm_settings) {
+                const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", config->loudnorm_settings);
+                add_to_filter_chain_end(audio_player, loudnorm_filter);
+                av_freep(&loudnorm_filter);
+            }
 
-        if (config->crossfeed_setting) {
-            const char *crossfeed_filter = av_asprintf("crossfeed=%s", config->crossfeed_setting);
-            add_to_filter_chain_end(audio_player, crossfeed_filter);
-            av_freep(&crossfeed_filter);
+            if (config->crossfeed_setting) {
+                const char *crossfeed_filter = av_asprintf("crossfeed=%s", config->crossfeed_setting);
+                add_to_filter_chain_end(audio_player, crossfeed_filter);
+                av_freep(&crossfeed_filter);
+            }
         }
 
         if (config->play_duration > 0) {
@@ -1618,7 +1631,7 @@ void au_play_audio(const char *filename, const PlayAudioConfig* config) {
     }
 
 
-    audio_player->current_track = track_state_init(filename, start_time, play_duration, ++audio_player->handle_count);
+    audio_player->current_track = track_state_init(filename, filtergraph_override, start_time, play_duration, ++audio_player->handle_count);
 
     if (!audio_player->current_track) {
         send_log_event(FATAL, "Failed to initialize TrackState!");

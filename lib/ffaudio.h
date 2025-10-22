@@ -66,10 +66,27 @@ extern "C" {
     } EqualizerConfig;
 
     typedef struct PlayAudioConfig {
-        double skip_seconds;            // Optional; Seek this many seconds before starting playback. <= 0 == plays from the start
-        double play_duration;           // Optional; How many seconds to play audio before quiting. <= 0 == plays to the end
-        const char* loudnorm_settings;  // Optional; NULL to disable. Add loudness normalization filter. Ex: "I=-16:TP=-1.5:LRA=11:measured_I=-8.9:measured_LRA=5.2:measured_TP=1.1:measured_thresh=-19.1:offset=-0.8"
-        const char* crossfeed_setting;  // Optional; NULL to disable. Add crossfeed filter. Ex: "0.5"
+        // Optional; Seek this many seconds before starting playback. <= 0 == plays from the start
+        double skip_seconds;
+        // Optional; How many seconds to play audio before quiting. <= 0 == plays to the end
+        double play_duration;
+        // Optional; NULL to disable. Add loudness normalization filter.
+        // Ex: "I=-16:TP=-1.5:LRA=11:measured_I=-8.9:measured_LRA=5.2:measured_TP=1.1:measured_thresh=-19.1:offset=-0.8"
+        const char* loudnorm_settings;
+        // Optional; NULL to disable. Add crossfeed filter. Ex: "0.5"
+        const char* crossfeed_setting;
+        // Optional; NULL to disable.
+        // Used to insert your own audio filtergraph between the source `abuffer` and the `abuffersink`.
+        // Setting this to anything will override any `loudnorm`,`crossfeed`, or `equalizer` values. See filtergraph.c
+        //
+        // Note that `abuffersink` will always resample to the preferred format of the current audio device, so
+        // something like "aresample=44100, aformat=sample_fmts=s16:channel_layouts=stereo" would be pointless.
+        //
+        // Note 2, A new filtergraph is created for each call to au_play_audio() (or on_prepare_next),
+        // effectively setting this back to NULL.
+        //
+        // Filters can be found here https://ffmpeg.org/ffmpeg-filters.html
+        const char* av_filtergraph_override;
         //todo seek % and loop count?
     } PlayAudioConfig;
 
