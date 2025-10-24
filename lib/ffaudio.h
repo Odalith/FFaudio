@@ -29,7 +29,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "delagates.h"
+#include "delegates.h"
 
 #ifdef __cplusplus
 extern "C" {

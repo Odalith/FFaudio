@@ -1382,7 +1382,7 @@ static int event_thread(void* arg) {
                 audio_player->notify_of_duration_update_callback(*(double*)e.user.data1);
             }
             else if (e.type == audio_player->prepare_next_event && audio_player->notify_of_prepare_next_callback) {
-                char* next_file = audio_player->notify_of_prepare_next_callback();
+                //audio_player->notify_of_prepare_next_callback();
                 //Todo
             }
         }

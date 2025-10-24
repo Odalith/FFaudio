@@ -68,7 +68,7 @@
 #include <SDL2/SDL_thread.h>
 
 #include "libavutil/avassert.h"
-#include "delagates.h"
+#include "delegates.h"
 
 typedef struct MyAVPacketList {
     AVPacket *pkt;
