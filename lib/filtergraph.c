@@ -90,13 +90,15 @@ void update_anequalizer_str(AudioPlayer *ap, const int16_t channels) {
                 continue;
             }
 
+            char* temp = filter;
             filter = av_asprintf("%s|c%d %s g=%d", filter, i, bands[j], ap->anequalizer_values[j]);
+            av_freep(&temp);
         }
 
     }
 
     if (ap->anequalizer_filter) {
-        av_free(&ap->anequalizer_filter);
+        av_freep(&ap->anequalizer_filter);
         ap->anequalizer_filter = NULL;
     }
 

@@ -204,4 +204,6 @@ bool au_set_equalizer(const EqualizerConfig params);
 - [X] Add flags for was from loop (as opposed to a seek) and send the restart position notify_of_restart_callback
 - [ ] Find what to do about seek_*() not working immediately after play_audio() is called. (TrackState is not initialized yet)
 - [X] Add av_filtergraph_override to PlayAudioConfig
+- [ ] Replace logging callback with `get_last_error()`?
+- [ ] Add playback speed adjustment
 

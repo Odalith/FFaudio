@@ -49,6 +49,7 @@ static void ensure_capacity(size_t needed) {
     char **new_arr = (char**)realloc(queue_files, new_cap * sizeof(char*));
     if (!new_arr) {
         perror("realloc");
+        au_shutdown();
         exit(1);
     }
     queue_files = new_arr;
@@ -111,6 +112,7 @@ static void play_next(void) {
     if (queue_pos >= queue_count || (PLAY_COUNT > 0 && queue_pos >= (size_t)PLAY_COUNT)) {
         printf("Done\n");
         free_queue();
+        au_shutdown();
         exit(0);
     }
 
