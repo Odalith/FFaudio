@@ -394,7 +394,7 @@ static void abort_track() {
 //| Init Functions                                      |
 //+-----------------------------------------------------+
 
-static TrackState *track_state_init(const char *filename, const char* filtergraph_override, const int64_t start_time, const int64_t play_duration, const int32_t handle) {
+static TrackState *track_state_init(const char *filename, char* filtergraph_override, const int64_t start_time, const int64_t play_duration, const int32_t handle) {
     TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
         return NULL;//Todo send EOF here? If this ever fails, no EOF event is sent. But chances are if this could not be allocated then neither will the next
@@ -494,6 +494,7 @@ static int app_state_init(AudioPlayer *s) {
     s->device_id = (SDL_AudioDeviceID)0;
     s->given_format = -1;
     s->audio_target = (AudioParams *)malloc(sizeof(AudioParams));
+    s->audio_target->ch_layout = (AVChannelLayout){0};
 
     s->fast = 0;
     s->genpts = 0;
@@ -812,7 +813,7 @@ static Uint32 open_audio_device(const char* audio_device, const int audio_device
     return audio_player->given_spec.size;
 }
 
-static bool reconfigure_audio_device(const double orig_pos, const int64_t start_time, const int64_t play_duration, const char* orig_file, const char* filtergraph_override) {
+static bool reconfigure_audio_device(const double orig_pos, const int64_t start_time, const int64_t play_duration, const char* orig_file, char* filtergraph_override) {
     const Uint8 orig_channels = audio_player->given_spec.channels;
     close_audio_device();
 
@@ -1308,7 +1309,7 @@ static int event_thread(void* arg) {
             }
             else if (e.type == audio_player->eof_event && audio_player->current_track) {// Cleanup for the skip && EOF case
                 const char *filename = NULL;
-                const char *filtergraph_override = NULL;
+                char *filtergraph_override = NULL;
                 double pos = 0;
                 int64_t start_time = AV_NOPTS_VALUE;
                 int64_t play_duration = AV_NOPTS_VALUE;
@@ -1381,7 +1382,7 @@ static int event_thread(void* arg) {
                 audio_player->notify_of_duration_update_callback(*(double*)e.user.data1);
             }
             else if (e.type == audio_player->prepare_next_event && audio_player->notify_of_prepare_next_callback) {
-                char* next_file = audio_player->notify_of_prepare_next_callback();
+                //audio_player->notify_of_prepare_next_callback();
                 //Todo
             }
         }
@@ -1412,25 +1413,29 @@ void au_shutdown() {
         av_free((void*)audio_player->audio_device_name);
     }
 
-    audio_player->is_init_done = false;
-    SDL_WaitThread(audio_player->event_thread, NULL);
+    SDL_AtomicSet(&audio_player->event_thread_running, false);
+    SDL_WaitThread(audio_player->event_thread, NULL);//Todo according to valgrind, this thread may be getting leaked somehow
     SDL_DestroyMutex(audio_player->reconfigure_mutex);
     SDL_DestroyCond(audio_player->reconfigure_cond);
     SDL_DestroyMutex(audio_player->abort_mutex);
     SDL_DestroyCond(audio_player->abort_cond);
 
     SDL_Quit();
+
+    audio_player->is_init_done = false;
     //Todo avformat_network_deinit();
 }
 
 int au_initialize(const InitializeConfig* config)
 {
+    if (!config) return -10;
+
     if (audio_player || !config) return -1;
 
     audio_player = (AudioPlayer *)malloc(sizeof(AudioPlayer));
     if (app_state_init(audio_player) < 0) {
         free(audio_player);
-        return -1;
+        return -2;
     }
 
     if (config->on_log) {
@@ -1464,7 +1469,13 @@ int au_initialize(const InitializeConfig* config)
     avdevice_register_all();
 #endif
 
-    audio_player->startup_volume = config->initial_volume;
+    if (config->initial_volume >= 0) {
+        audio_player->startup_volume = config->initial_volume;
+    }
+    else {
+        audio_player->startup_volume = 100;
+    }
+
     audio_player->loop = config->initial_loop_count;
 
     /* Try to work around an occasional ALSA buffer underflow issue when the
@@ -1491,7 +1502,8 @@ int au_initialize(const InitializeConfig* config)
             audio_player->notify_of_log_callback(fmt_string("Could not initialize SDL - %s", SDL_GetError()), audio_player->request_count, FATAL);
         }
         SDL_Quit();
-        return -1;
+        free(audio_player);
+        return -3;
     }
 
     const Uint32 base = SDL_RegisterEvents(5);
@@ -1499,8 +1511,9 @@ int au_initialize(const InitializeConfig* config)
         if (audio_player->notify_of_log_callback) {
             audio_player->notify_of_log_callback(fmt_string("Could not create SDL events - %s", SDL_GetError()), audio_player->request_count, FATAL);
         }
-
-        return -1;
+        SDL_Quit();
+        free(audio_player);
+        return -4;
     }
 
     audio_player->eof_event = base;
@@ -1521,7 +1534,8 @@ int au_initialize(const InitializeConfig* config)
         }
 
         SDL_Quit();
-        return -1;
+        free(audio_player);
+        return -5;
     }
 
 
@@ -1572,13 +1586,11 @@ int au_configure_audio_device(const AudioDeviceConfig* custom_config) {
         audio_player->audio_device_index = custom_config->audio_device_index;
         audio_player->audio_device_name = av_strdup(custom_config->audio_device);
         if (open_audio_device(custom_config->audio_device, custom_config->audio_device_index, false) < 0) {
-            SDL_Quit();
             return -1;
         }
     }
     else {
         if (open_audio_device(NULL, -1, true) < 0) {
-            SDL_Quit();
             return -1;
         }
     }
@@ -1600,7 +1612,7 @@ void au_play_audio(const char *filename, const PlayAudioConfig* config) {
 
     int64_t start_time = AV_NOPTS_VALUE;
     int64_t play_duration = AV_NOPTS_VALUE;
-    const char *filtergraph_override = NULL;
+    char *filtergraph_override = NULL;
 
     if (config) {
         if (config->av_filtergraph_override) {
@@ -1671,7 +1683,7 @@ void au_pause_audio(const bool value) {
 }
 
 void au_seek_percent(const double percentPos) {
-    if (!audio_player) return;
+    if (!audio_player || percentPos < 0.0 || percentPos > 100.0) return;
 
     if (!audio_player->current_track || !audio_player->current_track->ic) return;
 
@@ -1694,7 +1706,7 @@ void au_seek_percent(const double percentPos) {
 }
 
 void au_seek_time(const int64_t milliseconds) {
-    if (!audio_player) return;
+    if (!audio_player || milliseconds < 0) return;
 
     if (!audio_player->current_track || !audio_player->current_track->ic) return;
 
@@ -1706,11 +1718,14 @@ void au_seek_time(const int64_t milliseconds) {
 }
 
 void au_set_audio_volume(const int volume) {
-    if (!audio_player->current_track || volume > 100 || volume < 0 || volume == audio_player->startup_volume) return;
+    if (volume > 100 || volume < 0 || volume == audio_player->startup_volume) return;
 
     audio_player->startup_volume = volume;
     audio_player->sdl_volume = av_clip(SDL_MIX_MAXVOLUME * volume / 100, 0, SDL_MIX_MAXVOLUME);
-    audio_player->current_track->audio_volume = audio_player->sdl_volume;
+
+    if (audio_player->current_track) {
+        audio_player->current_track->audio_volume = audio_player->sdl_volume;
+    }
 
     ++audio_player->request_count;
 }
@@ -1724,6 +1739,7 @@ int au_get_audio_volume() {
 void au_mute_audio(const bool value) {
     if (!audio_player) return;
 
+    //Todo make global mute option like volume
     if (!audio_player->current_track || value == audio_player->current_track->muted) return;
 
     audio_player->current_track->muted = !audio_player->current_track->muted;
@@ -1732,6 +1748,8 @@ void au_mute_audio(const bool value) {
 }
 
 void au_set_loop_count(const int loop_count) {
+    if (!audio_player) return;
+
     audio_player->loop = loop_count;
 }
 

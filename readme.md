@@ -159,7 +159,7 @@ bool au_set_equalizer(const EqualizerConfig params);
 
 ## Todo 🚧
 - [ ] Write docs for setting up with a custom audio device
-- [ ] Create a test suite
+- [X] Create a test suite
 - [X] Setup audio device reconfigure for users and for when a device is lost during playback/idle (use system default)
   - Does not apply when audio device is configured with system default, SDL follows it but not custom set ones.
   - This will probably involve aborting playback, recreating the audio device, then playing the same stream with a seek to last pos
@@ -186,7 +186,7 @@ bool au_set_equalizer(const EqualizerConfig params);
   - [ ] Cancel TrackState when the user changes stream after callback is called
 - [ ] Regulate audio spec samples?
 - [X] Ensure proper deallocation when stream_open() fails before SDL_CreateThread(read_thread, ..) is called. (read_thread is what sends the cleanup message)
-- [ ] Test with valgrind
+- [X] Test with valgrind
 - [ ] Send audio device updates to the user through callback
 - [X] Cleanup ffaudio.h, use different header for private structs, defines
 - [X] Create public config struct for initialize(), play_audio(), and configure_audio_device()
@@ -204,4 +204,6 @@ bool au_set_equalizer(const EqualizerConfig params);
 - [X] Add flags for was from loop (as opposed to a seek) and send the restart position notify_of_restart_callback
 - [ ] Find what to do about seek_*() not working immediately after play_audio() is called. (TrackState is not initialized yet)
 - [X] Add av_filtergraph_override to PlayAudioConfig
+- [ ] Replace logging callback with `get_last_error()`?
+- [ ] Add playback speed adjustment
 
