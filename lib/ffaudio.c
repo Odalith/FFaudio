@@ -194,6 +194,22 @@ static int compare_audio_fmts(const enum AVSampleFormat fmt1, const int64_t chan
 }
 
 /**
+ * This call should always be called after cleanup_track() as it depends on correct null values
+ */
+static void move_to_next_track() {
+
+    const int32_t noncurrent_track_index = audio_player->track_index == 0 ? 1 : 0;
+    const TrackState* track_to_move_to = audio_player->tracks[noncurrent_track_index];
+
+    if (track_to_move_to) {
+        audio_player->track_index = noncurrent_track_index;
+    }
+    else {
+        SDL_PauseAudioDevice(audio_player->device_id, 1);
+    }
+}
+
+/**
  *  Opens the audio stream and starts audio_thread
  *  Called from read_thread
  */
@@ -283,9 +299,13 @@ static int stream_component_open(TrackState *is, const int stream_index)
         is->audio_decoder.start_pts_tb = is->audio_st->time_base;
     }
 
-    if ((ret = decoder_start(&is->audio_decoder, audio_thread, "audio_decoder", is)) < 0) goto out;
+    const char* name = av_asprintf("audio_decoder_%d", is->handle);
+    if ((ret = decoder_start(&is->audio_decoder, audio_thread, name, is)) < 0) goto out;
+    av_free(name);
 
-    SDL_PauseAudioDevice(audio_player->device_id, 0);
+    //if (audio_player->current_track == is)
+
+    SDL_PauseAudioDevice(audio_player->device_id, 0);//Todo, only do this if it is the first played
 
     goto out;
 
@@ -368,37 +388,69 @@ static void track_state_clear(TrackState *is)
 
 }
 
-static void cleanup_for_next_track(TrackState *is) {
-    if (is) {
-        track_state_clear(is);
-        is = NULL;
+static void cleanup_track(TrackState *track_to_dispose) {
+    if (!track_to_dispose) {
+        return;
     }
 
-    SDL_PauseAudioDevice(audio_player->device_id, 1);
+    if (track_to_dispose == audio_player->tracks[0]) {
+        audio_player->tracks[0] = NULL;
+
+    }
+    else {
+        audio_player->tracks[1] = NULL;
+    }
+
+    track_state_clear(track_to_dispose);
+    track_to_dispose = NULL;
+
+    //SDL_PauseAudioDevice(audio_player->device_id, 1);
 }
 
-static void abort_track() {
-    if (audio_player->current_track) {
-        audio_player->is_eof_from_skip = true;
-        audio_player->current_track->abort_request = true;
+/**
+ * Signals the selected track for cleanup in event_thread() by setting abort_request = true
+ * and waiting for abort_cond to signal. Ultimately ends up calling cleanup_track()
+ * via event_thread
+ *
+ * @param index should be either 0 or 1
+ * @param should_play_next Whether to play the next track (if available) after aborting.
+ * This should be set to false if, for example, you want to replace the current track.
+ */
+static void abort_track(const int32_t index, const bool should_play_next) {
 
-        SDL_LockMutex(audio_player->abort_mutex);
-        while (audio_player->current_track) {
-            SDL_CondWait(audio_player->abort_cond, audio_player->abort_mutex);
-        }
-        SDL_UnlockMutex(audio_player->abort_mutex);
+    if (index > TRACK_COUNT || index < 0) return;
+
+    TrackState *selected_track = audio_player->tracks[index];
+
+    if (!selected_track) {
+        return;
     }
+
+    selected_track->should_play_next = should_play_next;
+
+    if (audio_player->track_index == index) {
+        audio_player->is_eof_from_skip = true;
+    }
+
+    selected_track->abort_request = true;
+
+    SDL_LockMutex(audio_player->abort_mutex);
+    while (audio_player->tracks[index]) {
+        SDL_CondWait(audio_player->abort_cond, audio_player->abort_mutex);
+    }
+    SDL_UnlockMutex(audio_player->abort_mutex);
 }
 
 //+-----------------------------------------------------+
 //| Init Functions                                      |
 //+-----------------------------------------------------+
 
-static TrackState *track_state_init(const char *filename, char* filtergraph_override, const int64_t start_time, const int64_t play_duration, const int32_t handle) {
+static TrackState* track_state_init(const char *filename, char* filtergraph_override, const int64_t start_time, const int64_t play_duration, const int32_t handle) {
     TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
         return NULL;//Todo send EOF here? If this ever fails, no EOF event is sent. But chances are if this could not be allocated then neither will the next
     is->handle = handle;
+    is->should_play_next = false;
     is->last_audio_stream = is->audio_stream = -1;
     is->filename = av_strdup(filename);
     if (!is->filename)
@@ -427,12 +479,14 @@ static TrackState *track_state_init(const char *filename, char* filtergraph_over
     init_clock(&is->extclk, &is->extclk.serial);
     is->audio_clock_serial = -1;
 
-    audio_player->startup_volume = av_clip(audio_player->startup_volume, 0, 100);
+    audio_player->startup_volume = av_clip(audio_player->startup_volume, 0, 100);//Todo do something about this
     audio_player->sdl_volume = av_clip(SDL_MIX_MAXVOLUME * audio_player->startup_volume / 100, 0, SDL_MIX_MAXVOLUME);
     is->audio_volume = audio_player->sdl_volume;
     is->muted = 0;
     is->av_sync_type = AV_SYNC_AUDIO_MASTER;
-    is->read_tid = SDL_CreateThread(read_thread, "read_thread", is);
+    char* name = av_asprintf("read_thread_%d", handle);
+    is->read_tid = SDL_CreateThread(read_thread, name, is);
+    av_free(name);
 
     if (!is->read_tid) {
         send_log_event(FATAL, "SDL_CreateThread(): %s", SDL_GetError());
@@ -447,6 +501,48 @@ fail:
         SDL_PushEvent(&event);
         return NULL;
     }
+    return is;
+}
+
+static TrackState* create_track_state(const char *filename, const PlayAudioConfig* config) {
+    int64_t start_time = AV_NOPTS_VALUE;
+    int64_t play_duration = AV_NOPTS_VALUE;
+    char *filtergraph_override = NULL;
+
+    if (config) {
+        if (config->av_filtergraph_override) {
+            filtergraph_override = av_strdup(config->av_filtergraph_override);
+        }
+        else  {
+            if (config->loudnorm_settings) {
+                const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", config->loudnorm_settings);
+                add_to_filter_chain_end(audio_player, loudnorm_filter);//Todo store filerchain string in TrackState
+                av_freep(&loudnorm_filter);
+            }
+
+            if (config->crossfeed_setting) {
+                const char *crossfeed_filter = av_asprintf("crossfeed=%s", config->crossfeed_setting);
+                add_to_filter_chain_end(audio_player, crossfeed_filter);
+                av_freep(&crossfeed_filter);
+            }
+        }
+
+        if (config->play_duration > 0) {
+            play_duration = SecondsToMicroseconds(config->play_duration);
+        }
+
+        if (config->skip_seconds > 0) {
+            start_time = SecondsToMicroseconds(config->skip_seconds);
+        }
+    }
+
+    TrackState* is = track_state_init(filename, filtergraph_override, start_time, play_duration, ++audio_player->handle_count);
+
+    if (!is) {
+        send_log_event(FATAL, "Failed to initialize TrackState!");
+        return NULL;
+    }
+
     return is;
 }
 
@@ -471,7 +567,7 @@ static int app_state_init(AudioPlayer *s) {
     s->find_stream_info = 1;
 
     s->handle_count = 0;
-    s->current_track = NULL;
+    s->track_index = 0;
 
 
     SDL_AtomicSet(&s->event_thread_running, false);
@@ -627,7 +723,7 @@ static int audio_decode_frame(TrackState *is)
 static void sdl_audio_callback(void *opaque, Uint8 *stream, int len)
 {
     //Global is used here because the opaque * gets de-allocated after first track
-    TrackState *is = audio_player->current_track;
+    TrackState *is = audio_player->tracks[audio_player->track_index];
 
     audio_player->audio_callback_time = av_gettime_relative();
 
@@ -840,13 +936,14 @@ static bool reconfigure_audio_device(const double orig_pos, const int64_t start_
         audio_player->audio_reconfigure_time = SecondsToMicroseconds(orig_pos);
     }
 
-    audio_player->current_track = track_state_init(orig_file, filtergraph_override, start_time, play_duration, audio_player->handle_count);
+    TrackState *is = track_state_init(orig_file, filtergraph_override, start_time, play_duration, audio_player->handle_count);
 
-    if (!audio_player->current_track) {
+    if (!is) {
         send_log_event(ERROR, "Failed to initialize TrackState after device reconfiguration");
         return false;
     }
 
+    audio_player->tracks[audio_player->track_index] = is;
     audio_player->is_audio_device_initialized = true;
     audio_player->reconfigure_audio_device = false;
     SDL_LockMutex(audio_player->reconfigure_mutex);
@@ -1214,7 +1311,11 @@ static int read_thread(void* arg) {
                 if (is->audio_stream >= 0)
                     packet_queue_put_nullpacket(&is->audio_queue, pkt, is->audio_stream);
                 is->eof = 1;
-                // This is first when ffmpeg is done reading packets, may be useful to prepare the next song
+                // This is first when ffmpeg is done reading packets
+                SDL_Event e;
+                SDL_memset(&e, 0, sizeof(e));
+                e.type = audio_player->prepare_next_event;
+                SDL_PushEvent(&e);
             }
             if (ic->pb && ic->pb->error) {
                 goto fail;
@@ -1253,6 +1354,11 @@ static int read_thread(void* arg) {
         audio_player->is_eof_from_error = true;
     }
 
+    //If there is a track ready to play after this one, set flag
+    if (audio_player->tracks[audio_player->track_index == 0 ? 1 :0]) {//Todo does this affect looping?
+        is->should_play_next = true;
+    }
+
     av_packet_free(&pkt);
     SDL_DestroyMutex(wait_mutex);
 
@@ -1287,13 +1393,16 @@ static int event_thread(void* arg) {
             else if (e.type == SDL_AUDIODEVICEREMOVED && !e.adevice.iscapture) {
                 if (e.adevice.which == audio_player->device_id) {
                     audio_player->reconfigure_audio_device = true;
-                    audio_player->current_track->abort_request = true;
+                    audio_player->tracks[audio_player->track_index]->abort_request = true;
                 }
                 //In the future, forward this event to user for updating device options
             }
-            else if (e.type == audio_player->eof_event && audio_player->current_track == NULL) {// Cleanup for the error case
+            else if (e.type == audio_player->eof_event && e.user.data1 == NULL) {// Cleanup for the error case
                 const int32_t handle = audio_player->handle_count;
-                cleanup_for_next_track(e.user.data1);
+                SDL_LockAudioDevice(audio_player->device_id);
+                cleanup_track(e.user.data1);
+                move_to_next_track();
+                SDL_UnlockAudioDevice(audio_player->device_id);
 
                 if (audio_player->notify_of_eof_callback) {
                     audio_player->notify_of_eof_callback(audio_player->is_eof_from_skip, audio_player->is_eof_from_error, audio_player->errored_handle);
@@ -1307,16 +1416,19 @@ static int event_thread(void* arg) {
                     audio_player->is_eof_from_error = false;
                 }
             }
-            else if (e.type == audio_player->eof_event && audio_player->current_track) {// Cleanup for the skip && EOF case
+            else if (e.type == audio_player->eof_event && e.user.data1) {// Cleanup for the skip && EOF case
                 const char *filename = NULL;
                 char *filtergraph_override = NULL;
                 double pos = 0;
                 int64_t start_time = AV_NOPTS_VALUE;
                 int64_t play_duration = AV_NOPTS_VALUE;
-                const int32_t handle = audio_player->current_track->handle;
+                TrackState *is = e.user.data1;
+                const bool should_play_next = is->should_play_next;
+                const bool is_current_track = is == audio_player->tracks[audio_player->track_index];
+                const int32_t handle = is->handle;
 
 
-                if (audio_player->reconfigure_audio_device) {
+                /*if (audio_player->reconfigure_audio_device) {
                     filename = av_strdup(audio_player->current_track->filename);
                     if (audio_player->current_track->filtergraph_override) {
                         filtergraph_override = av_strdup(audio_player->current_track->filtergraph_override);
@@ -1329,18 +1441,32 @@ static int event_thread(void* arg) {
 
                     start_time = audio_player->current_track->start_time;
                     play_duration = audio_player->current_track->play_duration;
+                }*/
+
+                if (is_current_track && !should_play_next) {
+                    //SDL_LockAudioDevice(audio_player->device_id);
+                    cleanup_track(is);
+                    SDL_PauseAudioDevice(audio_player->device_id, 1);
+                    //SDL_UnlockAudioDevice(audio_player->device_id);
+                }
+                else if (should_play_next) {
+                    SDL_LockAudioDevice(audio_player->device_id);
+                    cleanup_track(is);
+                    move_to_next_track();//Todo wont work with reconfigure
+                    SDL_UnlockAudioDevice(audio_player->device_id);
+                }
+                else {
+                    cleanup_track(is);
                 }
 
-                cleanup_for_next_track(audio_player->current_track);
-                audio_player->current_track = NULL;
 
-                if (audio_player->reconfigure_audio_device) {
+                /*if (audio_player->reconfigure_audio_device) {
                     if (!reconfigure_audio_device(pos, start_time, play_duration, filename, filtergraph_override)) {
                         send_log_event(ERROR, "Failed to reconfigure audio device");
                     }
                     av_free((void*)filename);
                     continue;
-                }
+                }*/
 
                 if (audio_player->notify_of_eof_callback) {
                     audio_player->notify_of_eof_callback(audio_player->is_eof_from_skip, audio_player->is_eof_from_error, handle);
@@ -1382,8 +1508,7 @@ static int event_thread(void* arg) {
                 audio_player->notify_of_duration_update_callback(*(double*)e.user.data1);
             }
             else if (e.type == audio_player->prepare_next_event && audio_player->notify_of_prepare_next_callback) {
-                //audio_player->notify_of_prepare_next_callback();
-                //Todo
+                audio_player->notify_of_prepare_next_callback();
             }
         }
 
@@ -1401,7 +1526,9 @@ static int event_thread(void* arg) {
 void au_shutdown() {
     if (!audio_player) return;
 
-    abort_track();
+    //abort_current_track();
+    abort_track(0, false);
+    abort_track(1, false);
 
     close_audio_device();
 
@@ -1526,6 +1653,13 @@ int au_initialize(const InitializeConfig* config)
     SDL_EventState(SDL_USEREVENT, SDL_IGNORE);
     SDL_EventState(SDL_DISPLAYEVENT, SDL_IGNORE);
 
+    const char *driver = SDL_GetCurrentAudioDriver();
+    if (driver) {
+        printf("Current audio driver: %s\n", driver);
+    } else {
+        printf("No audio driver initialized.\n");
+    }
+
     // Start the event thread
     audio_player->event_thread = SDL_CreateThread(event_thread, "Event_Thread", NULL);
     if (!audio_player->event_thread) {
@@ -1577,7 +1711,7 @@ int au_configure_audio_device(const AudioDeviceConfig* custom_config) {
         }
 
         audio_player->reconfigure_audio_device = true;
-        audio_player->current_track->abort_request = true;
+        audio_player->tracks[audio_player->track_index]->abort_request = true;
 
         return 0;
     }
@@ -1601,54 +1735,17 @@ int au_configure_audio_device(const AudioDeviceConfig* custom_config) {
     return 0;
 }
 
+//Always replace the current track, unless the noncurrent track is the same
 void au_play_audio(const char *filename, const PlayAudioConfig* config) {
     if (!audio_player || !audio_player->is_init_done) return;
 
     wait_for_audio_reconfigure();
 
-    abort_track();
-
     clear_filter_chain(audio_player);
 
-    int64_t start_time = AV_NOPTS_VALUE;
-    int64_t play_duration = AV_NOPTS_VALUE;
-    char *filtergraph_override = NULL;
+    abort_track(audio_player->track_index, false);
 
-    if (config) {
-        if (config->av_filtergraph_override) {
-            filtergraph_override = av_strdup(config->av_filtergraph_override);
-        }
-        else  {
-            if (config->loudnorm_settings) {
-                const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", config->loudnorm_settings);
-                add_to_filter_chain_end(audio_player, loudnorm_filter);
-                av_freep(&loudnorm_filter);
-            }
-
-            if (config->crossfeed_setting) {
-                const char *crossfeed_filter = av_asprintf("crossfeed=%s", config->crossfeed_setting);
-                add_to_filter_chain_end(audio_player, crossfeed_filter);
-                av_freep(&crossfeed_filter);
-            }
-        }
-
-        if (config->play_duration > 0) {
-            play_duration = SecondsToMicroseconds(config->play_duration);
-        }
-
-        if (config->skip_seconds > 0) {
-            start_time = SecondsToMicroseconds(config->skip_seconds);
-        }
-
-    }
-
-
-    audio_player->current_track = track_state_init(filename, filtergraph_override, start_time, play_duration, ++audio_player->handle_count);
-
-    if (!audio_player->current_track) {
-        send_log_event(FATAL, "Failed to initialize TrackState!");
-        //do_exit(NULL);
-    }
+    audio_player->tracks[audio_player->track_index] = create_track_state(filename, config);
 
     ++audio_player->request_count;
 }
@@ -1657,14 +1754,89 @@ void au_stop_audio() {
 
     wait_for_audio_reconfigure();
 
-    abort_track();
+    abort_track(0, false);
+    abort_track(1, false);
+
+    ++audio_player->request_count;
+}
+
+void au_set_next(const char *filename, const PlayAudioConfig *config) {//Todo calling this causes a glitch in the currently playing audio?
+    if (!audio_player || !audio_player->is_init_done) return;
+
+    wait_for_audio_reconfigure();
+
+    if (audio_player->track_index == 0) {
+        const TrackState *current_is = audio_player->tracks[0];
+
+        if (current_is && strcmp(current_is->filename, filename) == 0) {//This prevents setting the second track to the same song, useful?
+            return;
+        }
+
+
+        abort_track(1, false);
+        audio_player->tracks[1] = create_track_state(filename, config);
+    }
+    else if (audio_player->track_index == 1) {
+        const TrackState *current_is = audio_player->tracks[1];
+
+        if (current_is && strcmp(current_is->filename, filename) == 0) {
+            return;
+        }
+
+
+        abort_track(0, false);
+        audio_player->tracks[0] = create_track_state(filename, config);
+    }
+    else {
+        send_log_event(FATAL, "current_track_index was not 0 or 1");
+    }
+
+    ++audio_player->request_count;
+}
+
+void au_skip_to_next() {
+    if (!audio_player || !audio_player->is_init_done) return;
+
+    if (!audio_player->tracks[0] && !audio_player->tracks[1]) {
+        send_log_event(WARNING, "No track to play next");
+        return;
+    }
+
+    wait_for_audio_reconfigure();
+
+    abort_track(audio_player->track_index, true);
+
+    ++audio_player->request_count;
+}
+
+void au_clear_next() {
+    if (!audio_player || !audio_player->is_init_done) return;
+
+    wait_for_audio_reconfigure();
+
+    if (audio_player->track_index == 0) {
+        if (audio_player->tracks[1]) {
+            abort_track(1, false);
+        }
+    }
+    else if (audio_player->track_index == 1) {
+        if (audio_player->tracks[0]) {
+            abort_track(0, false);
+        }
+    }
+    else {
+        send_log_event(FATAL, "current_track_index was not a or b");
+    }
 
     ++audio_player->request_count;
 }
 
 void au_pause_audio(const bool value) {
+    if (!audio_player) return;
 
-    if (!audio_player->current_track || value == audio_player->current_track->paused) return;
+    TrackState *current_is = audio_player->tracks[audio_player->track_index];
+
+    if (!current_is || value == current_is->paused) return;
 
     wait_for_audio_reconfigure();
 
@@ -1676,8 +1848,8 @@ void au_pause_audio(const bool value) {
     }
 
 
-    set_clock(&audio_player->current_track->extclk, get_clock(&audio_player->current_track->extclk), audio_player->current_track->extclk.serial);
-    audio_player->current_track->paused = audio_player->current_track->audclk.paused = audio_player->current_track->extclk.paused = !audio_player->current_track->paused;
+    set_clock(&current_is->extclk, get_clock(&current_is->extclk), current_is->extclk.serial);
+    current_is->paused = current_is->audclk.paused = current_is->extclk.paused = !current_is->paused;
 
     ++audio_player->request_count;
 }
@@ -1685,10 +1857,12 @@ void au_pause_audio(const bool value) {
 void au_seek_percent(const double percentPos) {
     if (!audio_player || percentPos < 0.0 || percentPos > 100.0) return;
 
-    if (!audio_player->current_track || !audio_player->current_track->ic) return;
+    TrackState *current_is = audio_player->tracks[audio_player->track_index];
+
+    if (!current_is || !current_is->ic) return;
 
     // Get the total duration of the media file
-    const int64_t duration = audio_player->current_track->ic->duration;
+    const int64_t duration = current_is->ic->duration;
     if (duration == AV_NOPTS_VALUE) {
         // If duration is unknown, we can't seek by percentage
         return;
@@ -1700,7 +1874,7 @@ void au_seek_percent(const double percentPos) {
     if (target_pos < 0) target_pos = 0;
     if (target_pos > duration) target_pos = duration;
 
-    stream_seek(audio_player->current_track, target_pos, 0, 0);
+    stream_seek(current_is, target_pos, 0, 0);
 
     ++audio_player->request_count;
 }
@@ -1708,23 +1882,27 @@ void au_seek_percent(const double percentPos) {
 void au_seek_time(const int64_t milliseconds) {
     if (!audio_player || milliseconds < 0) return;
 
-    if (!audio_player->current_track || !audio_player->current_track->ic) return;
+    TrackState *current_is = audio_player->tracks[audio_player->track_index];
+
+    if (!current_is || !current_is->ic) return;
 
     int64_t target_pos = milliseconds * 1000;
 
     if (target_pos < 0) target_pos = 0;
 
-    stream_seek(audio_player->current_track, target_pos, 0, 0);
+    stream_seek(current_is, target_pos, 0, 0);
 }
 
 void au_set_audio_volume(const int volume) {
-    if (volume > 100 || volume < 0 || volume == audio_player->startup_volume) return;
+    if (!audio_player || volume > 100 || volume < 0 || volume == audio_player->startup_volume) return;
+
+    TrackState *current_is = audio_player->tracks[audio_player->track_index];
 
     audio_player->startup_volume = volume;
     audio_player->sdl_volume = av_clip(SDL_MIX_MAXVOLUME * volume / 100, 0, SDL_MIX_MAXVOLUME);
 
-    if (audio_player->current_track) {
-        audio_player->current_track->audio_volume = audio_player->sdl_volume;
+    if (current_is) {
+        current_is->audio_volume = audio_player->sdl_volume;
     }
 
     ++audio_player->request_count;
@@ -1740,9 +1918,11 @@ void au_mute_audio(const bool value) {
     if (!audio_player) return;
 
     //Todo make global mute option like volume
-    if (!audio_player->current_track || value == audio_player->current_track->muted) return;
+    TrackState *current_is = audio_player->tracks[audio_player->track_index];
 
-    audio_player->current_track->muted = !audio_player->current_track->muted;
+    if (!current_is || value == current_is->muted) return;
+
+    current_is->muted = !current_is->muted;
 
     ++audio_player->request_count;
 }
@@ -1760,18 +1940,24 @@ int au_get_loop_count() {
 }
 
 double au_get_audio_play_time() {
-    if (!audio_player || !audio_player->current_track) return -1;
+    if (!audio_player) return -1;
+
+    TrackState *current_is = audio_player->tracks[audio_player->track_index];
+
+    if (!current_is) return -1;
 
     //audio_player->play_duration is for how long a file *should* play how how long it *has* been playing
-    return get_clock(&audio_player->current_track->audclk);
+    return get_clock(&current_is->audclk);
 }
 
 double au_get_audio_duration() {
     if (!audio_player) return -1;
 
-    if (!audio_player->current_track || !audio_player->current_track->ic) return -1;
+    TrackState *current_is = audio_player->tracks[audio_player->track_index];
 
-    const int64_t duration = audio_player->current_track->ic->duration;
+    if (!current_is || !current_is->ic) return -1;
+
+    const int64_t duration = current_is->ic->duration;
     if (duration == AV_NOPTS_VALUE) {
         return -1;
     }

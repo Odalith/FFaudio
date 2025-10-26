@@ -14,7 +14,6 @@ endif()
 
 
 
-
 find_package(SDL2 REQUIRED)
 find_package(PkgConfig REQUIRED)
 
@@ -41,7 +40,7 @@ add_library(ffaudio SHARED lib/ffaudio.c lib/ffaudio.h
         lib/filtergraph.c
         lib/filtergraph.h
         lib/globals.h
-        lib/delagates.h)
+        lib/delegates.h)
 
 if(CMAKE_BUILD_TYPE MATCHES "Debug")
 

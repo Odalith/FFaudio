@@ -123,10 +123,27 @@ static void play_next(void) {
         .skip_seconds = 0.0,
         .play_duration = 0.0,
         .crossfeed_setting = NULL,
-        .loudnorm_settings = NULL
+        .loudnorm_settings = NULL,
+        .av_filtergraph_override = NULL,
     };
 
     au_play_audio(song, &config);
+
+    //sleep(10);
+
+    const PlayAudioConfig config2 = {
+        .skip_seconds = 0.0,
+        .play_duration = 0.0,
+        .crossfeed_setting = NULL,
+        .loudnorm_settings = NULL,
+        .av_filtergraph_override = NULL,
+    };
+
+    //au_set_next(queue_files[++queue_pos], &config2);
+
+    //sleep(10);
+
+    //au_skip_to_next();//This blocked
     ++queue_pos;
 }
 
@@ -142,7 +159,21 @@ static void eof_callback(bool is_eof_from_skip, bool is_from_error, int32_t hand
         return;
     }
 
-    play_next();
+    //play_next();
+}
+
+static void play_next_callback() {
+    if (queue_pos >= queue_count || (PLAY_COUNT > 0 && queue_pos >= (size_t)PLAY_COUNT)) {
+        printf("Done\n");
+        free_queue();
+        exit(0);
+    }
+
+    const char *song = queue_files[queue_pos];
+    printf("%zu Queuing %s\n", queue_pos + 1, song);
+
+    au_set_next(queue_files[queue_pos], NULL);
+    ++queue_pos;
 }
 
 static void restart_callback(const double position, const bool is_from_looping, const int32_t remaining_loop_count) {
@@ -182,7 +213,7 @@ int main(int argc, char **argv) {
         .on_eof = eof_callback,
         .on_restart = restart_callback,
         .on_duration_update = NULL,
-        .on_prepare_next = NULL,
+        .on_prepare_next = play_next_callback,
     };
 
     au_initialize(&config);
@@ -199,6 +230,7 @@ int main(int argc, char **argv) {
 
     au_configure_audio_device(NULL);
 
+    //Todo error when custom device and PC sleep?
     const EqualizerConfig params = {
         .one_31Hz = 2.0,
         .two_63Hz = 1.5,
@@ -215,6 +247,7 @@ int main(int argc, char **argv) {
     au_set_equalizer(params);
 
     play_next();
+
 
     if (SKIP_AFTER_SECONDS > 0) {
         for (int i = 0; i < PLAY_COUNT; ++i) {

@@ -166,6 +166,8 @@ bool au_set_equalizer(const EqualizerConfig params);
   - [X] Test with non audio file
   - [ ] Try to resolve "Could not open input stream." error when playing a new song directly after reconfiguring. avformat_open_input failing is most likely because is->abort is set to true. Would be best to try and not play the original file if the user is waiting for the next one to play
   - [X] Calling configure_audio_device(&AudConfig) then configure_audio_device(NULL) directly after causes segfault in strcmp().
+  - [ ] Only restart the stream if the audio device wants different format or sample rate.
+- [ ] Resample buffer audio in audio_decode_frame() instead of re-starting the stream.
 - [X] Write additional public api functions
 - [ ] Setup Github Actions for release
 - [ ] Release C# P/Invoke and create nuget packages
@@ -204,6 +206,8 @@ bool au_set_equalizer(const EqualizerConfig params);
 - [X] Add flags for was from loop (as opposed to a seek) and send the restart position notify_of_restart_callback
 - [ ] Find what to do about seek_*() not working immediately after play_audio() is called. (TrackState is not initialized yet)
 - [X] Add av_filtergraph_override to PlayAudioConfig
+- [X] Add au_set_next()
+- [ ] Add flag to eof callback to indicate that the queued file is playing?
 - [ ] Replace logging callback with `get_last_error()`?
 - [ ] Add playback speed adjustment
 

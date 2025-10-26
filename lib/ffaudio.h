@@ -103,6 +103,12 @@ extern "C" {
 
     DLL_EXPORT void au_stop_audio();
 
+    DLL_EXPORT void au_set_next(const char *filename, const PlayAudioConfig* config);
+
+    DLL_EXPORT void au_skip_to_next();
+
+    DLL_EXPORT void au_clear_next();
+
     DLL_EXPORT void au_pause_audio(const bool value);
 
     DLL_EXPORT void au_seek_percent(const double percentPos);

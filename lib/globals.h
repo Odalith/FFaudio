@@ -28,6 +28,7 @@
 #define EQ_BAND_COUNT 10
 #define SecondsToMicroseconds(x) ((x) * 1000000)
 #define AV_TIME_BASE_DOUBLE 1000000.0
+#define TRACK_COUNT 2
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -152,6 +153,7 @@ typedef struct Decoder {
 
 typedef struct TrackState {
     int32_t handle;
+    bool should_play_next;             // default false
     SDL_Thread *read_tid;
     int32_t abort_request;
     int32_t paused;
@@ -239,7 +241,8 @@ typedef struct AudioPlayer {
 
     int32_t handle_count;              // default 0
     int32_t errored_handle;            // default -1, used when stream_open() fails
-    TrackState *current_track;         // default NULL
+    TrackState* tracks[TRACK_COUNT];   // default [NULL, NULL]
+    int32_t track_index;               // default 0
 
     SDL_Thread *event_thread;          // default NULL
     SDL_atomic_t event_thread_running; // default false
