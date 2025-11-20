@@ -26,7 +26,7 @@
 
 #include "globals.h"
 
-double get_clock(Clock *c);
+double get_clock(const Clock *c);
 
 void set_clock_at(Clock *c, double pts, int serial, double time);
 
@@ -36,11 +36,11 @@ void set_clock_speed(Clock *c, double speed);
 
 void init_clock(Clock *c, int *queue_serial);
 
-void sync_clock_to_slave(Clock *c, Clock *slave);
+void sync_clock_to_slave(Clock *c, const Clock *slave);
 
 int get_master_sync_type(const TrackState *is);
 
-double get_master_clock(TrackState *is);
+double get_master_clock(const TrackState *is);
 
 
 #endif //FFAUDIO_CLOCK_UTILS_H

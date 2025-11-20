@@ -30,7 +30,7 @@ int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int keep_la
     int i;
     memset(f, 0, sizeof(FrameQueue));
     if (!(f->mutex = SDL_CreateMutex())) {
-        av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());
+        av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());//Todo av_log
         return AVERROR(ENOMEM);
     }
     if (!(f->cond = SDL_CreateCond())) {
@@ -85,7 +85,7 @@ Frame *frame_queue_peek_readable(FrameQueue *f)
 {
     /* wait until we have a readable a new frame */
     SDL_LockMutex(f->mutex);
-    while (f->size - f->rindex_shown <= 0 && !f->pktq->abort_request) {
+    while ((f->size == 0 || f->size - f->rindex_shown <= 0) && !f->pktq->abort_request) {
         SDL_CondWait(f->cond, f->mutex);
     }
     SDL_UnlockMutex(f->mutex);
@@ -93,7 +93,8 @@ Frame *frame_queue_peek_readable(FrameQueue *f)
     if (f->pktq->abort_request)
         return NULL;
 
-    return &f->queue[(f->rindex + f->rindex_shown) % f->max_size];
+    const int index = (f->rindex + f->rindex_shown) % f->max_size;
+    return &f->queue[index];
 }
 
 void frame_queue_push(FrameQueue *f)

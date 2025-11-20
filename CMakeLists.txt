@@ -18,11 +18,10 @@ find_package(SDL2 REQUIRED)
 find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+        libavutil
         libavcodec
         libavformat
-        libavutil
         libswresample
-        libswscale
         libavfilter
 )
 

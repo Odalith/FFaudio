@@ -209,6 +209,8 @@ int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const char *t
                    is->audio_filter_src.freq, av_get_sample_fmt_name(is->audio_filter_src.fmt),
                    1, is->audio_filter_src.freq, bp.str);
 
+    if (ret < 0) goto end;
+
     ret = avfilter_graph_create_filter(&audio_source_filter,
                                        avfilter_get_by_name("abuffer"), "ffaudio_abuffer",
                                        asrc_args, NULL, is->agraph);
