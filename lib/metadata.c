@@ -91,7 +91,8 @@ AuReplayGainInfo replaygain_from_tags(const AVDictionary *tags) {
         rg.album_peak = v;
     }
 
-    // Opus: Q7.8 fixed point dB relative to -23 LUFS. Only used where ReplayGain tags are missing.
+    // R128 tags (standard in Opus, RFC 7845; accepted in any format): Q7.8 fixed point dB relative to -23 LUFS.
+    // Only used where ReplayGain tags are missing; both measure BS.1770 loudness, so the references differ by 5 dB.
     if (!rg.has_track_gain && parse_decimal(dict_get(tags, "R128_TRACK_GAIN"), &v)) {
         rg.has_track_gain = true;
         rg.track_gain_db = v / 256.0 + R128_TO_REPLAYGAIN_DB;

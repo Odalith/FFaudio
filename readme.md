@@ -14,7 +14,8 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - **High quality output**: everything is mixed in 32-bit float at the device's own sample rate and channel
   layout, resampled with soxr when available; integer devices get TPDF dither
 - **ReplayGain / R128**: tags are applied automatically (track or album mode, preamp, fallback gain for untagged
-  files, clipping prevention); Opus R128 gains are converted to the ReplayGain reference
+  files, clipping prevention); R128 gain tags (the Opus standard, read from any format) are converted to the
+  ReplayGain reference
 - **Metadata**: tags (normalized names across formats), track/disc numbers and format details, for playing
   tracks or by probing a file without playing it
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers that
@@ -169,8 +170,18 @@ if (info) {
 AuMediaInfo *now = au_get_track_info(0);
 ```
 ReplayGain 2.0 tags (`REPLAYGAIN_TRACK_GAIN`, `..._PEAK`, `REPLAYGAIN_ALBUM_...`) are read from every format FFmpeg
-exposes them for (FLAC/Ogg/Opus comments, ID3v2 TXXX, APEv2, MP4 freeform atoms). Opus `R128_TRACK_GAIN` /
-`R128_ALBUM_GAIN` (relative to -23 LUFS) are converted to ReplayGain's -18 LUFS reference.
+exposes them for (FLAC/Ogg/Opus comments, ID3v2 TXXX, APEv2, MP4 freeform atoms).
+
+`R128_TRACK_GAIN` / `R128_ALBUM_GAIN` are used when a file has no ReplayGain tags. They are the standard for Opus
+(RFC 7845, which asks taggers not to write ReplayGain tags there) but are accepted in any format. ReplayGain 2.0 and
+EBU R128 measure loudness the same way (ITU-R BS.1770) and only differ in the target level: -18 LUFS versus
+-23 LUFS. R128 gains are therefore raised by 5 dB, so Opus files play as loud as the rest of a library; use
+`preamp_db = -5` if you prefer the -23 LUFS level. R128 tags carry no peak, so clipping prevention can not apply
+to files that only have R128 tags. ReplayGain 1.0 tags (an older measurement) look the same as 2.0 tags and are
+used as they are.
+
+The gain is applied in the mixer as a per-track multiplication of the float samples (not a filter), together with
+fades and before the master volume, so changing it never rebuilds a filter graph.
 Tag names are FFmpeg's normalized ones (`title`, `artist`, `album`, `album_artist`, `date`, `track`, `disc`, ...);
 lookups are case-insensitive and also find common alternative spellings.
 

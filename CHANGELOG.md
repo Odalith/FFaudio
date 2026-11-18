@@ -39,8 +39,8 @@ incompatible ways; see "API changes".
   `prepare_next_seconds` (default 10) before the end of the current track.
 - `au_get_current_handle`, `au_get_output_spec`, `au_is_paused`, `au_is_muted`, `au_get_version`.
 - Automatic ReplayGain: `au_set_replaygain()` with track/album mode, preamp, fallback gain for untagged files
-  and clipping prevention; ReplayGain 2.0 tags in every format FFmpeg reads and Opus R128 gains (converted to
-  the -18 LUFS reference). Gains change with a short ramp; `PlayAudioConfig.replaygain` supplies values from
+  and clipping prevention; ReplayGain 2.0 tags in every format FFmpeg reads, and R128 gain tags (the Opus
+  standard, accepted in any format, converted from -23 to the -18 LUFS reference). Gains change with a short ramp; `PlayAudioConfig.replaygain` supplies values from
   the application; `au_get_track_gain_db()` reports the applied gain.
 - Metadata: `au_probe()` (no player needed) and `au_get_track_info()` return an `AuMediaInfo` with format
   details, tags (case-insensitive, common aliases), track/disc numbers and ReplayGain values.

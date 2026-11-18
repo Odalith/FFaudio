@@ -101,7 +101,8 @@ extern "C" {
     //+-----------------------------------------------------+
 
     // Loudness values of a file. Gains are in dB relative to the ReplayGain 2.0 reference (-18 LUFS);
-    // R128_*_GAIN tags (Opus, relative to -23 LUFS) are converted to that reference (+5 dB).
+    // R128_TRACK_GAIN / R128_ALBUM_GAIN tags (the standard for Opus, RFC 7845, but read from any format; relative
+    // to -23 LUFS) are used when ReplayGain tags are missing and converted to that reference (+5 dB).
     typedef struct AuReplayGainInfo {
         bool has_track_gain;
         double track_gain_db;
