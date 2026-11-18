@@ -13,8 +13,12 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
   play, stop and pause/resume, plus per-track overrides
 - **High quality output**: everything is mixed in 32-bit float at the device's own sample rate and channel
   layout, resampled with soxr when available; integer devices get TPDF dither
+- **ReplayGain / R128**: tags are applied automatically (track or album mode, preamp, fallback gain for untagged
+  files, clipping prevention); Opus R128 gains are converted to the ReplayGain reference
+- **Metadata**: tags (normalized names across formats), track/disc numbers and format details, for playing
+  tracks or by probing a file without playing it
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers that
-  build equalizer, crossfeed, bs2b, ReplayGain and EBU R128 loudness strings
+  build equalizer, crossfeed, bs2b and EBU R128 loudness strings
 - Volume with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
 - Callbacks for track start/end, prepare-next, restarts (seek/loop), duration, device changes and logs
 - Follows the system default device, or uses a chosen one and falls back to the default if it disappears
@@ -124,12 +128,9 @@ au_set_global_filtergraph(filters);         // every track, changes apply while 
 au_free(filters);
 au_fb_free(fb);
 
-// Per track, e.g. ReplayGain from the file's tags (gain -6.2 dB, peak 0.98)
-AuFilterBuilder *rg = au_fb_create();
-au_fb_add_replaygain(rg, -6.2, 0.98, 0.0, true);
-const PlayAudioConfig cfg = { .av_filtergraph = au_fb_peek(rg) };
+// Per track
+const PlayAudioConfig cfg = { .av_filtergraph = "atempo=1.1" };
 au_play_audio("/music/song.flac", &cfg);
-au_fb_free(rg);
 
 // Runtime parameter changes without rebuilding the graph
 au_send_filter_command(0, "volume", "volume", "0.5");
@@ -137,7 +138,43 @@ au_send_filter_command(0, "volume", "volume", "0.5");
 Any [FFmpeg filter](https://ffmpeg.org/ffmpeg-filters.html) string works; `au_validate_filtergraph()` checks one.
 Changes take effect within about half a second (the audio that is already decoded plays out first).
 
-### 5. Surround files and the output format
+### 5. ReplayGain and metadata
+```c
+const AuReplayGainConfig rg = {
+    .mode = AU_REPLAYGAIN_ALBUM,    // or AU_REPLAYGAIN_TRACK; each falls back to the other gain
+    .preamp_db = 0.0,               // added to tagged gains
+    .fallback_gain_db = -6.0,       // files without tags
+    .prevent_clipping = true,       // never push the tagged peak past full scale
+};
+au_set_replaygain(&rg);             // applies to playing tracks with a short ramp
+
+// Gains from your own library database instead of the file's tags
+const AuReplayGainInfo mine = { .has_track_gain = true, .track_gain_db = -7.3,
+                                .has_track_peak = true, .track_peak = 0.97 };
+const PlayAudioConfig cfg = { .replaygain = &mine };
+au_play_audio("/music/song.flac", &cfg);
+
+// Tags and format without playing (no au_initialize() needed)
+AuMediaInfo *info = au_probe("/music/song.flac", NULL);
+if (info) {
+    int track, tracks;
+    au_media_track_number(info, &track, &tracks);
+    printf("%s - %s (%d/%d), %s %d Hz\n", au_media_tag(info, "artist"), au_media_tag(info, "title"),
+           track, tracks, au_media_codec(info), au_media_sample_rate(info));
+    AuReplayGainInfo gain = au_media_replaygain(info);
+    au_media_info_free(info);
+}
+
+// The same for a playing or queued track (0 = current), e.g. from on_track_started
+AuMediaInfo *now = au_get_track_info(0);
+```
+ReplayGain 2.0 tags (`REPLAYGAIN_TRACK_GAIN`, `..._PEAK`, `REPLAYGAIN_ALBUM_...`) are read from every format FFmpeg
+exposes them for (FLAC/Ogg/Opus comments, ID3v2 TXXX, APEv2, MP4 freeform atoms). Opus `R128_TRACK_GAIN` /
+`R128_ALBUM_GAIN` (relative to -23 LUFS) are converted to ReplayGain's -18 LUFS reference.
+Tag names are FFmpeg's normalized ones (`title`, `artist`, `album`, `album_artist`, `date`, `track`, `disc`, ...);
+lookups are case-insensitive and also find common alternative spellings.
+
+### 6. Surround files and the output format
 By default the output uses the device's own channel count and sample rate. Files with more channels than the
 output are mixed down; files with fewer are spread onto the matching speakers.
 ```c
@@ -153,7 +190,7 @@ au_set_downmix(AU_DOWNMIX_CUSTOM,              // or a matrix that keeps the LFE
 ```
 The standard matrix (ITU-R BS.775) puts the centre and surrounds in at -3 dB and drops the LFE.
 
-### 6. Shut down
+### 7. Shut down
 ```c
 au_shutdown();   // not from inside a callback; au_initialize() may be called again afterwards
 ```
@@ -189,16 +226,19 @@ au_shutdown();   // not from inside a callback; au_initialize() may be called ag
 - `test_lifecycle`: calls before init, shutdown while playing, re-initialization
 - `test_stress`: random API sequences, a playlist driven entirely from callbacks, rapid track replacement
   (`FFAUDIO_STRESS_SEED`, `FFAUDIO_STRESS_ITERS`)
+- `test_metadata`: tags, track/disc numbers and ReplayGain/R128 parsing in several formats
 - `test_output`: captures the mixed output and checks gapless joins sample by sample, crossfade lengths,
   fades, volume ramps and live filter changes
 
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
-`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters]`
+`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album]`
 plays a folder on real hardware for listening tests.
 
 ## Roadmap
-- [ ] ReplayGain / R128 read from tags automatically (track/album mode, preamp, clipping prevention)
-- [ ] Metadata and embedded cover art API, and probing a file without playing it
+- [x] ReplayGain / R128 read from tags automatically (track/album mode, preamp, clipping prevention)
+- [x] Metadata API and probing a file without playing it
+- [ ] Embedded cover art
+- [ ] Generate R128 / ReplayGain values for files (loudness scanner)
 - [ ] Playback speed (tempo with and without pitch change)
 - [ ] Network streams: HTTP/Icecast with "now playing" metadata, reconnects, buffering state (rtp/rtsp)
 - [ ] Cue sheets / gapless playback of track ranges inside one file

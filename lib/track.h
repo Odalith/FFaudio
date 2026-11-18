@@ -35,6 +35,12 @@ void track_request_seek(TrackState *t, int64_t pos_us);
 // Control thread: seek to a percentage of the duration, resolved once the duration is known
 void track_request_seek_percent(TrackState *t, double percent);
 
+// Any thread: recompute the ReplayGain gain from the current settings (no-op until the tags are known)
+void track_update_gain(TrackState *t);
+
+// Any thread: a copy of the track's media info, NULL before the file is open
+AuMediaInfo *track_copy_info(TrackState *t);
+
 // Any thread: replace the track's own filters (NULL = none); applied before the next decoded frame
 int track_set_filters(TrackState *t, const char *filters);
 

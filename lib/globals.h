@@ -178,6 +178,14 @@ typedef struct TrackState {
     int64_t play_duration;              // AV_TIME_BASE units, AV_NOPTS_VALUE = to the end
     AuFade fade_in_override;            // only used when has_fade_in_override
     bool has_fade_in_override;
+    AuReplayGainInfo replaygain_override;   // only used when has_replaygain_override
+    bool has_replaygain_override;
+    AuMediaInfo *info;                  // written by the read thread under seek_mutex before `opened` is set
+
+    // ReplayGain: target gain in millibels (any thread), ramped in the mixer
+    SDL_atomic_t gain_mb;
+    float gain_cur;                     // SDL callback only
+    bool gain_started;                  // SDL callback only
 
     // ---- threads ----
     SDL_Thread *read_tid;
@@ -326,6 +334,9 @@ typedef enum MsgType {
     CMD_SET_CROSSFADE,
     CMD_SET_GLOBAL_FILTERS,
     CMD_SET_DOWNMIX,
+    CMD_SET_REPLAYGAIN,
+    CMD_GET_TRACK_INFO,
+    CMD_GET_TRACK_GAIN,
     CMD_UPDATE_TRACK_FILTERS,
     CMD_FILTER_COMMAND,
     CMD_SHUTDOWN,
@@ -349,6 +360,11 @@ typedef struct Msg {
     CrossfadeConfig crossfade;
     AudioDeviceConfig device;       // audio_device points at str
     bool has_device;
+    AuReplayGainConfig replaygain;
+    AuReplayGainInfo replaygain_override;
+    bool has_replaygain_override;
+    void **out_ptr;                 // synchronous queries
+    double *out_double;
     int64_t i64;
     double d;
     bool b;
@@ -416,6 +432,7 @@ typedef struct AudioPlayer {
     bool output_ready;                  // guarded by format_mutex
     char *global_filters;               // guarded by format_mutex, applied after each track's own filters
     AU_DOWNMIX downmix;                 // guarded by format_mutex
+    AuReplayGainConfig replaygain;      // guarded by format_mutex
     char *downmix_filters;              // guarded by format_mutex, AU_DOWNMIX_CUSTOM only
     AudioParams audio_target;           // float32 interleaved at the device rate/layout, guarded by format_mutex
     SDL_AudioDeviceID device_id;

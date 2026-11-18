@@ -474,6 +474,78 @@ static void test_multichannel_routing(void) {
     free(c.samples);
 }
 
+/* ---------- ReplayGain ---------- */
+
+// Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
+static float replaygain_level(const char *file, const AuReplayGainConfig *cfg, const AuReplayGainInfo *override) {
+    start_capture("replaygain");
+    au_set_audio_volume(100);
+    if (cfg) CHECK(au_set_replaygain(cfg) == AU_OK);
+    const PlayAudioConfig pc = { .replaygain = override };
+    au_play_audio(fx(file), override ? &pc : NULL);
+    wait_until_idle(1, 4000);
+    Capture c = stop_capture();
+    const float db = channel_peak_db(&c, 0);
+    free(c.samples);
+    return db;
+}
+
+#define CHECK_LEVEL(actual, expected, tol) do { \
+    const float a_ = (actual), e_ = (expected); \
+    printf("   %-44s %7.2f dB (expected %.2f)\n", #actual, a_, e_); \
+    CHECK(fabsf(a_ - e_) < (tol)); } while (0)
+
+static void test_replaygain_levels(void) {
+    const AuReplayGainConfig track = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainConfig album = { .mode = AU_REPLAYGAIN_ALBUM };
+    const AuReplayGainConfig preamp = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 2 };
+    const AuReplayGainConfig fallback = { .mode = AU_REPLAYGAIN_TRACK, .fallback_gain_db = -6 };
+    const AuReplayGainConfig safe = { .mode = AU_REPLAYGAIN_TRACK, .prevent_clipping = true };
+
+    CHECK_LEVEL(replaygain_level("rg_tagged.flac", NULL, NULL), SINE_DB, 0.1f);            // off by default
+    CHECK_LEVEL(replaygain_level("rg_tagged.flac", &track, NULL), SINE_DB - 6, 0.1f);
+    CHECK_LEVEL(replaygain_level("rg_tagged.flac", &album, NULL), SINE_DB - 3, 0.1f);
+    CHECK_LEVEL(replaygain_level("rg_tagged.flac", &preamp, NULL), SINE_DB - 4, 0.1f);
+    // Lossy codecs change the peak a little: compare with the same file without ReplayGain
+    const float mp3_off = replaygain_level("rg_tagged.mp3", NULL, NULL);
+    CHECK_LEVEL(replaygain_level("rg_tagged.mp3", &track, NULL), mp3_off - 6, 0.1f);
+    const float opus_off = replaygain_level("rg_r128.opus", NULL, NULL);
+    CHECK_LEVEL(replaygain_level("rg_r128.opus", &track, NULL), opus_off - 6, 0.1f);
+    CHECK_LEVEL(replaygain_level("rg_untagged.flac", &fallback, NULL), SINE_DB - 6, 0.1f);
+    CHECK_LEVEL(replaygain_level("rg_untagged.flac", &track, NULL), SINE_DB, 0.1f);       // no tags, no fallback
+    // +12 dB would push the 0.5 peak past full scale: limited to +6.02 dB
+    CHECK_LEVEL(replaygain_level("rg_hot.flac", &track, NULL), SINE_DB + 12, 0.1f);
+    CHECK_LEVEL(replaygain_level("rg_hot.flac", &safe, NULL), SINE_DB + 6.02f, 0.1f);
+
+    // Values from the application instead of the tags
+    const AuReplayGainInfo mine = { .has_track_gain = true, .track_gain_db = -10 };
+    CHECK_LEVEL(replaygain_level("rg_untagged.flac", &track, &mine), SINE_DB - 10, 0.1f);
+    CHECK_LEVEL(replaygain_level("rg_tagged.flac", &track, &mine), SINE_DB - 10, 0.1f);   // override wins
+}
+
+static void test_replaygain_live_change(void) {
+    // Switching ReplayGain on while playing ramps the level down instead of jumping
+    start_capture("replaygain_live");
+    au_set_audio_volume(100);
+    au_play_audio(fx("rg_long.flac"), NULL);
+    tc_sleep_ms(1000);
+    const AuReplayGainConfig track = { .mode = AU_REPLAYGAIN_TRACK };
+    CHECK(au_set_replaygain(&track) == AU_OK);
+    wait_until_idle(1, 5000);
+    Capture c = stop_capture();
+
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const float before = 20.0f * log10f(window_peak(&c, first, 0.2, 0.8));
+    const float after = 20.0f * log10f(window_peak(&c, first, 2.0, 2.8));
+    const float jump = largest_jump(&c, first, last) / max_sine_step(&c, first, last);
+    printf("   live: %.2f dB -> %.2f dB, jump ratio %.2f\n", before, after, jump);
+    CHECK(fabsf(before - SINE_DB) < 0.1f);
+    CHECK(fabsf(after - (SINE_DB - 6)) < 0.1f);
+    CHECK(jump < 1.0f);
+    free(c.samples);
+}
+
 static void test_bad_filter_fails_cleanly(void) {
     start_capture("badfilter");
     const PlayAudioConfig bad = { .av_filtergraph = "this_filter_does_not_exist=1" };
@@ -502,6 +574,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_downmix_levels);
     RUN_TEST(test_bad_custom_downmix_rejected);
     RUN_TEST(test_multichannel_routing);
+    RUN_TEST(test_replaygain_levels);
+    RUN_TEST(test_replaygain_live_change);
     RUN_TEST(test_bad_filter_fails_cleanly);
     return tc_finish("test_output");
 }

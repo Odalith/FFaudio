@@ -97,6 +97,37 @@ extern "C" {
     } CrossfadeConfig;
 
     //+-----------------------------------------------------+
+    //| ReplayGain                                          |
+    //+-----------------------------------------------------+
+
+    // Loudness values of a file. Gains are in dB relative to the ReplayGain 2.0 reference (-18 LUFS);
+    // R128_*_GAIN tags (Opus, relative to -23 LUFS) are converted to that reference (+5 dB).
+    typedef struct AuReplayGainInfo {
+        bool has_track_gain;
+        double track_gain_db;
+        bool has_track_peak;
+        double track_peak;           // linear sample peak, 1.0 = full scale
+        bool has_album_gain;
+        double album_gain_db;
+        bool has_album_peak;
+        double album_peak;
+        bool from_r128;              // the gains came from R128_TRACK_GAIN / R128_ALBUM_GAIN
+    } AuReplayGainInfo;
+
+    typedef enum AU_REPLAYGAIN_MODE {
+        AU_REPLAYGAIN_OFF = 0,
+        AU_REPLAYGAIN_TRACK,         // track gain; album gain if the track has none
+        AU_REPLAYGAIN_ALBUM,         // album gain; track gain if the track has none
+    } AU_REPLAYGAIN_MODE;
+
+    typedef struct AuReplayGainConfig {
+        AU_REPLAYGAIN_MODE mode;
+        double preamp_db;            // added to tagged gains, -15..+15 dB
+        double fallback_gain_db;     // used for files without ReplayGain/R128 tags, -30..+15 dB (e.g. -6)
+        bool prevent_clipping;       // lower the gain so the tagged peak does not exceed full scale
+    } AuReplayGainConfig;
+
+    //+-----------------------------------------------------+
     //| Configuration structs                               |
     //+-----------------------------------------------------+
 
@@ -138,6 +169,9 @@ extern "C" {
         // Optional; NULL = use the CrossfadeConfig. Overrides the fade into this track
         // (on_play for au_play_audio(), on_track_end/on_skip for au_set_next()).
         const AuFade *fade_in;
+        // Optional; NULL = read ReplayGain/R128 values from the file's tags. Use this to supply values
+        // from your own library database (e.g. scanned but not written to the file).
+        const AuReplayGainInfo *replaygain;
     } PlayAudioConfig;
 
     //+-----------------------------------------------------+
@@ -240,6 +274,60 @@ extern "C" {
     // custom_filters is only used with AU_DOWNMIX_CUSTOM. Applies to playing tracks right away.
     // Returns AU_ERR_INVALID_ARGUMENT if the custom filters do not accept a 7.1 input.
     DLL_EXPORT int au_set_downmix(AU_DOWNMIX mode, const char *custom_filters);
+
+    //+-----------------------------------------------------+
+    //| ReplayGain                                          |
+    //+-----------------------------------------------------+
+
+    // Apply ReplayGain/R128 tags automatically. NULL = off (the default). Applies to playing tracks
+    // right away (with a short ramp) and to every later track.
+    DLL_EXPORT int au_set_replaygain(const AuReplayGainConfig *config);
+
+    // The ReplayGain gain ffaudio applies to a track (handle 0 = the current track), in dB.
+    // AU_ERR_NOTHING_TO_DO when the track is unknown or not open yet.
+    DLL_EXPORT int au_get_track_gain_db(int32_t handle, double *out_gain_db);
+
+    //+-----------------------------------------------------+
+    //| Metadata                                            |
+    //+-----------------------------------------------------+
+
+    typedef struct AuMediaInfo AuMediaInfo;
+
+    // Read the tags and format of a file without playing it. Works without au_initialize() and from
+    // any thread; it blocks while the file is opened. Free the result with au_media_info_free().
+    DLL_EXPORT AuMediaInfo *au_probe(const char *filename, int *out_error);
+
+    // Information about a playing or queued track (handle 0 = the current track); NULL when the track is
+    // unknown or not open yet (see on_duration_update). Free the result with au_media_info_free().
+    DLL_EXPORT AuMediaInfo *au_get_track_info(int32_t handle);
+
+    DLL_EXPORT void au_media_info_free(AuMediaInfo *info);
+
+    DLL_EXPORT const char *au_media_filename(const AuMediaInfo *info);
+    DLL_EXPORT const char *au_media_container(const AuMediaInfo *info);      // e.g. "flac", "mp3", "ogg"
+    DLL_EXPORT const char *au_media_codec(const AuMediaInfo *info);          // e.g. "flac", "mp3", "aac", "opus"
+    DLL_EXPORT const char *au_media_channel_layout(const AuMediaInfo *info); // e.g. "stereo", "5.1(side)"
+    DLL_EXPORT double au_media_duration(const AuMediaInfo *info);            // seconds, -1 when unknown
+    DLL_EXPORT int64_t au_media_bit_rate(const AuMediaInfo *info);           // bits per second, 0 when unknown
+    DLL_EXPORT int au_media_sample_rate(const AuMediaInfo *info);
+    DLL_EXPORT int au_media_channels(const AuMediaInfo *info);
+    DLL_EXPORT int au_media_bits_per_sample(const AuMediaInfo *info);        // 0 for lossy codecs / unknown
+
+    // A tag by name, case-insensitive; NULL when absent. Common names are the same in every format:
+    // "title", "artist", "album", "album_artist", "date", "genre", "track", "disc", "composer", "comment".
+    // Format-specific spellings of album_artist and date ("ALBUMARTIST", "year", ...) are also found.
+    DLL_EXPORT const char *au_media_tag(const AuMediaInfo *info, const char *key);
+
+    // All tags, for display or export
+    DLL_EXPORT int au_media_tag_count(const AuMediaInfo *info);
+    DLL_EXPORT bool au_media_tag_at(const AuMediaInfo *info, int index, const char **key, const char **value);
+
+    // Track / disc numbers from "3/12" style tags or separate TRACKTOTAL / DISCTOTAL tags; 0 when unknown
+    DLL_EXPORT void au_media_track_number(const AuMediaInfo *info, int *number, int *total);
+    DLL_EXPORT void au_media_disc_number(const AuMediaInfo *info, int *number, int *total);
+
+    // ReplayGain / R128 values from the tags
+    DLL_EXPORT AuReplayGainInfo au_media_replaygain(const AuMediaInfo *info);
 
     //+-----------------------------------------------------+
     //| Volume, looping                                     |
