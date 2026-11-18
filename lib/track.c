@@ -37,6 +37,8 @@
 #define MIN_FRAMES 25
 // A backwards jump of the frame timestamps larger than this, without a seek, means the track looped
 #define LOOP_DETECT_SECONDS 0.25
+// Most audio (in file seconds) the speed stage can hold between its input and output
+#define SPEED_MAX_LAG_SECONDS 0.2
 
 static int audio_thread(void *arg);
 static int read_thread(void *arg);
@@ -393,9 +395,12 @@ static bool handle_demux_end(TrackState *t, AVPacket *pkt) {
     if (loops != 0 && !SDL_AtomicGet(&t->had_error)) {
         if (loops > 0)
             SDL_AtomicAdd(&t->loops_remaining, -1);
-        // Seek back without flushing the queues so the loop is gapless; the mixer detects the restart
-        if (seek_file(t, t->start_time != AV_NOPTS_VALUE ? t->start_time : 0) >= 0)
+        // Seek back without flushing the queues so the loop is gapless; the mixer reports the restart when it
+        // is heard (it only reports backward jumps of the timestamps that match a counted loop)
+        if (seek_file(t, t->start_time != AV_NOPTS_VALUE ? t->start_time : 0) >= 0) {
+            SDL_AtomicAdd(&t->loops_started, 1);
             return true;
+        }
         ff_log(AU_LOG_WARNING, "%s: could not seek back to loop", t->filename);
     }
 
@@ -657,7 +662,16 @@ static int drain_speed(TrackState *t, AVFrame *spd, AVFrame *tmp, const int seri
     int ret;
     const int rate = t->convert_rate;
     while ((ret = av_buffersink_get_frame_flags(t->speed_chain.sink, spd, 0)) >= 0) {
-        const double file_pos = t->speed_seg_in + (double)t->speed_seg_out / rate * t->speed_cur;
+        double file_pos = t->speed_seg_in + (double)t->speed_seg_out / rate * t->speed_cur;
+        // The estimate drifts a little with every live speed change (the filters hold some audio). The real
+        // position can not be ahead of what went in, nor further behind it than the filters can hold: keep it
+        // in that window and restart the segment from there, so errors never add up
+        const double lo = t->speed_in_end - SPEED_MAX_LAG_SECONDS;
+        if (file_pos > t->speed_in_end || file_pos < lo) {
+            file_pos = file_pos > t->speed_in_end ? t->speed_in_end : lo;
+            t->speed_seg_in = file_pos;
+            t->speed_seg_out = 0;
+        }
         t->speed_seg_out += spd->nb_samples;
         spd->pts = llrint(file_pos * rate);
         if ((ret = feed_user(t, spd, tmp, (AVRational){1, rate}, serial)) < 0)
@@ -672,11 +686,13 @@ static int drain_speed(TrackState *t, AVFrame *spd, AVFrame *tmp, const int seri
 static int feed_speed(TrackState *t, AVFrame *frame, AVFrame *spd, AVFrame *tmp, const AVRational tb, const int serial) {
     if (!t->speed_chain.graph)
         return feed_user(t, frame, tmp, tb, serial);
+    const double in_pos = frame->pts != AV_NOPTS_VALUE ? frame->pts * av_q2d(tb) : t->speed_in_end;
     if (!t->speed_seg_open) {
-        t->speed_seg_in = frame->pts != AV_NOPTS_VALUE ? frame->pts * av_q2d(tb) : 0.0;
+        t->speed_seg_in = in_pos;
         t->speed_seg_out = 0;
         t->speed_seg_open = true;
     }
+    t->speed_in_end = in_pos + (double)frame->nb_samples / frame->sample_rate;
     if (av_buffersrc_add_frame(t->speed_chain.src, frame) < 0) {
         av_frame_unref(frame);
         return 0;
@@ -998,9 +1014,16 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
                 continue;
             }
             if (!isnan(f->pts)) {
-                if (t->started && !isnan(t->last_frame_pts) && f->pts < t->last_frame_pts - LOOP_DETECT_SECONDS)
+                // A jump back without a seek is a loop only if the read thread actually looped; anything else
+                // (e.g. a small position correction from the speed stage) is not reported
+                if (t->started && !isnan(t->last_frame_pts) && f->serial == t->last_frame_serial &&
+                    f->pts < t->last_frame_pts - LOOP_DETECT_SECONDS &&
+                    SDL_AtomicGet(&t->loops_started) > t->loops_heard) {
+                    t->loops_heard++;
                     *looped = true;
+                }
                 t->last_frame_pts = f->pts;
+                t->last_frame_serial = f->serial;
                 t->position = f->pts;
             }
             t->cur = f;

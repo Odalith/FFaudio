@@ -220,6 +220,7 @@ typedef struct TrackState {
     bool speed_keep_pitch_cur;          // audio thread only
     int32_t speed_gen_seen;             // audio thread only: last applied AudioPlayer.speed_gen
     double speed_seg_in;                // audio thread only: file position where the current speed segment began
+    double speed_in_end;                // audio thread only: file position just past the last frame fed into it
     int64_t speed_seg_out;              // audio thread only: samples output since then
     bool speed_seg_open;                // audio thread only: speed_seg_in is known
     int32_t convert_rate;               // output rate the graphs were built for
@@ -234,6 +235,7 @@ typedef struct TrackState {
     SDL_atomic_t failed;                // 1 when the track can not produce (more) audio because of an error
     SDL_atomic_t eos_serial;            // queue serial whose last frame has been pushed into sampq, -1 = none
     SDL_atomic_t loops_remaining;       // -1 infinite, 0 none
+    SDL_atomic_t loops_started;         // read thread: loops it has seeked back for (the mixer reports each once)
     SDL_atomic_t filter_reconfigure;    // 1 = rebuild the convert graph before the next frame (device changed)
     SDL_atomic_t user_filters_changed;  // 1 = rebuild the user graph before the next frame
     SDL_atomic_t had_error;             // 1 = the track ends as an error, even if some audio played
@@ -248,6 +250,8 @@ typedef struct TrackState {
     double play_speed;                  // speed of the audio being played (file seconds per output second)
     bool started;                       // produced at least one sample
     bool announced;                     // MIX_EV_TRACK_STARTED has been sent
+    int32_t loops_heard;                // loops reported so far (compared with loops_started)
+    int32_t last_frame_serial;          // serial of last_frame_pts
 
     // ---- slot bookkeeping, changed under the device lock ----
     TrackRole role;
