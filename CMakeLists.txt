@@ -36,8 +36,10 @@ add_library(ffaudio SHARED
         lib/cmdutils.h
         lib/packet_queue_utils.c
         lib/packet_queue_utils.h
-        lib/clock_utils.c
-        lib/clock_utils.h
+        lib/track.c
+        lib/track.h
+        lib/output.c
+        lib/output.h
         lib/frame_queue_utils.c
         lib/frame_queue_utils.h
         lib/decoder_utils.c
@@ -49,6 +51,9 @@ add_library(ffaudio SHARED
 
 target_include_directories(ffaudio PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/lib)
 target_link_libraries(ffaudio PUBLIC SDL2 PkgConfig::FFMPEG)
+if(UNIX)
+    target_link_libraries(ffaudio PUBLIC m)
+endif()
 target_compile_options(ffaudio PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare ${SAN_FLAGS})
 target_link_options(ffaudio PRIVATE ${SAN_FLAGS})
 
@@ -87,14 +92,14 @@ if(FFAUDIO_BUILD_TESTS)
                 COMMENT "Generating audio fixtures")
         add_custom_target(ffaudio_fixtures ALL DEPENDS ${FIXTURE_DIR}/.stamp)
 
-        set(FFAUDIO_TESTS test_basic test_lifecycle test_stress)
+        set(FFAUDIO_TESTS test_basic test_lifecycle test_stress test_output)
         foreach(t ${FFAUDIO_TESTS})
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})
             set_tests_properties(${t} PROPERTIES
                     TIMEOUT 180
-                    ENVIRONMENT "SDL_AUDIODRIVER=dummy;ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1")
+                    ENVIRONMENT "SDL_AUDIODRIVER=dummy;ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
     endif()
 endif()

@@ -22,14 +22,18 @@
 #define FFAUDIO_FILTERGRAPH_H
 
 #include "globals.h"
-#include "ffaudio.h"
 
-int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
-                                 AVFilterContext *source_ctx, AVFilterContext *sink_ctx);
-
-int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const bool force_output_format);
+// (Re)builds the track's filter graph for the current output format.
+// Returns AVERROR(EAGAIN) when no output device has been configured yet.
+int configure_audio_filters(AudioPlayer *ap, TrackState *is);
 
 // Frees the track's filter graph and clears the in/out filter pointers
 void free_audio_filters(TrackState *is);
+
+// Whether aresample can use the higher quality soxr resampler
+bool filtergraph_soxr_available(void);
+
+// Checks that a user filter string parses and links (>= 0 on success)
+int filtergraph_validate(const char *filtergraph);
 
 #endif //FFAUDIO_FILTERGRAPH_H

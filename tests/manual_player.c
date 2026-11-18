@@ -1,7 +1,5 @@
 /*
-* Copyright (c) 2003 Fabrice Bellard, 2025 Odalith
- *
- * This file was part of FFmpeg, particularly FFplay.
+* Copyright (c) 2025 Odalith
  *
  * ffaudio is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,8 +16,17 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+/*
+ * Interactive player for listening tests on real hardware.
+ *
+ *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s]
+ *
+ * Plays the files under <music-dir> (shuffled with -s), queueing the next one from on_prepare_next.
+ * Commands on stdin: n = skip, p = pause/resume, s = stop, + / - = volume, > = seek +10 s, q = quit
+ */
+
 #define _XOPEN_SOURCE 700
-#define DEFAULT_SOURCE
+#define _DEFAULT_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,275 +34,149 @@
 #include <stdbool.h>
 #include <time.h>
 #include <unistd.h>
-#include <pthread.h>
 #include <ftw.h>
 #include <sys/stat.h>
 
 #include "../lib/ffaudio.h"
 
-#define PLAY_COUNT 100 // -1 == play all
-#define SKIP_AFTER_SECONDS -1 // -1 == disable
+static char **files = NULL;
+static size_t file_count = 0, file_cap = 0;
+static size_t next_index = 0;
+static size_t max_tracks = (size_t)-1;
+static const char *filter = NULL;
 
-static char **queue_files = NULL;
-static size_t queue_count = 0;
-static size_t queue_capacity = 0;
-static size_t queue_pos = 0;
-static volatile bool skip_next_timer = false;
-
-static void ensure_capacity(size_t needed) {
-    if (queue_capacity >= needed) return;
-    size_t new_cap = queue_capacity ? queue_capacity * 2 : 128;
-    while (new_cap < needed) new_cap *= 2;
-    char **new_arr = (char**)realloc(queue_files, new_cap * sizeof(char*));
-    if (!new_arr) {
-        perror("realloc");
-        au_shutdown();
-        exit(1);
+static int collect(const char *path, const struct stat *sb, int type, struct FTW *ftw) {
+    (void)sb; (void)ftw;
+    if (type != FTW_F) return 0;
+    if (file_count == file_cap) {
+        file_cap = file_cap ? file_cap * 2 : 128;
+        char **n = realloc(files, file_cap * sizeof(char *));
+        if (!n) return -1;
+        files = n;
     }
-    queue_files = new_arr;
-    queue_capacity = new_cap;
-}
-
-static void free_queue(void) {
-    if (!queue_files) return;
-    for (size_t i = 0; i < queue_count; ++i) free(queue_files[i]);
-    free(queue_files);
-    queue_files = NULL;
-    queue_count = 0;
-    queue_capacity = 0;
-}
-
-static int collect_file_cb(const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf) {
-    (void)sb; (void)ftwbuf;
-    if (typeflag == FTW_F) {
-        ensure_capacity(queue_count + 1);
-        queue_files[queue_count] = strdup(fpath);
-        if (!queue_files[queue_count]) {
-            perror("strdup");
-            return -1; // abort nftw
-        }
-        queue_count++;
-    }
+    files[file_count++] = strdup(path);
     return 0;
 }
 
-static void shuffle_queue(void) {
-    if (queue_count <= 1) return;
-    // Fisher-Yates shuffle
-    for (size_t i = queue_count - 1; i > 0; --i) {
-        size_t j = (size_t)(rand() % (int)(i + 1));
-        char *tmp = queue_files[i];
-        queue_files[i] = queue_files[j];
-        queue_files[j] = tmp;
-    }
+static const char *take_next(void) {
+    if (next_index >= file_count || next_index >= max_tracks) return NULL;
+    return files[next_index++];
 }
 
-static void error_callback(const char* message, int64_t request, enum AU_LOG_LEVEL level) {
-
-    switch (level) {
-        case FATAL:
-            fprintf(stdout, "Fatal: %s\n", message ? message : "(null)");
-            break;
-        case ERROR:
-            fprintf(stderr, "Error: %s\n", message ? message : "(null)");
-            break;
-        case WARNING:
-            fprintf(stderr, "Warning: %s\n", message ? message : "(null)");
-            break;
-        case INFO:
-            fprintf(stdout, "Info: %s\n", message ? message : "(null)");
-            break;
-    }
+static PlayAudioConfig play_config(void) {
+    return (PlayAudioConfig){ .av_filtergraph = filter };
 }
 
-static void play_next(void) {
-    if (queue_pos >= queue_count || (PLAY_COUNT > 0 && queue_pos >= (size_t)PLAY_COUNT)) {
-        printf("Done\n");
-        free_queue();
-        au_shutdown();
-        exit(0);
-    }
-
-    const char *song = queue_files[queue_pos];
-    printf("%zu Playing %s\n", queue_pos + 1, song);
-
-    const PlayAudioConfig config = {
-        .skip_seconds = 0.0,
-        .play_duration = 0.0,
-        .av_filtergraph = "bs2b=profile=default",
-    };
-
-    au_play_audio(song, &config);
-
-    //sleep(10);
-
-    const PlayAudioConfig config2 = {
-        .skip_seconds = 0.0,
-        .play_duration = 0.0,
-        .av_filtergraph = NULL,
-    };
-
-    //au_set_next(queue_files[++queue_pos], &config2);
-
-    //sleep(10);
-
-    //au_skip_to_next();//This blocked
-    ++queue_pos;
+static void on_log(const char *msg, int64_t req, enum AU_LOG_LEVEL level, void *ud) {
+    (void)req; (void)ud;
+    static const char *names[] = { "info", "warning", "error", "fatal" };
+    fprintf(level >= AU_LOG_ERROR ? stderr : stdout, "[%s] %s\n", names[level & 3], msg);
 }
 
-static void eof_callback(bool is_eof_from_skip, bool is_from_error, int32_t handle) {
-    printf("EOF\n");
-
-    if (is_from_error) {
-        printf("Error\n");
-    }
-
-    if (is_eof_from_skip) {
-        printf("Skipped\n");
-        return;
-    }
-
-    //play_next();
+static void on_eof(bool skip, bool error, int32_t handle, void *ud) {
+    (void)ud;
+    printf("  ended #%d%s%s\n", handle, skip ? " (skipped)" : "", error ? " (error)" : "");
 }
 
-static void play_next_callback() {
-    if (queue_pos >= queue_count || (PLAY_COUNT > 0 && queue_pos >= (size_t)PLAY_COUNT)) {
-        printf("Done\n");
-        free_queue();
-        exit(0);
-    }
-
-    const char *song = queue_files[queue_pos];
-    printf("%zu Queuing %s\n", queue_pos + 1, song);
-
-    au_set_next(queue_files[queue_pos], NULL);
-    ++queue_pos;
+static void on_started(int32_t handle, void *ud) {
+    (void)ud;
+    printf("> now playing #%d (%.1f s)\n", handle, au_get_audio_duration());
 }
 
-static void restart_callback(const double position, const bool is_from_looping, const int32_t remaining_loop_count) {
-    printf("Restarting playback to %f. Is from loop: %d, Remaining loops: %d\n", position, is_from_looping, remaining_loop_count);
+static void on_prepare_next(int32_t current, void *ud) {
+    (void)current; (void)ud;
+    const char *f = take_next();
+    if (!f) { printf("  (queue empty)\n"); return; }
+    const PlayAudioConfig cfg = play_config();
+    const int32_t h = au_set_next(f, &cfg);
+    printf("  queued #%d %s\n", h, f);
+}
+
+static void on_restart(int32_t handle, double pos, bool looped, int32_t remaining, void *ud) {
+    (void)ud;
+    printf("  #%d restarted at %.2f%s (loops left %d)\n", handle, pos, looped ? " by looping" : "", remaining);
+}
+
+static void on_device(int32_t channels, int32_t rate, void *ud) {
+    (void)ud;
+    printf("  output: %d Hz, %d channels\n", rate, channels);
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "Pass the media directory as an argument\n");
+        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s]\n", argv[0]);
         return 1;
     }
-
-    const char *root = argv[1];
-
-    // Collect files recursively
-    if (nftw(root, collect_file_cb, 20, FTW_PHYS) != 0) {
-        perror("nftw");
-        free_queue();
-        return 1;
+    double crossfade = 0;
+    bool shuffle = false;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "-x") && i + 1 < argc) crossfade = atof(argv[++i]);
+        else if (!strcmp(argv[i], "-f") && i + 1 < argc) filter = argv[++i];
+        else if (!strcmp(argv[i], "-n") && i + 1 < argc) max_tracks = (size_t)atol(argv[++i]);
+        else if (!strcmp(argv[i], "-s")) shuffle = true;
     }
 
-    if (queue_count == 0) {
-        fprintf(stderr, "No files found under: %s\n", root);
+    if (nftw(argv[1], collect, 20, FTW_PHYS) != 0 || file_count == 0) {
+        fprintf(stderr, "No files found under %s\n", argv[1]);
         return 1;
     }
-
-    // Shuffle queue
-    srand((unsigned int)time(NULL));
-    shuffle_queue();
-
-    // Setup
-    const InitializeConfig config = {
-        .app_name = "Test App",
-        .initial_volume = 55,
-        .initial_loop_count = 0,
-        .on_log = error_callback,
-        .on_eof = eof_callback,
-        .on_restart = restart_callback,
-        .on_duration_update = NULL,
-        .on_prepare_next = play_next_callback,
-    };
-
-    au_initialize(&config);
-
-    // Find audio devices
-    int n;
-    char **devs;
-    if (au_get_audio_devices(&n, &devs)==0) {
-        for (int i = 0; i < n; ++i) {
-            printf("%d %s\n", i, devs[i]);
-            free(devs[i]);
+    if (shuffle) {
+        srand((unsigned)time(NULL));
+        for (size_t i = file_count - 1; i > 0; i--) {
+            const size_t j = (size_t)rand() % (i + 1);
+            char *t = files[i]; files[i] = files[j]; files[j] = t;
         }
     }
 
-    const AudioDeviceConfig AudConfig1 = {
-        .audio_device = "Navi 10 HDMI Audio Digital Stereo (HDMI 3)",
-        .audio_device_index = 3
+    const InitializeConfig config = {
+        .app_name = "ffaudio manual player",
+        .initial_volume = 60,
+        .on_log = on_log,
+        .on_eof = on_eof,
+        .on_restart = on_restart,
+        .on_prepare_next = on_prepare_next,
+        .on_track_started = on_started,
+        .on_audio_device_update = on_device,
     };
+    if (au_initialize(&config) != AU_OK) return 1;
 
-    const AudioDeviceConfig AudConfig2 = {
-        .audio_device = "Bose QC Ultra Headphones",
-        .audio_device_index = 2
-    };
-
-    //au_configure_audio_device(&AudConfig1);
-
+    int n = 0;
+    char **devs = NULL;
+    if (au_get_audio_devices(&n, &devs) == AU_OK) {
+        for (int i = 0; i < n; i++) { printf("device %d: %s\n", i, devs[i]); free(devs[i]); }
+        free(devs);
+    }
     au_configure_audio_device(NULL);
 
-    //Todo error when custom device and PC sleep?
-    /*const EqualizerConfig params = {
-        .one_31Hz = 2.0,
-        .two_63Hz = 1.5,
-        .three_125Hz = 1,
-        .four_250Hz = -0.5,
-        .five_500Hz = -0.5,
-        .six_1000Hz = 0.5,
-        .seven_2000Hz = 1.5,
-        .eight_4000Hz = 2,
-        .nine_8000Hz = 2.5,
-        .ten_16000Hz = 3
-    };
-
-    au_set_equalizer(params);*/
-
-    play_next();
-
-
-    /*int32_t counter = 0;
-    while (1) {
-        sleep(5);
-
-        counter++;
-        if (counter % 2 == 0) {
-            au_configure_audio_device(&AudConfig2);//Todo breaks when this device is removed, should default to default
-        }
-        else {
-            au_configure_audio_device(&AudConfig1);
-        }
-    }*/
-
-
-
-    if (SKIP_AFTER_SECONDS > 0) {
-        for (int i = 0; i < PLAY_COUNT; ++i) {
-            sleep((unsigned int)SKIP_AFTER_SECONDS);
-
-            /*const AudioDeviceConfig AudConfig2 = {
-                .audio_device = "Bose QC Ultra Headphones",
-                .audio_device_index = 3
-            };
-
-            configure_audio_device(&AudConfig2);
-
-            configure_audio_device(NULL);*/
-
-            //sleep((unsigned int)SKIP_AFTER_SECONDS);
-
-            play_next();
-        }
-    }
-    else {
-        au_wait_loop();
+    if (crossfade > 0) {
+        const AuFade fade = { .seconds = crossfade, .curve = AU_FADE_EQUAL_POWER };
+        const AuFade quick = { .seconds = 0.4, .curve = AU_FADE_S_CURVE };
+        const CrossfadeConfig xf = { .on_track_end = fade, .on_skip = quick, .on_play = quick,
+                                     .on_stop = quick, .on_pause = { .seconds = 0.2, .curve = AU_FADE_S_CURVE } };
+        au_set_crossfade(&xf);
+        printf("crossfade: %.1f s\n", crossfade);
     }
 
+    const PlayAudioConfig cfg = play_config();
+    au_play_audio(take_next(), &cfg);
 
-    free_queue();
+    printf("commands: n=skip p=pause s=stop +/-=volume >=seek+10s q=quit\n");
+    int c;
+    while ((c = getchar()) != EOF && c != 'q') {
+        switch (c) {
+            case 'n': au_skip_to_next(); break;
+            case 'p': au_pause_audio(!au_is_paused()); break;
+            case 's': au_stop_audio(); break;
+            case '+': au_set_audio_volume(au_get_audio_volume() + 5 > 100 ? 100 : au_get_audio_volume() + 5); break;
+            case '-': au_set_audio_volume(au_get_audio_volume() - 5 < 0 ? 0 : au_get_audio_volume() - 5); break;
+            case '>': au_seek_time((int64_t)((au_get_audio_play_time() + 10) * 1000)); break;
+            case '\n': printf("  %.2f / %.2f s\n", au_get_audio_play_time(), au_get_audio_duration()); break;
+            default: break;
+        }
+    }
+
     au_shutdown();
+    for (size_t i = 0; i < file_count; i++) free(files[i]);
+    free(files);
     return 0;
 }

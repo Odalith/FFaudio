@@ -19,28 +19,28 @@
  */
 
 #include "frame_queue_utils.h"
+#include "packet_queue_utils.h"
+
+/*
+ * Single producer (audio thread) / single consumer (SDL callback) queue of decoded frames.
+ * windex is only touched by the producer, rindex only by the consumer, size under the mutex.
+ */
 
 void frame_queue_unref_item(Frame *vp)
 {
     av_frame_unref(vp->frame);
 }
 
-int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int keep_last)
+int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size)
 {
-    int i;
     memset(f, 0, sizeof(FrameQueue));
-    if (!(f->mutex = SDL_CreateMutex())) {
-        av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());//Todo av_log
+    if (!(f->mutex = SDL_CreateMutex()))
         return AVERROR(ENOMEM);
-    }
-    if (!(f->cond = SDL_CreateCond())) {
-        av_log(NULL, AV_LOG_FATAL, "SDL_CreateCond(): %s\n", SDL_GetError());
+    if (!(f->cond = SDL_CreateCond()))
         return AVERROR(ENOMEM);
-    }
     f->pktq = pktq;
     f->max_size = FFMIN(max_size, FRAME_QUEUE_SIZE);
-    f->keep_last = !!keep_last;
-    for (i = 0; i < f->max_size; i++)
+    for (int i = 0; i < f->max_size; i++)
         if (!(f->queue[i].frame = av_frame_alloc()))
             return AVERROR(ENOMEM);
     return 0;
@@ -48,14 +48,17 @@ int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int keep_la
 
 void frame_queue_destroy(FrameQueue *f)
 {
-    int i;
-    for (i = 0; i < f->max_size; i++) {
+    for (int i = 0; i < f->max_size; i++) {
         Frame *vp = &f->queue[i];
-        frame_queue_unref_item(vp);
-        av_frame_free(&vp->frame);
+        if (vp->frame) {
+            frame_queue_unref_item(vp);
+            av_frame_free(&vp->frame);
+        }
     }
     SDL_DestroyMutex(f->mutex);
     SDL_DestroyCond(f->cond);
+    f->mutex = NULL;
+    f->cond = NULL;
 }
 
 void frame_queue_signal(FrameQueue *f)
@@ -69,32 +72,26 @@ Frame *frame_queue_peek_writable(FrameQueue *f)
 {
     /* wait until we have space to put a new frame */
     SDL_LockMutex(f->mutex);
-    while (f->size >= f->max_size &&
-           !f->pktq->abort_request) {
-        SDL_CondWait(f->cond, f->mutex);
+    while (f->size >= f->max_size && !packet_queue_aborted(f->pktq)) {
+        SDL_CondWaitTimeout(f->cond, f->mutex, 100);
     }
     SDL_UnlockMutex(f->mutex);
 
-    if (f->pktq->abort_request)
+    if (packet_queue_aborted(f->pktq))
         return NULL;
 
     return &f->queue[f->windex];
 }
 
-Frame *frame_queue_peek_readable(FrameQueue *f)
+Frame *frame_queue_peek_nb(FrameQueue *f)
 {
-    /* wait until we have a readable a new frame */
     SDL_LockMutex(f->mutex);
-    while ((f->size == 0 || f->size - f->rindex_shown <= 0) && !f->pktq->abort_request) {
-        SDL_CondWait(f->cond, f->mutex);
-    }
+    const int size = f->size;
     SDL_UnlockMutex(f->mutex);
 
-    if (f->pktq->abort_request)
+    if (size <= 0)
         return NULL;
-
-    const int index = (f->rindex + f->rindex_shown) % f->max_size;
-    return &f->queue[index];
+    return &f->queue[f->rindex];
 }
 
 void frame_queue_push(FrameQueue *f)
@@ -109,10 +106,6 @@ void frame_queue_push(FrameQueue *f)
 
 void frame_queue_next(FrameQueue *f)
 {
-    if (f->keep_last && !f->rindex_shown) {
-        f->rindex_shown = 1;
-        return;
-    }
     frame_queue_unref_item(&f->queue[f->rindex]);
     if (++f->rindex == f->max_size)
         f->rindex = 0;
@@ -122,18 +115,10 @@ void frame_queue_next(FrameQueue *f)
     SDL_UnlockMutex(f->mutex);
 }
 
-/* return the number of undisplayed frames in the queue */
 int frame_queue_nb_remaining(FrameQueue *f)
 {
-    return f->size - f->rindex_shown;
-}
-
-/* return last shown position */
-int64_t frame_queue_last_pos(FrameQueue *f)
-{
-    Frame *fp = &f->queue[f->rindex];
-    if (f->rindex_shown && fp->serial == f->pktq->serial)
-        return fp->pos;
-    else
-        return -1;
+    SDL_LockMutex(f->mutex);
+    const int size = f->size;
+    SDL_UnlockMutex(f->mutex);
+    return size;
 }

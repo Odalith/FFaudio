@@ -1,0 +1,14 @@
+# ThreadSanitizer suppressions for the ffaudio test suite.
+#
+# FFmpeg is normally not built with -fsanitize=thread. Its internal synchronisation (atomic AVBuffer
+# refcounts, frame-threading workers) is invisible to TSan, so buffers allocated in one of its
+# worker threads and released in ours are reported as races. These entries drop reports in which
+# one of the two stacks goes through an FFmpeg library.
+#
+# Do not use `called_from_lib` for SDL: it would also hide SDL's pthread mutex calls, and TSan would
+# then report every access protected by an SDL_mutex.
+race:libavutil.so
+race:libavcodec.so
+race:libavformat.so
+race:libavfilter.so
+race:libswresample.so

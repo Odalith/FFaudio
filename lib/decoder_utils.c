@@ -42,9 +42,9 @@ int decoder_decode_frame(Decoder *d, AVFrame *frame) {
     int ret = AVERROR(EAGAIN);
 
     for (;;) {
-        if (d->queue->serial == d->pkt_serial) {
+        if (packet_queue_serial(d->queue) == d->pkt_serial) {
             do {
-                if (d->queue->abort_request)
+                if (packet_queue_aborted(d->queue))
                     return -1;
 
                 if (d->avctx->codec_type == AVMEDIA_TYPE_AUDIO) {
@@ -73,8 +73,8 @@ int decoder_decode_frame(Decoder *d, AVFrame *frame) {
         }
 
         do {
-            if (d->queue->nb_packets == 0)
-                SDL_CondSignal(d->empty_queue_cond);
+            // Wake the read thread so it can top up the queue (it re-checks the queue level itself)
+            SDL_CondSignal(d->empty_queue_cond);
             if (d->packet_pending) {
                 d->packet_pending = 0;
             } else {
@@ -88,7 +88,7 @@ int decoder_decode_frame(Decoder *d, AVFrame *frame) {
                     d->next_pts_tb = d->start_pts_tb;
                 }
             }
-            if (d->queue->serial == d->pkt_serial)
+            if (packet_queue_serial(d->queue) == d->pkt_serial)
                 break;
             av_packet_unref(d->pkt);
         } while (1);

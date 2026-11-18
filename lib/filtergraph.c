@@ -20,18 +20,28 @@
 
 #include "filtergraph.h"
 
-int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
-                                 AVFilterContext *source_ctx, AVFilterContext *sink_ctx) {
+/*
+ * Every track gets this graph:
+ *
+ *   abuffer (decoder format) -> aresample (to float, output rate + layout) -> [user filters] -> aformat -> abuffersink
+ *
+ * Converting first means user filters always see the output format, so channel-dependent filter strings
+ * built for the device's channel count stay valid, and frames leaving the sink can be mixed directly.
+ * The final aformat makes sure user filters that change the format are converted back.
+ */
+
+static int link_user_filters(AVFilterGraph *graph, const char *filtergraph,
+                             AVFilterContext *source_ctx, AVFilterContext *sink_ctx) {
     int ret;
     const int nb_filters = graph->nb_filters;
 
-
-    if (filtergraph) {
+    if (filtergraph && filtergraph[0]) {
         AVFilterInOut *outputs = avfilter_inout_alloc();
         AVFilterInOut *inputs  = avfilter_inout_alloc();
         if (!outputs || !inputs) {
-            ret = AVERROR(ENOMEM);
-            return ret;
+            avfilter_inout_free(&outputs);
+            avfilter_inout_free(&inputs);
+            return AVERROR(ENOMEM);
         }
 
         outputs->name       = av_strdup("in");
@@ -48,23 +58,19 @@ int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
         avfilter_inout_free(&outputs);
         avfilter_inout_free(&inputs);
 
-        if (ret < 0) {
+        if (ret < 0)
             return ret;
-        }
-
     }
     else if ((ret = avfilter_link(source_ctx, 0, sink_ctx, 0)) < 0) {
         return ret;
     }
 
     /* Reorder the filters to ensure that inputs of the custom filters are merged first */
-    for (int i = 0; i < graph->nb_filters - nb_filters; i++) {
+    for (int i = 0; i < (int)graph->nb_filters - nb_filters; i++) {
         FFSWAP(AVFilterContext*, graph->filters[i], graph->filters[i + nb_filters]);
     }
 
-    ret = avfilter_graph_config(graph, NULL);
-
-    return ret;
+    return avfilter_graph_config(graph, NULL);
 }
 
 void free_audio_filters(TrackState *is) {
@@ -74,85 +80,95 @@ void free_audio_filters(TrackState *is) {
     is->out_audio_filter = NULL;
 }
 
-int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const bool force_output_format) {
-    if (!ap || !is || !ap->audio_target || ap->audio_target->fmt == AV_SAMPLE_FMT_NONE) return -1;
+bool filtergraph_soxr_available(void) {
+    // aresample only accepts resampler=soxr when libswresample was built with libsoxr
+    SwrContext *swr = swr_alloc();
+    if (!swr) return false;
+    const bool ok = av_opt_set(swr, "resampler", "soxr", 0) >= 0;
+    swr_free(&swr);
+    return ok;
+}
 
-    AVFilterContext *audio_source_filter = NULL, *audio_sink_filter = NULL, *format_filter = NULL;
-    char aresample_swr_opts[512] = "";
-    const AVDictionaryEntry *e = NULL;
-    AVBPrint bp;
-    char asrc_args[256];
-    char aformat_args[512];
+int filtergraph_validate(const char *filtergraph) {
+    // Build a throwaway graph with a fixed format to check that the string parses
+    AVFilterGraph *graph = avfilter_graph_alloc();
+    AVFilterContext *src = NULL, *sink = NULL;
+    if (!graph) return AVERROR(ENOMEM);
+    int ret = avfilter_graph_create_filter(&src, avfilter_get_by_name("abuffer"), "src",
+                                           "sample_rate=48000:sample_fmt=flt:time_base=1/48000:channel_layout=stereo",
+                                           NULL, graph);
+    if (ret >= 0)
+        ret = avfilter_graph_create_filter(&sink, avfilter_get_by_name("abuffersink"), "sink", NULL, NULL, graph);
+    if (ret >= 0)
+        ret = link_user_filters(graph, filtergraph, src, sink);
+    avfilter_graph_free(&graph);
+    return ret;
+}
+
+int configure_audio_filters(AudioPlayer *ap, TrackState *is) {
+    if (!ap || !is) return AVERROR(EINVAL);
+
+    AVFilterContext *src = NULL, *convert = NULL, *format = NULL, *sink = NULL;
+    AVBPrint src_layout, out_layout;
+    char args[512];
+    int ret;
+
+    // Snapshot the output format: the control thread may change it while the device is reconfigured
+    SDL_LockMutex(ap->format_mutex);
+    const int out_rate = ap->audio_target.freq;
+    AVChannelLayout target_layout = {0};
+    ret = av_channel_layout_copy(&target_layout, &ap->audio_target.ch_layout);
+    const bool ready = ap->output_ready;
+    SDL_UnlockMutex(ap->format_mutex);
+    if (ret < 0) return ret;
+    if (!ready || out_rate <= 0) {
+        av_channel_layout_uninit(&target_layout);
+        return AVERROR(EAGAIN);
+    }
+
+    av_bprint_init(&src_layout, 0, AV_BPRINT_SIZE_AUTOMATIC);
+    av_bprint_init(&out_layout, 0, AV_BPRINT_SIZE_AUTOMATIC);
+    av_channel_layout_describe_bprint(&is->audio_filter_src.ch_layout, &src_layout);
+    av_channel_layout_describe_bprint(&target_layout, &out_layout);
 
     // Never leave in/out pointing into a graph that has been freed
     free_audio_filters(is);
-    if (!(is->agraph = avfilter_graph_alloc()))
-        return AVERROR(ENOMEM);
+    if (!(is->agraph = avfilter_graph_alloc())) { ret = AVERROR(ENOMEM); goto end; }
     is->agraph->nb_threads = ap->filter_nbthreads;
 
-    av_bprint_init(&bp, 0, AV_BPRINT_SIZE_AUTOMATIC);
+    ret = snprintf(args, sizeof(args), "sample_rate=%d:sample_fmt=%s:time_base=1/%d:channel_layout=%s",
+                   is->audio_filter_src.freq, av_get_sample_fmt_name(is->audio_filter_src.fmt),
+                   is->audio_filter_src.freq, src_layout.str);
+    if (ret < 0 || ret >= (int)sizeof(args)) { ret = AVERROR(EINVAL); goto end; }
+    if ((ret = avfilter_graph_create_filter(&src, avfilter_get_by_name("abuffer"), "ffaudio_abuffer",
+                                            args, NULL, is->agraph)) < 0) goto end;
 
-    //Todo swr_opts was empty so swr_opts_n is left null but this should probably be implemented at some point
-    while ((e = av_dict_iterate(is->swr_opts_n, e))) {
-        av_strlcatf(aresample_swr_opts, sizeof(aresample_swr_opts), "%s=%s:", e->key, e->value);
-    }
+    ret = snprintf(args, sizeof(args), "%sout_sample_rate=%d:out_chlayout=%s:out_sample_fmt=flt",
+                   ap->use_soxr ? "resampler=soxr:precision=28:" : "", out_rate, out_layout.str);
+    if (ret < 0 || ret >= (int)sizeof(args)) { ret = AVERROR(EINVAL); goto end; }
+    if ((ret = avfilter_graph_create_filter(&convert, avfilter_get_by_name("aresample"), "ffaudio_convert",
+                                            args, NULL, is->agraph)) < 0) goto end;
 
-    if (strlen(aresample_swr_opts)) {
-        aresample_swr_opts[strlen(aresample_swr_opts)-1] = '\0';
-    }
-    av_opt_set(is->agraph, "aresample_swr_opts", aresample_swr_opts, 0);
+    ret = snprintf(args, sizeof(args), "sample_fmts=flt:sample_rates=%d:channel_layouts=%s", out_rate, out_layout.str);
+    if (ret < 0 || ret >= (int)sizeof(args)) { ret = AVERROR(EINVAL); goto end; }
+    if ((ret = avfilter_graph_create_filter(&format, avfilter_get_by_name("aformat"), "ffaudio_output_format",
+                                            args, NULL, is->agraph)) < 0) goto end;
 
-    av_channel_layout_describe_bprint(&is->audio_filter_src.ch_layout, &bp);
+    if ((ret = avfilter_graph_create_filter(&sink, avfilter_get_by_name("abuffersink"), "ffaudio_abuffersink",
+                                            NULL, NULL, is->agraph)) < 0) goto end;
 
-    int ret = snprintf(asrc_args, sizeof(asrc_args),
-                       "sample_rate=%d:sample_fmt=%s:time_base=%d/%d:channel_layout=%s",
-                       is->audio_filter_src.freq, av_get_sample_fmt_name(is->audio_filter_src.fmt),
-                       1, is->audio_filter_src.freq, bp.str);
+    if ((ret = avfilter_link(src, 0, convert, 0)) < 0) goto end;
+    if ((ret = avfilter_link(format, 0, sink, 0)) < 0) goto end;
+    if ((ret = link_user_filters(is->agraph, is->filtergraph_str, convert, format)) < 0) goto end;
 
-    if (ret < 0) goto end;
-
-    ret = avfilter_graph_create_filter(&audio_source_filter,
-                                       avfilter_get_by_name("abuffer"), "ffaudio_abuffer",
-                                       asrc_args, NULL, is->agraph);
-    if (ret < 0) goto end;
-
-
-    ret = avfilter_graph_create_filter(&audio_sink_filter,
-                                       avfilter_get_by_name("abuffersink"), "ffaudio_abuffersink",
-                                       NULL, NULL, is->agraph);
-    if (ret < 0) goto end;
-
-    // The output format is enforced with an `aformat` filter in front of the sink instead of
-    // abuffersink options: those options changed across FFmpeg versions and, since FFmpeg 8,
-    // can no longer be set after the sink has been initialized.
-    if (force_output_format) {
-        av_bprint_clear(&bp);
-        av_channel_layout_describe_bprint(&ap->audio_target->ch_layout, &bp);
-        ret = snprintf(aformat_args, sizeof(aformat_args), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
-                       av_get_sample_fmt_name(ap->audio_target->fmt), ap->audio_target->freq, bp.str);
-    }
-    else {
-        ret = snprintf(aformat_args, sizeof(aformat_args), "sample_fmts=%s",
-                       av_get_sample_fmt_name(ap->audio_target->fmt));
-    }
-    if (ret < 0 || ret >= (int)sizeof(aformat_args)) { ret = AVERROR(EINVAL); goto end; }
-
-    ret = avfilter_graph_create_filter(&format_filter, avfilter_get_by_name("aformat"),
-                                       "ffaudio_output_format", aformat_args, NULL, is->agraph);
-    if (ret < 0) goto end;
-
-    if ((ret = avfilter_link(format_filter, 0, audio_sink_filter, 0)) < 0) goto end;
-
-    if ((ret = configure_filtergraph(is->agraph, is->filtergraph_str, audio_source_filter, format_filter)) < 0) goto end;
-
-    is->in_audio_filter  = audio_source_filter;
-    is->out_audio_filter = audio_sink_filter;
+    is->in_audio_filter  = src;
+    is->out_audio_filter = sink;
 
 end:
-    if (ret < 0) {
+    if (ret < 0)
         free_audio_filters(is);
-    }
-    av_bprint_finalize(&bp, NULL);
-
+    av_bprint_finalize(&src_layout, NULL);
+    av_bprint_finalize(&out_layout, NULL);
+    av_channel_layout_uninit(&target_layout);
     return ret;
 }

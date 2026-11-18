@@ -18,39 +18,45 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+/*
+ * Internal data structures shared by the library's modules. Not part of the public API.
+ *
+ * Threading model (see ARCHITECTURE in readme.md):
+ *  - control thread : owns every TrackState (creation, slot changes, destruction) and runs user callbacks
+ *  - read thread    : one per track, demuxes packets into audio_queue
+ *  - audio thread   : one per track, decodes + filters into sampq (always float32 at the output rate/layout)
+ *  - SDL callback   : mixer, pulls from sampq without blocking, never allocates or frees
+ * Mixer slots (Mixer.current/next/outgoing) are only changed while holding the SDL audio device lock.
+ */
+
 #ifndef FFAUDIO_GLOBALS_H
 #define FFAUDIO_GLOBALS_H
 
-#define VIDEO_PICTURE_QUEUE_SIZE 3
-#define SUBPICTURE_QUEUE_SIZE 16
-#define SAMPLE_QUEUE_SIZE 9
-#define FRAME_QUEUE_SIZE FFMAX(SAMPLE_QUEUE_SIZE, FFMAX(VIDEO_PICTURE_QUEUE_SIZE, SUBPICTURE_QUEUE_SIZE))
-#define EQ_BAND_COUNT 10
-#define SecondsToMicroseconds(x) ((x) * 1000000)
+#define SAMPLE_QUEUE_SIZE 32
+#define FRAME_QUEUE_SIZE SAMPLE_QUEUE_SIZE
+#define SecondsToMicroseconds(x) ((int64_t)((x) * 1000000.0))
 #define AV_TIME_BASE_DOUBLE 1000000.0
-#define TRACK_COUNT 2
+#define MIXER_EVENT_CAPACITY 64
 
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "libavutil/avstring.h"        // String utilities
+#include "libavutil/avstring.h"
 #include "libavutil/channel_layout.h"
 #include "libavutil/mathematics.h"
-#include "libavutil/mem.h"             // Memory management utilities
+#include "libavutil/mem.h"
 #include "libavutil/dict.h"
-#include "libavutil/fifo.h"            // FIFO buffer implementation
+#include "libavutil/fifo.h"
 #include "libavutil/samplefmt.h"
-#include "libavutil/time.h"            // Time utilities
-#include "libavutil/bprint.h"          // Binary print utilities
+#include "libavutil/time.h"
+#include "libavutil/bprint.h"
 #include "libavutil/avassert.h"
 #include "libavutil/opt.h"
 
 #include "libavcodec/avcodec.h"
-
 #include "libavformat/avformat.h"
-
 #include "libswresample/swresample.h"
-
+#include "libavfilter/avfilter.h"
 #include "libavfilter/buffersink.h"
 #include "libavfilter/buffersrc.h"
 
@@ -58,7 +64,11 @@
 #include "SDL2/SDL_thread.h"
 #include "SDL2/SDL_mutex.h"
 
-#include "delegates.h"
+#include "ffaudio.h"
+
+//+-----------------------------------------------------+
+//| Queues (from FFplay)                                |
+//+-----------------------------------------------------+
 
 typedef struct MyAVPacketList {
     AVPacket *pkt;
@@ -70,8 +80,10 @@ typedef struct PacketQueue {
     int32_t nb_packets;
     int32_t size;
     int64_t duration;
-    int32_t abort_request;
-    int32_t serial;
+    int32_t abort_request;      // guarded by mutex; mirrored in abort_atomic
+    int32_t serial;             // guarded by mutex; mirrored in serial_atomic
+    SDL_atomic_t abort_atomic;  // lock-free reads from other threads
+    SDL_atomic_t serial_atomic; // lock-free reads from other threads (decoder, callback)
     SDL_mutex *mutex;
     SDL_cond *cond;
 } PacketQueue;
@@ -84,46 +96,28 @@ typedef struct AudioParams {
     int32_t bytes_per_sec;
 } AudioParams;
 
-typedef struct Clock {
-    double pts;           /* clock base */
-    double pts_drift;     /* clock base minus time at which we updated the clock */
-    double last_updated;
-    double speed;
-    int32_t serial;           /* clock is based on a packet with this serial */
-    int32_t paused;
-    int32_t *queue_serial;    /* pointer to the current packet queue serial, used for obsolete clock detection */
-} Clock;
-
 typedef struct FrameData {
     int64_t pkt_pos;
 } FrameData;
 
-/* Common struct for handling all types of decoded data and allocated render buffers. */
 typedef struct Frame {
     AVFrame *frame;
     int32_t serial;
-    double pts;           /* presentation timestamp for the frame */
-    double duration;      /* estimated duration of the frame */
+    double pts;           /* presentation timestamp of the first sample, seconds; NAN if unknown */
+    double duration;      /* duration of the frame, seconds */
     int64_t pos;          /* byte position of the frame in the input file */
-    int32_t format;
 } Frame;
 
 typedef struct FrameQueue {
     Frame queue[FRAME_QUEUE_SIZE];
-    int32_t rindex;
-    int32_t windex;
-    int32_t size;
+    int32_t rindex;   // consumer only
+    int32_t windex;   // producer only
+    int32_t size;     // guarded by mutex
     int32_t max_size;
-    int32_t keep_last;
-    int32_t rindex_shown;
     SDL_mutex *mutex;
     SDL_cond *cond;
     PacketQueue *pktq;
 } FrameQueue;
-
-enum {
-    AV_SYNC_AUDIO_MASTER,
-};
 
 typedef struct Decoder {
     AVPacket *pkt;
@@ -140,148 +134,283 @@ typedef struct Decoder {
     SDL_Thread *decoder_tid;
 } Decoder;
 
+//+-----------------------------------------------------+
+//| Tracks                                              |
+//+-----------------------------------------------------+
+
+typedef enum TrackRole {
+    ROLE_NONE = 0,      // not audible and not queued (retired, waiting for destruction)
+    ROLE_CURRENT,
+    ROLE_NEXT,
+    ROLE_OUTGOING,      // fading out (crossfade or fade-out on stop)
+} TrackRole;
+
+typedef enum TrackEndReason {
+    END_NONE = 0,
+    END_NATURAL,        // played to the end
+    END_SKIPPED,        // replaced, skipped, cleared or stopped by the user
+    END_ERROR,          // could not be opened or decoding failed
+} TrackEndReason;
+
+struct AudioPlayer;
+
 typedef struct TrackState {
+    struct AudioPlayer *ap;
     int32_t handle;
-    bool should_play_next;             // default false
-    bool is_eof_from_error;
-    bool is_eof_from_skip;
-    bool is_eof_for_restart;
+    char *filename;
+    char *filtergraph_str;              // per-track user filters, may be NULL
+    int64_t start_time;                 // AV_TIME_BASE units, AV_NOPTS_VALUE = from the start
+    int64_t play_duration;              // AV_TIME_BASE units, AV_NOPTS_VALUE = to the end
+    AuFade fade_in_override;            // only used when has_fade_in_override
+    bool has_fade_in_override;
+
+    // ---- threads ----
     SDL_Thread *read_tid;
-    int32_t abort_request;
-    int32_t paused;
-    int32_t last_paused;
-    int32_t seek_req;
-    int32_t seek_flags;
-    int64_t seek_pos;
-    int64_t seek_rel;
-    int64_t start_time;                // AV_NOPTS_VALUE, how much to seek before playing
-    int64_t play_duration;             // AV_NOPTS_VALUE, how much to play
-    int32_t read_pause_return;
+    SDL_atomic_t abort_request;
+    SDL_cond *continue_read_thread;
+    SDL_mutex *wait_mutex;
+
+    // ---- seek requests (control thread -> read thread), guarded by seek_mutex ----
+    SDL_mutex *seek_mutex;
+    bool seek_req;
+    int64_t seek_pos;                   // AV_TIME_BASE units
+    double pending_seek_percent;        // < 0 = none; resolved by the read thread once the duration is known
+
+    // ---- demux / decode (read + audio threads) ----
     AVFormatContext *ic;
-    int32_t realtime;
-
-    Clock audclk;
-    Clock extclk;
-
-    FrameQueue sampq;// Holds the processed frames
-    bool flush_sampq; // default false
-
-    Decoder audio_decoder;
-    char *forced_audio_codec_name;     // default NULL
-
+    const AVInputFormat *iformat;
     int32_t audio_stream;
-
-    int32_t av_sync_type;
-    double audio_clock;
-    int32_t audio_clock_serial;
-
-
     AVStream *audio_st;
     PacketQueue audio_queue;
-    int32_t audio_hw_buf_size;
-    uint8_t *audio_buf0; // This is the primary audio buffer for finished, ready to play, audio
-    uint8_t *audio_buf1; // Secondary buffer used for resampling, ends up being put into audio_buf0
-    uint32_t audio_buf0_size; // in bytes
-    uint32_t audio_buf1_size; // in bytes
-    int32_t audio_buf_index; // in bytes. Increments to show the read position of the buffer
-    int32_t audio_volume;
-    int32_t muted;
+    Decoder audio_decoder;
+    FrameQueue sampq;
+    AudioParams audio_filter_src;       // format of the frames entering the filter graph
+    AVFilterGraph *agraph;
+    AVFilterContext *in_audio_filter;
+    AVFilterContext *out_audio_filter;
+    AVDictionary *format_opts_n;
+    AVDictionary *codec_opts_n;
+    AVDictionary *swr_opts_n;
+    int32_t realtime;
+    int32_t seek_by_bytes;
+    bool infinite_buffer;
+    bool demux_eof;                     // read thread only
 
-    struct SwrContext *swr_ctx;
-    //struct AudioParams audio_target; /*This is set to the global 'audio_target' not sure if this is needed*/
-    struct AudioParams audio_filter_src; //This is the parameters of the current file
+    // ---- status published by the worker threads ----
+    SDL_atomic_t opened;                // 1 once the stream is open and duration_us is valid
+    SDL_atomic_t failed;                // 1 when the track can not produce (more) audio because of an error
+    SDL_atomic_t eos_serial;            // queue serial whose last frame has been pushed into sampq, -1 = none
+    SDL_atomic_t loops_remaining;       // -1 infinite, 0 none
+    SDL_atomic_t filter_reconfigure;    // 1 = rebuild the filter graph before the next frame
+    SDL_atomic_t had_error;             // 1 = the track ends as an error, even if some audio played
+    int64_t duration_us;                // written before `opened` is set, AV_NOPTS_VALUE = unknown
+    int64_t end_pos_us;                 // file position where playback ends, written before `opened` is set
 
-    AVChannelLayout channel_layout;
-    AVDictionary *format_opts_n;       // default NULL
-    AVDictionary *codec_opts_n;        // default NULL
-    AVDictionary *swr_opts_n;          // default NULL
+    // ---- playback cursor, SDL callback only ----
+    Frame *cur;                         // frame being played, NULL = take the next one
+    int32_t cur_offset;                 // samples of `cur` already played
+    double position;                    // seconds, position of the next sample to be played
+    double last_frame_pts;              // used to detect loop restarts
+    bool started;                       // produced at least one sample
+    bool announced;                     // MIX_EV_TRACK_STARTED has been sent
 
-    bool reconfigure_target_filter;     // default false
-    char *filtergraph_str;              // default NULL
-    AVFilterContext *in_audio_filter;   // the first filter in the audio chain
-    AVFilterContext *out_audio_filter;  // the last filter in the audio chain
-    AVFilterGraph *agraph;              // the whole audio filter graph
+    // ---- slot bookkeeping, changed under the device lock ----
+    TrackRole role;
+    TrackEndReason fade_reason;         // why it is fading out (ROLE_OUTGOING)
 
-    int32_t eof;
-    const char *filename;
-    const AVInputFormat *iformat;
-
-    int32_t last_audio_stream;
-
-    SDL_cond *continue_read_thread;
+    // ---- control thread only ----
+    TrackEndReason end_reason;
+    bool ended;                         // removed from the mixer, waiting for destruction
+    bool reported;                      // on_eof has been called
+    bool prepare_next_sent;
+    bool duration_reported;
+    double reported_duration;
 } TrackState;
 
+//+-----------------------------------------------------+
+//| Mixer (SDL callback state)                          |
+//+-----------------------------------------------------+
 
-/**
- * @struct TrackStateEof
- * @brief Contains a copy of information about the track state after it has been cleaned up
- */
-typedef struct TrackStateEof {
+typedef enum MixerEventType {
+    MIX_EV_TRACK_STARTED,       // track produced its first audible sample as current
+    MIX_EV_TRACK_ENDED,         // track reached its end and left the mixer
+    MIX_EV_TRACK_LOOPED,        // playback position wrapped back to the start of the track
+    MIX_EV_FADE_DONE,           // the outgoing track finished fading out and left the mixer
+} MixerEventType;
+
+typedef struct MixerEvent {
+    MixerEventType type;
+    TrackState *track;
+    double position;
+} MixerEvent;
+
+typedef struct FadeState {
+    bool active;
+    int64_t pos;                // frames into the fade
+    int64_t len;                // total frames
+    AuFade fade;
+} FadeState;
+
+typedef struct Mixer {
+    // Slots. Changed by the callback (gapless handover, end crossfade) and by the control thread,
+    // always with the device lock held.
+    TrackState *current;
+    TrackState *next;
+    TrackState *outgoing;           // fading out
+    FadeState in_fade;              // applied to current
+    FadeState out_fade;             // applied to outgoing
+
+    // Output format of the open device
+    int32_t rate;
+    int32_t channels;
+    SDL_AudioFormat format;
+    int32_t bytes_per_sample;
+    int32_t period_frames;          // SDL buffer size in frames
+
+    // Gains. vol_gain follows volume * !muted with a short ramp, pause_gain follows the pause fade.
+    float vol_gain;
+    int32_t vol_ramp_frames;
+    float pause_gain;
+    float pause_from;
+    float pause_to;
+    FadeState pause_fade;
+    bool frozen;                    // paused and silent: tracks are not consumed
+
+    // Crossfade at a natural track end
+    AuFade end_fade;
+    double min_track_seconds;
+
+    // Scratch buffers, interleaved float, allocated with the device
+    float *mix_buf;
+    float *voice_buf;
+    int32_t buf_frames;
+
+    // Callback -> control thread events
+    MixerEvent events[MIXER_EVENT_CAPACITY];
+    int32_t n_events;
+    bool events_overflowed;
+
+    uint32_t dither_state;
+} Mixer;
+
+//+-----------------------------------------------------+
+//| Control-thread messages                             |
+//+-----------------------------------------------------+
+
+typedef enum MsgType {
+    CMD_PLAY,
+    CMD_SET_NEXT,
+    CMD_SKIP,
+    CMD_CLEAR_NEXT,
+    CMD_STOP,
+    CMD_PAUSE,
+    CMD_SEEK_US,
+    CMD_SEEK_PERCENT,
+    CMD_SET_LOOP,
+    CMD_CONFIGURE_DEVICE,
+    CMD_SET_CROSSFADE,
+    CMD_SHUTDOWN,
+    MSG_LOG,
+    MSG_TRACK_OPENED,
+    MSG_TRACK_FAILED,
+    MSG_TRACK_DEMUX_EOF,
+    MSG_TRACK_SEEKED,
+} MsgType;
+
+typedef struct Msg {
+    MsgType type;
     int32_t handle;
-    bool should_play_next;
-    bool is_current_track;
-    bool is_eof_from_skip;
-    bool is_eof_from_error;
-    SDL_Thread *read_tid;
-} TrackStateEof;
+    char *str;                      // owned
+    char *str2;                     // owned
+    PlayAudioConfig play_config;    // av_filtergraph points at str2
+    bool has_play_config;
+    AuFade fade_in_override;
+    bool has_fade_in_override;
+    CrossfadeConfig crossfade;
+    AudioDeviceConfig device;       // audio_device points at str
+    bool has_device;
+    int64_t i64;
+    double d;
+    bool b;
+    int32_t level;
+    int64_t request;
+    // Synchronous commands
+    SDL_sem *done;
+    int32_t *result;
+    struct Msg *next;
+} Msg;
+
+//+-----------------------------------------------------+
+//| Player                                              |
+//+-----------------------------------------------------+
+
+typedef struct StatusSnapshot {
+    int32_t handle;                 // current track, 0 = none
+    double position;                // seconds at callback_time
+    double callback_time;           // seconds, SDL performance counter
+    double duration;                // seconds, < 0 unknown
+    bool advancing;                 // false while paused / underrun / idle
+} StatusSnapshot;
 
 typedef struct AudioPlayer {
-    int32_t startup_volume;                // default 100
-    int32_t sdl_volume;                    // default 0
-    int32_t filter_nbthreads;              // default 0
-    int64_t audio_callback_time;           // default 0
-    const char* wanted_stream_spec[AVMEDIA_TYPE_NB]; // default [NULL]
-    int32_t seek_by_bytes;                 // default -1
-    int32_t loop;                          // default 0
-    int32_t infinite_buffer;               // default -1
-    int32_t find_stream_info;              // default 1
+    // ---- configuration ----
+    SDL_atomic_t volume;                // 0..100
+    SDL_atomic_t muted;
+    SDL_atomic_t paused;
+    SDL_atomic_t loop_count;            // default for new tracks, -1 infinite
+    double prepare_next_seconds;
+    CrossfadeConfig crossfade;          // control thread only
+    bool use_soxr;
+    int32_t filter_nbthreads;
+    int32_t find_stream_info;
 
-    int32_t handle_count;              // default 0
-    TrackState* tracks[TRACK_COUNT];   // default [NULL, NULL]
-    int32_t track_index;               // default 0
+    // ---- callbacks ----
+    void *user_data;
+    NotifyOfLog notify_of_log_callback;
+    NotifyOfEndOfFile notify_of_eof_callback;
+    NotifyOfRestart notify_of_restart_callback;
+    NotifyOfDurationUpdate notify_of_duration_update_callback;
+    NotifyOfPrepareNext notify_of_prepare_next_callback;
+    NotifyOfTrackStarted notify_of_track_started_callback;
+    NotifyOfAudioDeviceUpdate notify_of_audio_device_update_callback;
 
-    SDL_Thread *event_thread;          // default NULL
-    SDL_atomic_t event_thread_running; // default false
+    // ---- control thread ----
+    SDL_Thread *control_thread;
+    SDL_threadID control_thread_id;
+    SDL_atomic_t shutting_down;
+    SDL_mutex *msg_mutex;
+    SDL_cond *msg_cond;
+    Msg *msg_head;
+    Msg *msg_tail;
+    SDL_atomic_t handle_count;
+    SDL_atomic_t request_count;
+    TrackState **tracks;                // every live track, control thread only
+    int32_t n_tracks;
+    int32_t cap_tracks;
 
-    Uint32 eof_event;                  // default SDL_RegisterEvents
-    Uint32 log_event;                  // default SDL_RegisterEvents
-    Uint32 restart_event;              // default SDL_RegisterEvents
-    Uint32 duration_update_event;      // default SDL_RegisterEvents
-    Uint32 prepare_next_event;         // default SDL_RegisterEvents
+    // ---- output device (control thread writes, others read under format_mutex) ----
+    SDL_mutex *format_mutex;
+    SDL_cond *format_cond;              // signalled when the output format becomes available
+    bool output_ready;                  // guarded by format_mutex
+    AudioParams audio_target;           // float32 interleaved at the device rate/layout, guarded by format_mutex
+    SDL_AudioDeviceID device_id;
+    SDL_AudioSpec obtained_spec;
+    bool device_running;
+    bool is_audio_device_initialized;
+    bool use_default_device;
+    int32_t audio_device_index;
+    char *audio_device_name;
 
-    SDL_mutex *abort_mutex;            // default SDL_CreateMutex
-    SDL_cond *abort_cond;              // default SDL_CreateCond
+    // ---- mixer (SDL callback; others under SDL_LockAudioDevice) ----
+    Mixer mixer;
 
-    SDL_mutex *reconfigure_mutex;       // default SDL_CreateMutex
-    SDL_cond *reconfigure_cond;         // default SDL_CreateCond
-
-    int64_t request_count;             // default 0
-    bool is_init_done;                 // default false
-    bool is_audio_device_initialized;  // default false
-    int32_t is_restart_from_looping;   // default 0, contains loop remaining loop count if != 0
-    bool reconfigure_audio_device;     // default false
-    int64_t audio_reconfigure_time;    // AV_NOPTS_VALUE, where to seek after reconfigure is complete
-
-
-    bool audio_device_paused;          // true
-    int32_t audio_device_index;        // default -1
-    const char *audio_device_name;     // default NULL
-    SDL_AudioDeviceID device_id;       // default 0
-    SDL_AudioSpec given_spec;          // default NULL
-    SDL_AudioFormat given_format;      // -1
-    AudioParams *audio_target;         // default malloc
-    AudioParams *audio_swr_source;     // default malloc
-
-    //Callbacks
-    NotifyOfLog notify_of_log_callback;                  // default NULL
-    NotifyOfEndOfFile notify_of_eof_callback;            // default NULL
-    NotifyOfRestart notify_of_restart_callback;          // default NULL
-    NotifyOfDurationUpdate notify_of_duration_update_callback;    // default NULL
-    NotifyOfPrepareNext notify_of_prepare_next_callback; // default NULL
-
-    // Likely to be removed
-    int32_t fast;                          // default 0
-    int32_t genpts;                        // default 0
+    // ---- status for getters ----
+    SDL_mutex *status_mutex;            // a mutex (not a spinlock) so ThreadSanitizer can follow it
+    StatusSnapshot status;
 } AudioPlayer;
+
+// Shared helpers implemented in ffaudio.c
+void ff_log(enum AU_LOG_LEVEL level, const char *fmt, ...);
+void ff_post_track_msg(MsgType type, int32_t handle, double d);
 
 #endif //FFAUDIO_GLOBALS_H

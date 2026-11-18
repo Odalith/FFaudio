@@ -84,8 +84,10 @@ static void playlist_on_prepare_next(void) {
 static void test_callback_driven_playlist(void) {
     playlist_len = 24;
     SDL_AtomicSet(&playlist_pos, 1);
+    SDL_LockMutex(tc_mutex);
     tc_on_eof_hook = playlist_on_eof;
     tc_on_prepare_next_hook = playlist_on_prepare_next;
+    SDL_UnlockMutex(tc_mutex);
 
     au_play_audio(playlist_file(0), NULL);
 
@@ -95,8 +97,10 @@ static void test_callback_driven_playlist(void) {
         tc_sleep_ms(50);
     CHECK(SDL_AtomicGet(&playlist_pos) >= playlist_len);
 
+    SDL_LockMutex(tc_mutex);
     tc_on_eof_hook = NULL;
     tc_on_prepare_next_hook = NULL;
+    SDL_UnlockMutex(tc_mutex);
     au_stop_audio();
     tc_sleep_ms(200);
 }

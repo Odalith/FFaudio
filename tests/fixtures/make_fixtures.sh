@@ -25,6 +25,11 @@ sine s44_stereo.m4a    220 1 44100 2 -c:a aac
 # Longer track for seek / pause / crossfade tests
 sine long_6s.flac      440 6 44100 2 -sample_fmt s16
 
+# Two whole-cycle 440 Hz tracks: played gaplessly they form one continuous sine
+sine join_a.flac       440 1 48000 2 -sample_fmt s16
+sine join_b.flac       440 1 48000 2 -sample_fmt s16
+sine join_c_44k.flac   440 1 44100 2 -sample_fmt s16
+
 # Broken / non-audio inputs
 : > empty.flac
 echo "this is not audio" > text.mp3
