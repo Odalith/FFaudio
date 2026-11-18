@@ -19,7 +19,11 @@
 /*
  * Interactive player for listening tests on real hardware.
  *
- *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels] [-d full|norm|"filters"] [-r track|album]
+ *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels]
+ *                 [-d full|norm|"filters"] [-r track|album] [-g] [-G cache-file]
+ *
+ *   -g  use the ReplayGain cache (track mode unless -r is given); files it does not know are measured and
+ *       stored, in the background for queued tracks. -G uses another cache file (implies -g)
  *
  * Plays the files under <music-dir> (shuffled with -s), queueing the next one from on_prepare_next.
  * Keys (no Enter needed in a terminal): n = next, p = pause/resume, s = stop, m = mute, + / - = volume,
@@ -42,6 +46,7 @@
 #include <sys/stat.h>
 
 #include "../lib/ffaudio.h"
+#include "../lib/ffaudio_loudness.h"
 
 static char **files = NULL;
 static size_t file_count = 0, file_cap = 0;
@@ -147,23 +152,103 @@ static void on_started(int32_t handle, void *ud) {
     AuMediaInfo *info = au_get_track_info(handle);
     double gain = 0;
     const bool has_gain = au_get_track_gain_db(handle, &gain) == AU_OK && gain != 0;
+    bool cached = false;
     if (info) {
         const char *artist = au_media_tag(info, "artist"), *title = au_media_tag(info, "title");
+        cached = au_gain_cache_get(au_media_filename(info), NULL);
         printf("> now playing #%d: %s - %s  [%s %d Hz %d ch%s]", handle, artist ? artist : "?",
                title ? title : au_media_filename(info), au_media_codec(info), au_media_sample_rate(info),
-               au_media_channels(info), au_media_replaygain(info).has_track_gain ? ", ReplayGain" : "");
+               au_media_channels(info), au_media_replaygain(info).has_track_gain ? ", tagged" : "");
         au_media_info_free(info);
     }
     else {
         printf("> now playing #%d", handle);
     }
-    if (has_gain) printf("  gain %+.2f dB", gain);
+    if (has_gain) printf("  gain %+.2f dB%s", gain, cached ? " (from cache)" : "");
     printf("\n");
 }
 
 static void on_duration(int32_t handle, double duration, void *ud) {
     (void)ud;
     printf("  #%d duration %.1f s\n", handle, duration);
+}
+
+//+-----------------------------------------------------+
+//| ReplayGain cache (-g): measure uncached files       |
+//+-----------------------------------------------------+
+
+static bool use_cache = false;
+static pthread_t scan_thread;
+static pthread_mutex_t scan_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t scan_cond = PTHREAD_COND_INITIALIZER;
+static char *scan_queue[64];
+static int scan_count = 0;
+static bool scan_quit = false;
+
+static void report_scan(const char *path, const int ret, const AuReplayGainInfo *rg, const double seconds) {
+    if (ret == AU_OK)
+        printf("  measured %s: %+.2f dB (%.2f s), saved to the cache\n", path, rg->track_gain_db, seconds);
+    else
+        printf("  could not measure %s (%d)\n", path, ret);
+}
+
+static double now_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+// Worker thread: measure files queued by request_scan(); the queued track picks the value up from the cache
+static void *scan_worker(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&scan_lock);
+    for (;;) {
+        while (!scan_count && !scan_quit) pthread_cond_wait(&scan_cond, &scan_lock);
+        if (scan_quit) break;
+        char *path = scan_queue[0];
+        memmove(scan_queue, scan_queue + 1, (size_t)--scan_count * sizeof(char *));
+        pthread_mutex_unlock(&scan_lock);
+
+        AuReplayGainInfo rg;
+        const double t0 = now_seconds();
+        const int ret = au_gain_cache_scan(path, NULL, &rg);
+        report_scan(path, ret, &rg, now_seconds() - t0);
+        free(path);
+        pthread_mutex_lock(&scan_lock);
+    }
+    pthread_mutex_unlock(&scan_lock);
+    return NULL;
+}
+
+// For a queued track: measure it in the background if the cache does not know it yet
+static void request_scan(const char *path) {
+    if (!use_cache || au_gain_cache_get(path, NULL)) return;
+    pthread_mutex_lock(&scan_lock);
+    if (scan_count < (int)(sizeof(scan_queue) / sizeof(scan_queue[0])) && (scan_queue[scan_count] = strdup(path))) {
+        scan_count++;
+        pthread_cond_signal(&scan_cond);
+    }
+    pthread_mutex_unlock(&scan_lock);
+}
+
+// For a track that starts right away: measure it first so it does not start at the wrong level
+static void scan_now(const char *path) {
+    if (!use_cache || au_gain_cache_get(path, NULL)) return;
+    AuReplayGainInfo rg;
+    const double t0 = now_seconds();
+    const int ret = au_gain_cache_scan(path, NULL, &rg);
+    report_scan(path, ret, &rg, now_seconds() - t0);
+}
+
+static void stop_scan_worker(void) {
+    if (!use_cache) return;
+    pthread_mutex_lock(&scan_lock);
+    scan_quit = true;
+    pthread_cond_signal(&scan_cond);
+    pthread_mutex_unlock(&scan_lock);
+    pthread_join(scan_thread, NULL);
+    for (int i = 0; i < scan_count; i++) free(scan_queue[i]);
+    scan_count = 0;
 }
 
 static void queue_next_file(void) {
@@ -173,6 +258,7 @@ static void queue_next_file(void) {
     const int32_t h = au_set_next(f, &cfg);
     set_queued(h);
     printf("  queued #%d %s\n", h, f);
+    request_scan(f);
 }
 
 static void on_prepare_next(int32_t current, void *ud) {
@@ -184,8 +270,7 @@ static void on_restart(int32_t handle, double pos, bool looped, int32_t remainin
     (void)ud;
     printf("  #%d restarted at %.2f%s (loops left %d)\n", handle, pos, looped ? " by looping" : "", remaining);
 }
-    const char *downmix = NULL;
-    const char *replaygain = NULL;
+
 static void on_device(int32_t channels, int32_t rate, void *ud) {
     (void)ud;
     printf("  output: %d Hz, %d channels\n", rate, channels);
@@ -193,13 +278,15 @@ static void on_device(int32_t channels, int32_t rate, void *ud) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album]\n", argv[0]);
+        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file]\n", argv[0]);
         return 1;
     }
     double crossfade = 0;
     bool shuffle = false;
     int channels = 0;
     const char *downmix = NULL;
+    const char *replaygain = NULL;
+    const char *cache_file = NULL;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "-x") && i + 1 < argc) crossfade = atof(argv[++i]);
         else if (!strcmp(argv[i], "-f") && i + 1 < argc) filter = argv[++i];
@@ -208,7 +295,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) channels = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) downmix = argv[++i];
         else if (!strcmp(argv[i], "-r") && i + 1 < argc) replaygain = argv[++i];
+        else if (!strcmp(argv[i], "-g")) use_cache = true;
+        else if (!strcmp(argv[i], "-G") && i + 1 < argc) { cache_file = argv[++i]; use_cache = true; }
     }
+    if (use_cache && !replaygain) replaygain = "track"; // the cache only matters with ReplayGain on
 
     if (nftw(argv[1], collect, 20, FTW_PHYS) != 0 || file_count == 0) {
         fprintf(stderr, "No files found under %s\n", argv[1]);
@@ -254,6 +344,16 @@ int main(int argc, char **argv) {
         printf("ReplayGain: %s mode, -6 dB for untagged files\n", rg.mode == AU_REPLAYGAIN_ALBUM ? "album" : "track");
     }
 
+    if (use_cache) {
+        if (cache_file && au_gain_cache_set_file(cache_file) != AU_OK)
+            fprintf(stderr, "could not use cache file %s\n", cache_file);
+        char where[1024] = "";
+        au_gain_cache_get_file(where, sizeof(where));
+        printf("ReplayGain cache: %s (%d entries); uncached files are measured in the background\n",
+               where[0] ? where : "memory only", au_gain_cache_count());
+        pthread_create(&scan_thread, NULL, scan_worker, NULL);
+    }
+
     if (downmix) {
         const AU_DOWNMIX mode = !strcmp(downmix, "full") ? AU_DOWNMIX_FULL_LEVEL
                               : !strcmp(downmix, "norm") ? AU_DOWNMIX_NORMALIZED : AU_DOWNMIX_CUSTOM;
@@ -273,7 +373,9 @@ int main(int argc, char **argv) {
     }
 
     const PlayAudioConfig cfg = play_config();
-    au_play_audio(take_next(), &cfg);
+    const char *first_file = take_next();
+    scan_now(first_file);
+    au_play_audio(first_file, &cfg);
 
     setvbuf(stdout, NULL, _IOLBF, 0);
     enable_key_mode();
@@ -293,6 +395,7 @@ int main(int argc, char **argv) {
                     const char *f = take_next();
                     if (!f) { printf("  (no more files)\n"); break; }
                     const PlayAudioConfig next_cfg = play_config();
+                    scan_now(f);
                     printf("  next: #%d %s\n", au_play_audio(f, &next_cfg), f);
                 }
                 if (paused) {
@@ -352,6 +455,7 @@ int main(int argc, char **argv) {
     }
 
     restore_terminal();
+    stop_scan_worker();
     au_shutdown();
     for (size_t i = 0; i < file_count; i++) free(files[i]);
     free(files);
