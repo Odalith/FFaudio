@@ -482,6 +482,18 @@ static void cmd_filters(AudioPlayer *ap, const Msg *msg) {
                     SDL_AtomicSet(&ap->tracks[i]->user_filters_changed, 1);
             break;
         }
+        case CMD_SET_DOWNMIX: {
+            SDL_LockMutex(ap->format_mutex);
+            ap->downmix = (AU_DOWNMIX)msg->i64;
+            av_freep(&ap->downmix_filters);
+            if (msg->str && msg->str[0]) ap->downmix_filters = av_strdup(msg->str);
+            SDL_UnlockMutex(ap->format_mutex);
+            // The downmix lives in the convert graph: rebuild it before the next decoded frame
+            for (int i = 0; i < ap->n_tracks; i++)
+                if (!ap->tracks[i]->ended)
+                    SDL_AtomicSet(&ap->tracks[i]->filter_reconfigure, 1);
+            break;
+        }
         case CMD_UPDATE_TRACK_FILTERS: {
             TrackState *t = track_for_handle(ap, msg->handle);
             if (t && !t->ended) track_set_filters(t, msg->str);
@@ -740,6 +752,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_SET_LOOP:         cmd_set_loop(ap, (int)msg->i64); break;
         case CMD_SET_CROSSFADE:    apply_crossfade_config(ap, &msg->crossfade); break;
         case CMD_SET_GLOBAL_FILTERS:
+        case CMD_SET_DOWNMIX:
         case CMD_UPDATE_TRACK_FILTERS:
         case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
         case CMD_CONFIGURE_DEVICE: finish_sync(msg, cmd_configure_device(ap, msg)); msg->done = NULL; break;
@@ -836,6 +849,14 @@ int au_initialize(const InitializeConfig* config) {
     SDL_AtomicSet(&ap->volume, config->initial_volume >= 0 ? FFMIN(config->initial_volume, 100) : 100);
     SDL_AtomicSet(&ap->loop_count, config->initial_loop_count);
     ap->prepare_next_seconds = config->prepare_next_seconds > 0 ? config->prepare_next_seconds : DEFAULT_PREPARE_NEXT_SECONDS;
+    if (config->output_channels < 0 || config->output_channels > 8 ||
+        (config->output_sample_rate != 0 && (config->output_sample_rate < 8000 || config->output_sample_rate > 384000))) {
+        av_free(ap);
+        return AU_ERR_INVALID_ARGUMENT;
+    }
+    ap->output_channels = config->output_channels;
+    ap->output_sample_rate = config->output_sample_rate;
+    ap->downmix = AU_DOWNMIX_FULL_LEVEL;
     ap->find_stream_info = 1;
     ap->audio_device_index = -1;
     ap->use_default_device = true;
@@ -943,6 +964,7 @@ void au_shutdown(void) {
     av_free(ap->tracks);
     av_free(ap->audio_device_name);
     av_free(ap->global_filters);
+    av_free(ap->downmix_filters);
     av_channel_layout_uninit(&ap->audio_target.ch_layout);
     SDL_DestroyMutex(ap->msg_mutex);
     SDL_DestroyCond(ap->msg_cond);
@@ -1174,6 +1196,31 @@ int au_update_filtergraph(const int32_t handle, const char *filters) {
         return AU_ERR_INVALID_ARGUMENT;
     }
     return post_filter_msg(CMD_UPDATE_TRACK_FILTERS, handle, filters, NULL, NULL);
+}
+
+int au_set_downmix(const AU_DOWNMIX mode, const char *custom_filters) {
+    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+    if (mode != AU_DOWNMIX_FULL_LEVEL && mode != AU_DOWNMIX_NORMALIZED && mode != AU_DOWNMIX_CUSTOM)
+        return AU_ERR_INVALID_ARGUMENT;
+    if (mode == AU_DOWNMIX_CUSTOM) {
+        const int ret = validate_downmix_filters(custom_filters);
+        if (ret < 0) {
+            ff_log(AU_LOG_ERROR, "au_set_downmix: invalid custom downmix \"%s\": %s",
+                   custom_filters ? custom_filters : "", av_err2str(ret));
+            return AU_ERR_INVALID_ARGUMENT;
+        }
+    }
+    AudioPlayer *ap = audio_player;
+    SDL_AtomicIncRef(&ap->request_count);
+    Msg *m = msg_new(CMD_SET_DOWNMIX);
+    if (!m) return AU_ERR_NO_MEMORY;
+    m->i64 = mode;
+    if (mode == AU_DOWNMIX_CUSTOM && !(m->str = av_strdup(custom_filters))) {
+        msg_free(m);
+        return AU_ERR_NO_MEMORY;
+    }
+    msg_post(ap, m);
+    return AU_OK;
 }
 
 int au_send_filter_command(const int32_t handle, const char *target, const char *command, const char *arg) {

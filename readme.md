@@ -18,6 +18,8 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - Volume with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
 - Callbacks for track start/end, prepare-next, restarts (seek/loop), duration, device changes and logs
 - Follows the system default device, or uses a chosen one and falls back to the default if it disappears
+- Surround files up to 7.1 play on multichannel outputs with SDL's speaker order, or are mixed down at full level
+  (like mpv), normalized (never clips), or with your own filters (e.g. `sofalizer` for headphones)
 - Safe to drive from any thread, including from inside its own callbacks
 - Linux tested; Windows builds with MSYS2 (see CI); macOS, Android and iOS untested
 - LGPL-2.1
@@ -135,7 +137,23 @@ au_send_filter_command(0, "volume", "volume", "0.5");
 Any [FFmpeg filter](https://ffmpeg.org/ffmpeg-filters.html) string works; `au_validate_filtergraph()` checks one.
 Changes take effect within about half a second (the audio that is already decoded plays out first).
 
-### 5. Shut down
+### 5. Surround files and the output format
+By default the output uses the device's own channel count and sample rate. Files with more channels than the
+output are mixed down; files with fewer are spread onto the matching speakers.
+```c
+// Force stereo (or 6 for 5.1, ...) and/or a sample rate; 0 keeps the device's preference
+const InitializeConfig config = { /* ... */ .output_channels = 2, .output_sample_rate = 48000 };
+
+au_set_downmix(AU_DOWNMIX_FULL_LEVEL, NULL);   // default: standard matrix at full level, like mpv
+au_set_downmix(AU_DOWNMIX_NORMALIZED, NULL);   // scaled so it can never clip (~7.7 dB quieter for 5.1)
+au_set_downmix(AU_DOWNMIX_CUSTOM,              // your own filters on the original channels, e.g. headphones:
+               "sofalizer=sofa=/usr/share/sofa/hrtf.sofa");   // (needs FFmpeg built with libmysofa)
+au_set_downmix(AU_DOWNMIX_CUSTOM,              // or a matrix that keeps the LFE
+               "pan=stereo|FL=FL+0.707*FC+0.707*SL+0.5*LFE|FR=FR+0.707*FC+0.707*SR+0.5*LFE");
+```
+The standard matrix (ITU-R BS.775) puts the centre and surrounds in at -3 dB and drops the LFE.
+
+### 6. Shut down
 ```c
 au_shutdown();   // not from inside a callback; au_initialize() may be called again afterwards
 ```
@@ -175,7 +193,7 @@ au_shutdown();   // not from inside a callback; au_initialize() may be called ag
   fades, volume ramps and live filter changes
 
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
-`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s]`
+`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters]`
 plays a folder on real hardware for listening tests.
 
 ## Roadmap
@@ -184,7 +202,7 @@ plays a folder on real hardware for listening tests.
 - [ ] Playback speed (tempo with and without pitch change)
 - [ ] Network streams: HTTP/Icecast with "now playing" metadata, reconnects, buffering state (rtp/rtsp)
 - [ ] Cue sheets / gapless playback of track ranges inside one file
-- [ ] Verified multichannel (5.1/7.1) playback and an optional downmix
+- [x] Verified multichannel (5.1/7.1) playback and configurable downmixing
 - [ ] Device added/removed notifications for the application
 - [ ] SDL3 port
 - [ ] Release binaries for Linux and Windows; test macOS, Android and iOS

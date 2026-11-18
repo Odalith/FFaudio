@@ -31,6 +31,12 @@ static void start_capture(const char *name) {
 #endif
     tc_reset_events();
     REQUIRE(tc_init_player(0) == 0);
+    tc_output_channels = 0;
+}
+
+static void start_capture_channels(const char *name, const int channels) {
+    tc_output_channels = channels;
+    start_capture(name);
 }
 
 static Capture stop_capture(void) {
@@ -382,6 +388,92 @@ static void test_live_filter_changes(void) {
     free(c.samples);
 }
 
+/* ---------- surround (issue #19: 5.1 files were ~7.7 dB quieter than in mpv) ---------- */
+
+static float channel_peak_db(const Capture *c, const int channel) {
+    float p = 0;
+    for (size_t i = 0; i < c->frames; i++) p = fmaxf(p, fabsf(c->samples[i * c->channels + channel]));
+    return p > 1e-9f ? 20.0f * log10f(p) : -999.0f;
+}
+
+// Play one file at volume 100 and return the capture
+static Capture capture_file(const char *name, const char *file, const int channels, const AU_DOWNMIX mode,
+                            const char *custom) {
+    start_capture_channels(name, channels);
+    au_set_audio_volume(100);
+    if (mode != AU_DOWNMIX_FULL_LEVEL) CHECK(au_set_downmix(mode, custom) == AU_OK);
+    au_play_audio(fx(file), NULL);
+    wait_until_idle(1, 4000);
+    return stop_capture();
+}
+
+#define SINE_DB (-18.06f) // lavfi sine amplitude 1/8
+
+static void test_downmix_levels(void) {
+    // Front left only: unity gain into the left speaker, like mpv
+    Capture c = capture_file("dm_fl", "surround_FL.flac", 2, AU_DOWNMIX_FULL_LEVEL, NULL);
+    printf("   FL -> stereo: L %.2f R %.2f dB\n", channel_peak_db(&c, 0), channel_peak_db(&c, 1));
+    CHECK(c.channels == 2);
+    CHECK(fabsf(channel_peak_db(&c, 0) - SINE_DB) < 0.3f);
+    CHECK(channel_peak_db(&c, 1) < -90);
+    free(c.samples);
+
+    // Centre: -3 dB into both
+    c = capture_file("dm_fc", "surround_FC.flac", 2, AU_DOWNMIX_FULL_LEVEL, NULL);
+    printf("   FC -> stereo: L %.2f R %.2f dB\n", channel_peak_db(&c, 0), channel_peak_db(&c, 1));
+    CHECK(fabsf(channel_peak_db(&c, 0) - (SINE_DB - 3.01f)) < 0.3f);
+    CHECK(fabsf(channel_peak_db(&c, 1) - (SINE_DB - 3.01f)) < 0.3f);
+    free(c.samples);
+
+    // Normalized: the same matrix scaled by 1 / (1 + 0.707 + 0.707), about -7.65 dB
+    c = capture_file("dm_norm", "surround_FL.flac", 2, AU_DOWNMIX_NORMALIZED, NULL);
+    printf("   FL -> stereo normalized: L %.2f dB\n", channel_peak_db(&c, 0));
+    CHECK(fabsf(channel_peak_db(&c, 0) - (SINE_DB - 7.65f)) < 0.3f);
+    free(c.samples);
+
+    // Custom: LFE (dropped by the standard matrix) mixed into both sides at 0.5 (-6 dB)
+    c = capture_file("dm_custom", "surround_LFE.flac", 2, AU_DOWNMIX_CUSTOM,
+                     "pan=stereo|FL=FL+0.707*FC+0.707*SL+0.5*LFE|FR=FR+0.707*FC+0.707*SR+0.5*LFE");
+    printf("   LFE -> stereo custom: L %.2f R %.2f dB\n", channel_peak_db(&c, 0), channel_peak_db(&c, 1));
+    CHECK(fabsf(channel_peak_db(&c, 0) - (SINE_DB - 6.02f)) < 0.3f);
+    CHECK(fabsf(channel_peak_db(&c, 1) - (SINE_DB - 6.02f)) < 0.3f);
+    free(c.samples);
+}
+
+static void test_bad_custom_downmix_rejected(void) {
+    start_capture("dm_bad");
+    CHECK(au_set_downmix(AU_DOWNMIX_CUSTOM, "no_such_filter") == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_downmix(AU_DOWNMIX_CUSTOM, NULL) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_downmix((AU_DOWNMIX)42, NULL) == AU_ERR_INVALID_ARGUMENT);
+    Capture c = stop_capture();
+    free(c.samples);
+}
+
+static void test_multichannel_routing(void) {
+    // 5.1 into a 5.1 output: every channel stays where it is (SDL order FL FR FC LFE SL SR)
+    const char *files[] = { "surround_FL.flac", "surround_FC.flac", "surround_LFE.flac", "surround_SL.flac" };
+    const int expect_6ch[] = { 0, 2, 3, 4 };
+    for (int i = 0; i < 4; i++) {
+        Capture c = capture_file("route6", files[i], 6, AU_DOWNMIX_FULL_LEVEL, NULL);
+        CHECK(c.channels == 6);
+        for (int ch = 0; ch < c.channels; ch++) {
+            const float db = channel_peak_db(&c, ch);
+            if (ch == expect_6ch[i]) CHECK(fabsf(db - SINE_DB) < 0.3f);
+            else CHECK(db < -90);
+        }
+        free(c.samples);
+    }
+
+    // 5-channel output is FL FR LFE BL BR in SDL: LFE must land on channel 2, not the centre
+    Capture c = capture_file("route5", "surround_LFE.flac", 5, AU_DOWNMIX_FULL_LEVEL, NULL);
+    printf("   LFE -> 5 ch: %.1f %.1f %.1f %.1f %.1f dB\n", channel_peak_db(&c, 0), channel_peak_db(&c, 1),
+           channel_peak_db(&c, 2), channel_peak_db(&c, 3), channel_peak_db(&c, 4));
+    CHECK(c.channels == 5);
+    CHECK(fabsf(channel_peak_db(&c, 2) - SINE_DB) < 0.3f);
+    CHECK(channel_peak_db(&c, 0) < -90 && channel_peak_db(&c, 1) < -90);
+    free(c.samples);
+}
+
 static void test_bad_filter_fails_cleanly(void) {
     start_capture("badfilter");
     const PlayAudioConfig bad = { .av_filtergraph = "this_filter_does_not_exist=1" };
@@ -407,6 +499,9 @@ int main(int argc, char **argv) {
     RUN_TEST(test_short_tracks_stay_gapless);
     RUN_TEST(test_custom_curve);
     RUN_TEST(test_live_filter_changes);
+    RUN_TEST(test_downmix_levels);
+    RUN_TEST(test_bad_custom_downmix_rejected);
+    RUN_TEST(test_multichannel_routing);
     RUN_TEST(test_bad_filter_fails_cleanly);
     return tc_finish("test_output");
 }

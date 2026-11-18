@@ -6,6 +6,11 @@ A rework of the playback core for stability, gapless playback and crossfading. T
 incompatible ways; see "API changes".
 
 ### Fixed
+- Surround files mixed down to stereo were ~7.7 dB quieter than in mpv (#19): with integer output formats
+  libswresample scaled the downmix matrix down to avoid clipping. The downmix level is now set explicitly
+  (full level by default, see `au_set_downmix`).
+- 5-channel outputs used FFmpeg's 5.0 order (FL FR FC BL BR) instead of SDL's 4.1 order (FL FR LFE BL BR), so the
+  centre played on the LFE channel.
 - Heap corruption ("corrupted double-linked list") and use-after-free when tracks were replaced, skipped or
   failed while another was queued: read threads freed their own track while the audio callback still used it,
   and a queued track could be overwritten and orphaned with its threads still running.
@@ -33,6 +38,9 @@ incompatible ways; see "API changes".
 - `on_track_started` and `on_audio_device_update` callbacks; `on_prepare_next` now fires
   `prepare_next_seconds` (default 10) before the end of the current track.
 - `au_get_current_handle`, `au_get_output_spec`, `au_is_paused`, `au_is_muted`, `au_get_version`.
+- `au_set_downmix()`: full level (default, like mpv), normalized (never clips) or custom filters on the original
+  channels (e.g. `sofalizer` for headphones). `InitializeConfig.output_channels` / `output_sample_rate` override
+  the device's format.
 - Headless test suite (CTest) with output capture, sanitizer builds, CI, install rules and a pkg-config file.
 
 ### API changes

@@ -184,9 +184,13 @@ static void tc_sleep_ms(uint32_t ms) { SDL_Delay(ms); }
 
 /* ---------- player setup ---------- */
 
+// Output channel count for the next tc_init_player*() call (0 = device default)
+static int tc_output_channels = 0;
+
 static int tc_init_player_cfg(int loop_count, double prepare_next_seconds) {
     const InitializeConfig config = {
         .app_name = "ffaudio-tests",
+        .output_channels = tc_output_channels,
         .initial_volume = 50,
         .initial_loop_count = loop_count,
         .prepare_next_seconds = prepare_next_seconds,

@@ -325,6 +325,7 @@ typedef enum MsgType {
     CMD_CONFIGURE_DEVICE,
     CMD_SET_CROSSFADE,
     CMD_SET_GLOBAL_FILTERS,
+    CMD_SET_DOWNMIX,
     CMD_UPDATE_TRACK_FILTERS,
     CMD_FILTER_COMMAND,
     CMD_SHUTDOWN,
@@ -378,6 +379,8 @@ typedef struct AudioPlayer {
     SDL_atomic_t paused;
     SDL_atomic_t loop_count;            // default for new tracks, -1 infinite
     double prepare_next_seconds;
+    int32_t output_channels;            // 0 = device preference
+    int32_t output_sample_rate;         // 0 = device preference
     CrossfadeConfig crossfade;          // control thread only
     bool use_soxr;
     int32_t filter_nbthreads;
@@ -412,6 +415,8 @@ typedef struct AudioPlayer {
     SDL_cond *format_cond;              // signalled when the output format becomes available
     bool output_ready;                  // guarded by format_mutex
     char *global_filters;               // guarded by format_mutex, applied after each track's own filters
+    AU_DOWNMIX downmix;                 // guarded by format_mutex
+    char *downmix_filters;              // guarded by format_mutex, AU_DOWNMIX_CUSTOM only
     AudioParams audio_target;           // float32 interleaved at the device rate/layout, guarded by format_mutex
     SDL_AudioDeviceID device_id;
     SDL_AudioSpec obtained_spec;

@@ -45,6 +45,9 @@ int build_user_graph(FilterChain *out, const char *track_filters, const char *gl
 
 void free_filter_chain(FilterChain *c);
 
+// Checks that custom downmix filters accept a 7.1 input and link to a stereo output (>= 0 on success)
+int validate_downmix_filters(const char *filters);
+
 // Whether aresample can use the higher quality soxr resampler
 bool filtergraph_soxr_available(void);
 

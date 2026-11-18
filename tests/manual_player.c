@@ -19,7 +19,7 @@
 /*
  * Interactive player for listening tests on real hardware.
  *
- *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s]
+ *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels] [-d full|norm|"filters"]
  *
  * Plays the files under <music-dir> (shuffled with -s), queueing the next one from on_prepare_next.
  * Keys (no Enter needed in a terminal): n = next, p = pause/resume, s = stop, m = mute, + / - = volume,
@@ -178,16 +178,20 @@ static void on_device(int32_t channels, int32_t rate, void *ud) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s]\n", argv[0]);
+        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"]\n", argv[0]);
         return 1;
     }
     double crossfade = 0;
     bool shuffle = false;
+    int channels = 0;
+    const char *downmix = NULL;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "-x") && i + 1 < argc) crossfade = atof(argv[++i]);
         else if (!strcmp(argv[i], "-f") && i + 1 < argc) filter = argv[++i];
         else if (!strcmp(argv[i], "-n") && i + 1 < argc) max_tracks = (size_t)atol(argv[++i]);
         else if (!strcmp(argv[i], "-s")) shuffle = true;
+        else if (!strcmp(argv[i], "-c") && i + 1 < argc) channels = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-d") && i + 1 < argc) downmix = argv[++i];
     }
 
     if (nftw(argv[1], collect, 20, FTW_PHYS) != 0 || file_count == 0) {
@@ -205,6 +209,7 @@ int main(int argc, char **argv) {
     const InitializeConfig config = {
         .app_name = "ffaudio manual player",
         .initial_volume = 60,
+        .output_channels = channels,
         .on_log = on_log,
         .on_eof = on_eof,
         .on_restart = on_restart,
@@ -222,6 +227,15 @@ int main(int argc, char **argv) {
         free(devs);
     }
     au_configure_audio_device(NULL);
+
+    if (downmix) {
+        const AU_DOWNMIX mode = !strcmp(downmix, "full") ? AU_DOWNMIX_FULL_LEVEL
+                              : !strcmp(downmix, "norm") ? AU_DOWNMIX_NORMALIZED : AU_DOWNMIX_CUSTOM;
+        if (au_set_downmix(mode, mode == AU_DOWNMIX_CUSTOM ? downmix : NULL) != AU_OK)
+            fprintf(stderr, "invalid downmix \"%s\", using the default\n", downmix);
+        else
+            printf("downmix: %s\n", downmix);
+    }
 
     if (crossfade > 0) {
         const AuFade fade = { .seconds = crossfade, .curve = AU_FADE_EQUAL_POWER };

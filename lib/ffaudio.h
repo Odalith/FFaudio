@@ -106,6 +106,9 @@ extern "C" {
         int initial_loop_count;              // -1 for infinite, 0 for none
         // Seconds before the end of the current track at which on_prepare_next fires. 0 = 10 seconds.
         double prepare_next_seconds;
+        // Output format overrides; 0 = use what the device prefers. SDL converts when the device differs.
+        int output_channels;                 // 1..8, e.g. 2 to always mix down to stereo
+        int output_sample_rate;              // 8000..384000 Hz
         void *user_data;                     // passed to every callback
         NotifyOfLog on_log;
         NotifyOfEndOfFile on_eof;
@@ -215,6 +218,28 @@ extern "C" {
 
     // Check a filter string against the current output format (or 48 kHz stereo before a device is open)
     DLL_EXPORT int au_validate_filtergraph(const char *filters);
+
+    //+-----------------------------------------------------+
+    //| Downmixing                                          |
+    //+-----------------------------------------------------+
+    // How files with more channels than the output (e.g. 5.1 on stereo speakers or headphones) are mixed down.
+    // Files with as many or fewer channels than the output are not affected.
+
+    typedef enum AU_DOWNMIX {
+        // FFmpeg's standard matrix (ITU-R BS.775: centre and surrounds at -3 dB, LFE dropped) at full level,
+        // the same as mpv. Loud passages where several channels peak together can clip.
+        AU_DOWNMIX_FULL_LEVEL = 0,
+        // The same matrix scaled down so the result can never clip (about 7.7 dB quieter for 5.1 to stereo)
+        AU_DOWNMIX_NORMALIZED,
+        // Your own filters run on the original channels before the conversion to the output layout,
+        // e.g. "sofalizer=sofa=/path/to/hrtf.sofa" for virtual surround on headphones (FFmpeg built with
+        // libmysofa), "surround"/"pan" matrices, or "aformat=channel_layouts=stereo" with custom options.
+        AU_DOWNMIX_CUSTOM,
+    } AU_DOWNMIX;
+
+    // custom_filters is only used with AU_DOWNMIX_CUSTOM. Applies to playing tracks right away.
+    // Returns AU_ERR_INVALID_ARGUMENT if the custom filters do not accept a 7.1 input.
+    DLL_EXPORT int au_set_downmix(AU_DOWNMIX mode, const char *custom_filters);
 
     //+-----------------------------------------------------+
     //| Volume, looping                                     |

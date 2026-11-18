@@ -30,6 +30,12 @@ sine join_a.flac       440 1 48000 2 -sample_fmt s16
 sine join_b.flac       440 1 48000 2 -sample_fmt s16
 sine join_c_44k.flac   440 1 44100 2 -sample_fmt s16
 
+# 16-bit 5.1 with a 440 Hz sine (-18.06 dBFS) in a single channel, for downmix level and routing tests
+for c in FL FC LFE SL; do
+    ff -f lavfi -i "sine=frequency=440:duration=1:sample_rate=48000" \
+       -af "pan=5.1(side)|${c}=c0" -sample_fmt s16 "surround_${c}.flac"
+done
+
 # Broken / non-audio inputs
 : > empty.flac
 echo "this is not audio" > text.mp3

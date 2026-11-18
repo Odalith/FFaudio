@@ -146,54 +146,104 @@ fail:
     return ret;
 }
 
+// Build a convert graph: abuffer (src_args) -> [downmix filters] -> aresample -> aformat -> abuffersink
+static int build_convert_graph(FilterChain *out, const char *src_args, const char *downmix_filters,
+                               const char *downmix_maxval, const bool use_soxr, const int out_rate,
+                               const char *out_layout, const int nb_threads) {
+    char args[512];
+    AVFilterContext *src = NULL, *convert = NULL, *format = NULL, *sink = NULL;
+    int ret;
+
+    memset(out, 0, sizeof(*out));
+    if (!(out->graph = avfilter_graph_alloc())) return AVERROR(ENOMEM);
+    out->graph->nb_threads = nb_threads;
+
+    if ((ret = avfilter_graph_create_filter(&src, avfilter_get_by_name("abuffer"), "ffaudio_abuffer",
+                                            src_args, NULL, out->graph)) < 0) goto end;
+
+    // rematrix_maxval decides whether swr scales the downmix matrix down to avoid clipping. Its default
+    // depends on the internal sample format (it normalizes for integer input such as 16-bit FLAC), so
+    // it is always set explicitly. This is what made 5.1 files ~7.7 dB quieter than in mpv (issue #19).
+    ret = snprintf(args, sizeof(args), "%sout_sample_rate=%d:out_chlayout=%s:out_sample_fmt=flt:rematrix_maxval=%s",
+                   use_soxr ? "resampler=soxr:precision=28:" : "", out_rate, out_layout, downmix_maxval);
+    if (ret < 0 || ret >= (int)sizeof(args)) { ret = AVERROR(EINVAL); goto end; }
+    if ((ret = avfilter_graph_create_filter(&convert, avfilter_get_by_name("aresample"), "ffaudio_convert",
+                                            args, NULL, out->graph)) < 0) goto end;
+
+    if ((ret = create_output_end(out->graph, &format, &sink, out_rate, out_layout)) < 0) goto end;
+    if ((ret = link_filters(out->graph, downmix_filters, src, convert)) < 0) goto end;
+    if ((ret = avfilter_link(convert, 0, format, 0)) < 0) goto end;
+    if ((ret = avfilter_graph_config(out->graph, NULL)) < 0) goto end;
+
+    out->src = src;
+    out->sink = sink;
+
+end:
+    if (ret < 0)
+        free_filter_chain(out);
+    return ret;
+}
+
+int validate_downmix_filters(const char *filters) {
+    if (!filters || !filters[0]) return AVERROR(EINVAL);
+    FilterChain c = {0};
+    const int ret = build_convert_graph(&c, "sample_rate=48000:sample_fmt=flt:time_base=1/48000:channel_layout=7.1",
+                                        filters, "1000", false, 48000, "stereo", 0);
+    free_filter_chain(&c);
+    return ret;
+}
+
 int configure_convert_graph(AudioPlayer *ap, TrackState *t) {
     if (!ap || !t) return AVERROR(EINVAL);
 
-    char args[512], src_layout[128], out_layout[128];
-    AVFilterContext *src = NULL, *convert = NULL, *format = NULL, *sink = NULL;
+    char src_args[512], src_layout[128], out_layout[128];
+    char *custom = NULL;
     int ret;
 
     // Snapshot the output format: the control thread may change it while the device is reconfigured
     SDL_LockMutex(ap->format_mutex);
     const int out_rate = ap->audio_target.freq;
+    const int out_channels = ap->audio_target.ch_layout.nb_channels;
     const bool ready = ap->output_ready;
+    const AU_DOWNMIX mode = ap->downmix;
     ret = ready ? describe_layout(&ap->audio_target.ch_layout, out_layout, sizeof(out_layout)) : 0;
+    if (ret >= 0 && mode == AU_DOWNMIX_CUSTOM && ap->downmix_filters && !(custom = av_strdup(ap->downmix_filters)))
+        ret = AVERROR(ENOMEM);
     SDL_UnlockMutex(ap->format_mutex);
-    if (ret < 0) return ret;
-    if (!ready || out_rate <= 0) return AVERROR(EAGAIN);
+    if (ret < 0 || !ready || out_rate <= 0) {
+        av_free(custom);
+        return ret < 0 ? ret : AVERROR(EAGAIN);
+    }
 
-    if ((ret = describe_layout(&t->audio_filter_src.ch_layout, src_layout, sizeof(src_layout))) < 0)
+    ret = describe_layout(&t->audio_filter_src.ch_layout, src_layout, sizeof(src_layout));
+    if (ret >= 0) {
+        ret = snprintf(src_args, sizeof(src_args), "sample_rate=%d:sample_fmt=%s:time_base=1/%d:channel_layout=%s",
+                       t->audio_filter_src.freq, av_get_sample_fmt_name(t->audio_filter_src.fmt),
+                       t->audio_filter_src.freq, src_layout);
+        ret = (ret < 0 || ret >= (int)sizeof(src_args)) ? AVERROR(EINVAL) : 0;
+    }
+    if (ret < 0) {
+        av_free(custom);
         return ret;
+    }
+
+    // Downmix settings only matter when the file has more channels than the output
+    const bool downmixing = t->audio_filter_src.ch_layout.nb_channels > out_channels;
+    const char *maxval = (downmixing && mode == AU_DOWNMIX_NORMALIZED) ? "1" : "1000";
+    const char *downmix_filters = downmixing ? custom : NULL;
 
     // Never leave src/sink pointing into a graph that has been freed
     free_filter_chain(&t->convert);
-    if (!(t->convert.graph = avfilter_graph_alloc())) return AVERROR(ENOMEM);
-    t->convert.graph->nb_threads = ap->filter_nbthreads;
     t->convert_rate = out_rate;
-
-    ret = snprintf(args, sizeof(args), "sample_rate=%d:sample_fmt=%s:time_base=1/%d:channel_layout=%s",
-                   t->audio_filter_src.freq, av_get_sample_fmt_name(t->audio_filter_src.fmt),
-                   t->audio_filter_src.freq, src_layout);
-    if (ret < 0 || ret >= (int)sizeof(args)) { ret = AVERROR(EINVAL); goto end; }
-    if ((ret = avfilter_graph_create_filter(&src, avfilter_get_by_name("abuffer"), "ffaudio_abuffer",
-                                            args, NULL, t->convert.graph)) < 0) goto end;
-
-    ret = snprintf(args, sizeof(args), "%sout_sample_rate=%d:out_chlayout=%s:out_sample_fmt=flt",
-                   ap->use_soxr ? "resampler=soxr:precision=28:" : "", out_rate, out_layout);
-    if (ret < 0 || ret >= (int)sizeof(args)) { ret = AVERROR(EINVAL); goto end; }
-    if ((ret = avfilter_graph_create_filter(&convert, avfilter_get_by_name("aresample"), "ffaudio_convert",
-                                            args, NULL, t->convert.graph)) < 0) goto end;
-
-    if ((ret = create_output_end(t->convert.graph, &format, &sink, out_rate, out_layout)) < 0) goto end;
-    if ((ret = avfilter_link(src, 0, convert, 0)) < 0) goto end;
-    if ((ret = avfilter_link(convert, 0, format, 0)) < 0) goto end;
-    if ((ret = avfilter_graph_config(t->convert.graph, NULL)) < 0) goto end;
-
-    t->convert.src = src;
-    t->convert.sink = sink;
-
-end:
-    if (ret < 0)
-        free_filter_chain(&t->convert);
+    ret = build_convert_graph(&t->convert, src_args, downmix_filters, maxval, ap->use_soxr, out_rate, out_layout,
+                              ap->filter_nbthreads);
+    if (ret < 0 && downmix_filters) {
+        ff_log(AU_LOG_WARNING, "Custom downmix \"%s\" failed for '%s' (%s): using the standard downmix",
+               downmix_filters, t->filename, av_err2str(ret));
+        ret = build_convert_graph(&t->convert, src_args, NULL, "1000", ap->use_soxr, out_rate, out_layout,
+                                  ap->filter_nbthreads);
+    }
+    av_free(custom);
     return ret;
 }
+

@@ -414,15 +414,17 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
 //| Device                                              |
 //+-----------------------------------------------------+
 
-// SDL2's channel order for each channel count, as an FFmpeg layout
+// SDL2's channel order for each channel count (see SDL_audio.h), as an FFmpeg layout.
+// FFmpeg's native order sorts channels by their bit, which gives the same order in every case.
 static AVChannelLayout sdl_channel_layout(const int channels) {
     switch (channels) {
         case 1: return (AVChannelLayout)AV_CHANNEL_LAYOUT_MONO;
         case 2: return (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
-        case 3: return (AVChannelLayout)AV_CHANNEL_LAYOUT_2POINT1;
-        case 4: return (AVChannelLayout)AV_CHANNEL_LAYOUT_QUAD;
-        case 5: return (AVChannelLayout)AV_CHANNEL_LAYOUT_5POINT0_BACK;
-        case 6: return (AVChannelLayout)AV_CHANNEL_LAYOUT_5POINT1;
+        case 3: return (AVChannelLayout)AV_CHANNEL_LAYOUT_2POINT1;                    // FL FR LFE
+        case 4: return (AVChannelLayout)AV_CHANNEL_LAYOUT_QUAD;                       // FL FR BL BR
+        case 5: return (AVChannelLayout)AV_CHANNEL_LAYOUT_MASK(5,                     // FL FR LFE BL BR (4.1)
+                    AV_CH_FRONT_LEFT | AV_CH_FRONT_RIGHT | AV_CH_LOW_FREQUENCY | AV_CH_BACK_LEFT | AV_CH_BACK_RIGHT);
+        case 6: return (AVChannelLayout)AV_CHANNEL_LAYOUT_5POINT1;                    // FL FR FC LFE SL SR
         case 7: return (AVChannelLayout)AV_CHANNEL_LAYOUT_6POINT1;
         case 8: return (AVChannelLayout)AV_CHANNEL_LAYOUT_7POINT1;
         default: return (AVChannelLayout)AV_CHANNEL_LAYOUT_STEREO;
@@ -482,23 +484,29 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
         }
     }
 
-    wanted.freq = preferred.freq > 0 ? preferred.freq : 48000;
-    wanted.channels = (preferred.channels > 0 && preferred.channels <= 8) ? preferred.channels : 2;
+    // A forced channel count / rate (InitializeConfig) wins over the device's preference; SDL converts
+    const bool force_channels = ap->output_channels > 0;
+    const bool force_rate = ap->output_sample_rate > 0;
+    wanted.freq = force_rate ? ap->output_sample_rate : (preferred.freq > 0 ? preferred.freq : 48000);
+    wanted.channels = (Uint8)(force_channels ? ap->output_channels
+                                             : ((preferred.channels > 0 && preferred.channels <= 8) ? preferred.channels : 2));
     wanted.format = AUDIO_F32SYS;
     wanted.samples = (Uint16)FFMAX(512, 2 << av_log2((unsigned)(wanted.freq / 40)));
     wanted.callback = sdl_audio_callback;
     wanted.userdata = ap;
 
-    int allowed = SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_CHANNELS_CHANGE |
-                  SDL_AUDIO_ALLOW_FORMAT_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
+    int allowed = SDL_AUDIO_ALLOW_FORMAT_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
+    if (!force_rate) allowed |= SDL_AUDIO_ALLOW_FREQUENCY_CHANGE;
+    if (!force_channels) allowed |= SDL_AUDIO_ALLOW_CHANNELS_CHANGE;
     const char *open_name = use_default ? NULL : device_name;
 
     SDL_AudioDeviceID id = SDL_OpenAudioDevice(open_name, 0, &wanted, &obtained, allowed);
     if (id && (!format_supported(obtained.format) || obtained.channels < 1 || obtained.channels > 8)) {
         // Let SDL convert from float instead
         SDL_CloseAudioDevice(id);
-        allowed = SDL_AUDIO_ALLOW_FREQUENCY_CHANGE | SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
-        if (obtained.channels >= 1 && obtained.channels <= 8)
+        allowed = SDL_AUDIO_ALLOW_SAMPLES_CHANGE;
+        if (!force_rate) allowed |= SDL_AUDIO_ALLOW_FREQUENCY_CHANGE;
+        if (!force_channels && obtained.channels >= 1 && obtained.channels <= 8)
             allowed |= SDL_AUDIO_ALLOW_CHANNELS_CHANGE;
         id = SDL_OpenAudioDevice(open_name, 0, &wanted, &obtained, allowed);
     }
