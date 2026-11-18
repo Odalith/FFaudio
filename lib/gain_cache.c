@@ -73,10 +73,12 @@ static FILE *append_file = NULL;
 static size_t file_lines = 0;           // records in the file, to decide when to compact
 
 static SDL_mutex *cache_mutex_ptr = NULL;
+static SDL_cond *cache_changed = NULL;   // broadcast when an entry is set (gain_cache_wait)
 static FfOnce cache_mutex_once = FF_ONCE_INIT;
 
 static void create_cache_mutex(void) {
     cache_mutex_ptr = SDL_CreateMutex(); // SDL mutexes work without SDL_Init
+    cache_changed = SDL_CreateCond();
 }
 
 // Created on first use, from any thread
@@ -610,11 +612,31 @@ int au_gain_cache_set(const char *path, const AuReplayGainInfo *rg) {
     ensure_loaded();
     int ret = table_set(path, rg);
     if (ret == AU_OK) ret = append_record(bp.str, bp.len);
+    if (cache_changed) SDL_CondBroadcast(cache_changed);
     SDL_UnlockMutex(m);
     av_bprint_finalize(&bp, NULL);
 
     ff_gain_cache_changed(path);
     return ret; // AU_ERR_FILE: kept in memory, but could not be written to the file
+}
+
+bool gain_cache_wait(const char *path, const int timeout_ms, SDL_atomic_t *abort) {
+    if (!path || !path[0]) return false;
+    SDL_mutex *m = cache_mutex();
+    if (!m) return false;
+    const Uint32 deadline = SDL_GetTicks() + (Uint32)(timeout_ms > 0 ? timeout_ms : 0);
+    bool found = false;
+    SDL_LockMutex(m);
+    ensure_loaded();
+    for (;;) {
+        Entry **slot = find_slot(path, hash_path(path));
+        if ((found = slot && *slot)) break;
+        const Sint32 left = (Sint32)(deadline - SDL_GetTicks());
+        if (left <= 0 || (abort && SDL_AtomicGet(abort))) break;
+        SDL_CondWaitTimeout(cache_changed, m, (Uint32)(left < 20 ? left : 20)); // re-check abort regularly
+    }
+    SDL_UnlockMutex(m);
+    return found;
 }
 
 bool au_gain_cache_get(const char *path, AuReplayGainInfo *out) {

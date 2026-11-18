@@ -792,8 +792,10 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_GAIN_CACHE_CHANGED:
             for (int i = 0; i < ap->n_tracks; i++) {
                 TrackState *t = ap->tracks[i];
-                if (!t->ended && (!msg->str || strcmp(t->filename, msg->str) == 0))
+                if (!t->ended && (!msg->str || strcmp(t->filename, msg->str) == 0)) {
+                    SDL_AtomicSet(&t->gain_slow, 1); // a value that arrives while playing fades in slowly
                     track_update_gain(t);
+                }
             }
             break;
         case CMD_SET_REPLAYGAIN:
@@ -1294,6 +1296,7 @@ int au_set_replaygain(const AuReplayGainConfig *config) {
         if (!isfinite(cfg.preamp_db) || cfg.preamp_db < -15 || cfg.preamp_db > 15) return AU_ERR_INVALID_ARGUMENT;
         if (!isfinite(cfg.fallback_gain_db) || cfg.fallback_gain_db < -30 || cfg.fallback_gain_db > 15)
             return AU_ERR_INVALID_ARGUMENT;
+        if (cfg.measure_wait_ms > 10000) return AU_ERR_INVALID_ARGUMENT;
     }
     SDL_AtomicIncRef(&ap->request_count);
     Msg *m = msg_new(CMD_SET_REPLAYGAIN);

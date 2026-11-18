@@ -186,6 +186,9 @@ typedef struct TrackState {
     SDL_atomic_t gain_mb;
     float gain_cur;                     // SDL callback only
     bool gain_started;                  // SDL callback only
+    float gain_seen;                    // SDL callback only: target the current ramp heads for
+    float gain_step;                    // SDL callback only: per-sample change of the current ramp
+    SDL_atomic_t gain_slow;             // 1 = the next gain change arrived late: ramp over 2 s instead of 10 ms
 
     // ---- threads ----
     SDL_Thread *read_tid;

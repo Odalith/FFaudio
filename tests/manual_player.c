@@ -125,10 +125,18 @@ static int collect(const char *path, const struct stat *sb, int type, struct FTW
     return 0;
 }
 
+// next_index is used from the key loop and from callbacks
+static pthread_mutex_t files_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool use_cache = false;
+
 static const char *take_next(void) {
-    if (next_index >= file_count || next_index >= max_tracks) return NULL;
-    return files[next_index++];
+    pthread_mutex_lock(&files_lock);
+    const char *f = (next_index >= file_count || next_index >= max_tracks) ? NULL : files[next_index++];
+    pthread_mutex_unlock(&files_lock);
+    return f;
 }
+
+static void prefetch_upcoming(void);
 
 static PlayAudioConfig play_config(void) {
     return (PlayAudioConfig){ .av_filtergraph = filter };
@@ -166,6 +174,7 @@ static void on_started(int32_t handle, void *ud) {
     }
     if (has_gain) printf("  gain %+.2f dB%s", gain, cached ? " (from cache)" : "");
     printf("\n");
+    prefetch_upcoming();
 }
 
 static void on_duration(int32_t handle, double duration, void *ud) {
@@ -177,78 +186,27 @@ static void on_duration(int32_t handle, double duration, void *ud) {
 //| ReplayGain cache (-g): measure uncached files       |
 //+-----------------------------------------------------+
 
-static bool use_cache = false;
-static pthread_t scan_thread;
-static pthread_mutex_t scan_lock = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t scan_cond = PTHREAD_COND_INITIALIZER;
-static char *scan_queue[64];
-static int scan_count = 0;
-static bool scan_quit = false;
+#define PREFETCH_COUNT 10
 
-static void report_scan(const char *path, const int ret, const AuReplayGainInfo *rg, const double seconds) {
-    if (ret == AU_OK)
-        printf("  measured %s: %+.2f dB (%.2f s), saved to the cache\n", path, rg->track_gain_db, seconds);
-    else
-        printf("  could not measure %s (%d)\n", path, ret);
+// ffaudio measures on its own worker threads; this only reports the results
+static void on_cached(const char *path, int result, const AuReplayGainInfo *rg, void *user) {
+    (void)user;
+    if (result == AU_OK) printf("  measured %s: %+.2f dB\n", path, rg->track_gain_db);
+    else if (result != AU_ERR_CANCELLED) printf("  could not measure %s (%d)\n", path, result);
 }
 
-static double now_seconds(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return ts.tv_sec + ts.tv_nsec / 1e9;
-}
-
-// Worker thread: measure files queued by request_scan(); the queued track picks the value up from the cache
-static void *scan_worker(void *arg) {
-    (void)arg;
-    pthread_mutex_lock(&scan_lock);
-    for (;;) {
-        while (!scan_count && !scan_quit) pthread_cond_wait(&scan_cond, &scan_lock);
-        if (scan_quit) break;
-        char *path = scan_queue[0];
-        memmove(scan_queue, scan_queue + 1, (size_t)--scan_count * sizeof(char *));
-        pthread_mutex_unlock(&scan_lock);
-
-        AuReplayGainInfo rg;
-        const double t0 = now_seconds();
-        const int ret = au_gain_cache_scan(path, NULL, &rg);
-        report_scan(path, ret, &rg, now_seconds() - t0);
-        free(path);
-        pthread_mutex_lock(&scan_lock);
-    }
-    pthread_mutex_unlock(&scan_lock);
-    return NULL;
-}
-
-// For a queued track: measure it in the background if the cache does not know it yet
-static void request_scan(const char *path) {
-    if (!use_cache || au_gain_cache_get(path, NULL)) return;
-    pthread_mutex_lock(&scan_lock);
-    if (scan_count < (int)(sizeof(scan_queue) / sizeof(scan_queue[0])) && (scan_queue[scan_count] = strdup(path))) {
-        scan_count++;
-        pthread_cond_signal(&scan_cond);
-    }
-    pthread_mutex_unlock(&scan_lock);
-}
-
-// For a track that starts right away: measure it first so it does not start at the wrong level
-static void scan_now(const char *path) {
-    if (!use_cache || au_gain_cache_get(path, NULL)) return;
-    AuReplayGainInfo rg;
-    const double t0 = now_seconds();
-    const int ret = au_gain_cache_scan(path, NULL, &rg);
-    report_scan(path, ret, &rg, now_seconds() - t0);
-}
-
-static void stop_scan_worker(void) {
+// Ask ffaudio to measure the next files of the playlist in the background; cached ones are skipped, so this
+// can be called whenever the position changes. Tracks started out of order are measured by the player itself
+// (measure_missing), which holds their start for up to 500 ms.
+static void prefetch_upcoming(void) {
     if (!use_cache) return;
-    pthread_mutex_lock(&scan_lock);
-    scan_quit = true;
-    pthread_cond_signal(&scan_cond);
-    pthread_mutex_unlock(&scan_lock);
-    pthread_join(scan_thread, NULL);
-    for (int i = 0; i < scan_count; i++) free(scan_queue[i]);
-    scan_count = 0;
+    const char *upcoming[PREFETCH_COUNT];
+    int n = 0;
+    pthread_mutex_lock(&files_lock);
+    for (size_t i = next_index; i < file_count && i < max_tracks && n < PREFETCH_COUNT; i++)
+        upcoming[n++] = files[i];
+    pthread_mutex_unlock(&files_lock);
+    au_gain_cache_request(upcoming, n, AU_SCAN_PREFETCH);
 }
 
 static void queue_next_file(void) {
@@ -258,7 +216,6 @@ static void queue_next_file(void) {
     const int32_t h = au_set_next(f, &cfg);
     set_queued(h);
     printf("  queued #%d %s\n", h, f);
-    request_scan(f);
 }
 
 static void on_prepare_next(int32_t current, void *ud) {
@@ -339,6 +296,7 @@ int main(int argc, char **argv) {
             .mode = !strcmp(replaygain, "album") ? AU_REPLAYGAIN_ALBUM : AU_REPLAYGAIN_TRACK,
             .fallback_gain_db = -6.0,
             .prevent_clipping = true,
+            .measure_missing = use_cache,   // -g: tracks without a value are measured (waits up to 500 ms)
         };
         au_set_replaygain(&rg);
         printf("ReplayGain: %s mode, -6 dB for untagged files\n", rg.mode == AU_REPLAYGAIN_ALBUM ? "album" : "track");
@@ -351,7 +309,8 @@ int main(int argc, char **argv) {
         au_gain_cache_get_file(where, sizeof(where));
         printf("ReplayGain cache: %s (%d entries); uncached files are measured in the background\n",
                where[0] ? where : "memory only", au_gain_cache_count());
-        pthread_create(&scan_thread, NULL, scan_worker, NULL);
+        const AuGainScanConfig scan = { .on_cached = on_cached };
+        au_gain_scan_configure(&scan);
     }
 
     if (downmix) {
@@ -374,7 +333,6 @@ int main(int argc, char **argv) {
 
     const PlayAudioConfig cfg = play_config();
     const char *first_file = take_next();
-    scan_now(first_file);
     au_play_audio(first_file, &cfg);
 
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -395,7 +353,6 @@ int main(int argc, char **argv) {
                     const char *f = take_next();
                     if (!f) { printf("  (no more files)\n"); break; }
                     const PlayAudioConfig next_cfg = play_config();
-                    scan_now(f);
                     printf("  next: #%d %s\n", au_play_audio(f, &next_cfg), f);
                 }
                 if (paused) {
@@ -455,7 +412,7 @@ int main(int argc, char **argv) {
     }
 
     restore_terminal();
-    stop_scan_worker();
+    au_gain_scan_stop();
     au_shutdown();
     for (size_t i = 0; i < file_count; i++) free(files[i]);
     free(files);

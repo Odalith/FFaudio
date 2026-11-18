@@ -64,6 +64,7 @@ add_library(ffaudio
         lib/loudness.c
         lib/gain_cache.c
         lib/gain_cache.h
+        lib/gain_scan.c
         lib/once.h
         lib/metadata.h
         lib/track.c
@@ -171,7 +172,7 @@ if(FFAUDIO_BUILD_TESTS)
                 COMMENT "Generating audio fixtures")
         add_custom_target(ffaudio_fixtures ALL DEPENDS ${FIXTURE_DIR}/.stamp)
 
-        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache)
+        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})

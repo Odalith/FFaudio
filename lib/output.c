@@ -205,14 +205,26 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 //+-----------------------------------------------------+
 
 // The track's ReplayGain gain: jumps to the target before the first sample, ramps on later changes
+#define LATE_GAIN_RAMP_SECONDS 2.0
+
+// The track's ReplayGain gain: set before the first sample, then a linear ramp for every change (10 ms, or
+// 2 s when the value arrived after the track started, e.g. a measurement that missed measure_wait_ms)
 static float track_gain_step(Mixer *m, TrackState *t, float *target_out) {
     const float target = powf(10.0f, (float)SDL_AtomicGet(&t->gain_mb) / 2000.0f);
     if (!t->gain_started) {
-        t->gain_cur = target;
+        t->gain_cur = t->gain_seen = target;
+        t->gain_step = 0;
         t->gain_started = true;
+        SDL_AtomicSet(&t->gain_slow, 0);
+    }
+    if (target != t->gain_seen) {
+        const bool slow = SDL_AtomicSet(&t->gain_slow, 0) != 0;
+        const float frames = slow ? (float)(LATE_GAIN_RAMP_SECONDS * m->rate) : (float)FFMAX(1, m->vol_ramp_frames);
+        t->gain_seen = target;
+        t->gain_step = (target - t->gain_cur) / frames;
     }
     *target_out = target;
-    return (target - t->gain_cur) / (float)FFMAX(1, m->vol_ramp_frames);
+    return t->gain_cur == target ? 0.0f : t->gain_step;
 }
 
 static void add_voice(Mixer *m, TrackState *t, float *dst, const float *src, const int frames, const int channels,

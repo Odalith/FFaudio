@@ -237,23 +237,42 @@ to the application (`au_gain_cache_foreach()` + `au_gain_cache_remove()` to drop
 
 When a track starts, its path is looked up and a cached entry is used instead of the file's tags
 (order: `PlayAudioConfig.replaygain` > cache > tags). Setting or removing an entry also updates tracks that are
-already queued or playing, so a value may arrive after the track was queued:
+already queued or playing, so a value may arrive after the track was queued.
+
+#### Measuring in the background
+ffaudio fills the cache itself on low-priority worker threads; the application only says what is coming:
 ```c
-static void on_prepare_next(int32_t current, void *user) {
-    const char *path = my_playlist_next();
-    au_set_next(path, NULL);                  // queue right away
-    if (!au_gain_cache_get(path, NULL))
-        my_worker_queue_scan(path);           // scanning blocks, so not on the callback thread
+const AuReplayGainConfig rg = {
+    .mode = AU_REPLAYGAIN_TRACK,
+    .fallback_gain_db = -6,
+    .measure_missing = true,      // a starting track with no value at all is measured right away
+    .measure_wait_ms = 0,         // ...and its start waits up to 500 ms (the default) for the result
+};
+au_set_replaygain(&rg);
+
+static void on_track_started(int32_t handle, void *user) {
+    // Keep the next part of the playlist measured; cached, queued and running paths are skipped,
+    // so re-sending the window every time is cheap
+    au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
 }
 
-// worker thread
-au_gain_cache_scan(path, NULL, NULL);         // measure + au_gain_cache_set(); the queued track picks it up
+// A whole album, so album gains are stored as well
+au_gain_cache_request_album(album_paths, n, AU_SCAN_PREFETCH);
 ```
-`on_prepare_next` fires 10 s before the end of the current track by default, which leaves plenty of time for the
-scan (well under a second for most songs). Album gains can be stored too: scan the album with one
-`AuLoudnessScanner` and `au_gain_cache_set()` each track with `au_loudness_to_replaygain(&track, &album)`.
-The cache works without `au_initialize()`, survives `au_shutdown()`, is thread-safe, and paths are compared as
-exact strings (pass them the same way every time, e.g. always absolute).
+- **Prefetch** covers the normal flow and skips within the window: the values are in the cache before the
+  tracks start.
+- **Misses** (a track picked out of order, a new playlist): with `measure_missing` the player moves that file to
+  the front of the queue and holds its start until the value is there, at most `measure_wait_ms`. Most songs are
+  measured in well under that. If the wait runs out, the track starts at `fallback_gain_db` and the measured
+  value is faded in over 2 s instead of jumping.
+- `AU_SCAN_URGENT` puts requests before everything else (newest first); `au_gain_cache_cancel_requests()` drops
+  the application's queued requests when the playlist changes; `au_gain_cache_pending()` reports progress.
+- `au_gain_scan_configure()` sets the number of worker threads (default 2) and an optional `on_cached`
+  callback, which runs on a worker thread. `au_gain_scan_stop()` stops them; they start again on demand.
+- `au_gain_cache_scan()` is the synchronous version for tools and batch jobs.
+
+The cache and the queue work without `au_initialize()`, survive `au_shutdown()`, are thread-safe, and paths are
+compared as exact strings (pass them the same way every time, e.g. always absolute).
 
 ### 7. Surround files and the output format
 By default the output uses the device's own channel count and sample rate. Files with more channels than the
@@ -310,6 +329,8 @@ au_shutdown();   // not from inside a callback; au_initialize() may be called ag
 - `test_loudness`: BS.1770 / EBU R128 measurement against reference signals, album gating, peaks, cancelling
 - `test_gain_cache`: the ReplayGain cache (store, persistence, file format, threads, get-or-scan, priority over
   tags, live updates)
+- `test_gain_scan`: the background measurement queue (priorities, de-duplication, albums, cancelling, workers)
+  and the player's `measure_missing` / `measure_wait_ms`
 - `test_metadata`: tags, track/disc numbers and ReplayGain/R128 parsing in several formats
 - `test_output`: captures the mixed output and checks gapless joins sample by sample, crossfade lengths,
   fades, volume ramps and live filter changes

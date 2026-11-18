@@ -129,6 +129,13 @@ extern "C" {
         double preamp_db;            // added to tagged gains, -15..+15 dB
         double fallback_gain_db;     // used for files without ReplayGain/R128 tags, -30..+15 dB (e.g. -6)
         bool prevent_clipping;       // lower the gain so the tagged peak does not exceed full scale
+        // Measure a starting track that has no value (no PlayAudioConfig.replaygain, no cache entry, no
+        // ReplayGain/R128 tags) with the background queue and store it in the ReplayGain cache
+        // (ffaudio_loudness.h). Off by default because it writes to the per-user cache file.
+        bool measure_missing;
+        // How long such a track waits for its measurement before it starts at fallback_gain_db; the value is
+        // then faded in over 2 s when it arrives. 0 = 500 ms, < 0 = do not wait. At most 10000.
+        int measure_wait_ms;
     } AuReplayGainConfig;
 
     //+-----------------------------------------------------+

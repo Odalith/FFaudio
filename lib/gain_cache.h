@@ -24,7 +24,14 @@
 // Thread-safe lookup used by the player (no-op before anything was cached)
 bool gain_cache_lookup(const char *path, AuReplayGainInfo *out);
 
+// Block until `path` is in the cache, the timeout passes or *abort becomes non-zero. true when cached.
+bool gain_cache_wait(const char *path, int timeout_ms, SDL_atomic_t *abort);
+
 // Implemented by the player: re-evaluate the gain of live tracks with this path (NULL = every track)
 void ff_gain_cache_changed(const char *path);
+
+// Implemented by the scan queue: measure `path` as soon as possible for a track that is starting
+// (not affected by au_gain_cache_cancel_requests())
+void gain_scan_request_for_player(const char *path);
 
 #endif //FFAUDIO_GAIN_CACHE_H

@@ -104,6 +104,55 @@ extern "C" {
     // Avoid calling it from player callbacks: they run on the player's control thread, which would be held up.
     DLL_EXPORT int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGainInfo *out);
 
+    //+-----------------------------------------------------+
+    //| Background measurement queue                        |
+    //+-----------------------------------------------------+
+    // ffaudio measures requested files on its own low-priority worker threads and stores the results in the
+    // ReplayGain cache; queued and playing tracks pick them up. Nothing blocks the caller, and requests for
+    // paths that are cached, queued or being measured are skipped, so it is fine to re-send a playlist window
+    // whenever the position changes:
+    //
+    //   on_track_started: au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
+    //
+    // With AuReplayGainConfig.measure_missing the player also measures a starting track that has no value at
+    // all, and holds its start for up to measure_wait_ms. Works without au_initialize(); paths are only read.
+
+    typedef enum AU_SCAN_PRIORITY {
+        AU_SCAN_PREFETCH = 0,     // in request order, after urgent work
+        AU_SCAN_URGENT,           // before everything else, newest first (e.g. a track the user picked)
+    } AU_SCAN_PRIORITY;
+
+    // A requested file was measured and stored (result AU_OK, rg set), could not be measured (AU_ERR_FILE, ...,
+    // rg NULL) or was cancelled while being measured (AU_ERR_CANCELLED). Runs on a worker thread: keep it short.
+    typedef void (*NotifyOfGainCached)(const char *path, int result, const AuReplayGainInfo *rg, void *user);
+
+    typedef struct AuGainScanConfig {
+        int threads;                  // worker threads, 1..16; 0 = default (2, or 1 on single-core machines)
+        bool skip_true_peak;          // faster; the sample peak is stored as the peak
+        NotifyOfGainCached on_cached; // optional
+        void *user;
+    } AuGainScanConfig;
+
+    // Optional; NULL restores the defaults. Can be called at any time.
+    DLL_EXPORT int au_gain_scan_configure(const AuGainScanConfig *config);
+
+    // Measure these files (track values). Returns the number of paths queued (skipped ones not counted).
+    DLL_EXPORT int au_gain_cache_request(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
+
+    // Measure these files as one album: each gets its track values and the album values. Skipped only when
+    // every path already has album values in the cache. Returns the number of paths queued.
+    DLL_EXPORT int au_gain_cache_request_album(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
+
+    // Drop every queued request and stop the measurement in progress (the player's own requests stay)
+    DLL_EXPORT void au_gain_cache_cancel_requests(void);
+
+    // Paths queued or being measured
+    DLL_EXPORT int au_gain_cache_pending(void);
+
+    // Cancel everything (including the player's requests) and stop the worker threads; they start again on
+    // the next request. Call it before unloading the library, or let the process exit.
+    DLL_EXPORT void au_gain_scan_stop(void);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif
