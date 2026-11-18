@@ -217,9 +217,25 @@ It runs at a few hundred times real time per thread; use one scanner per thread 
 `tests/loudness_scan.c` is a small command-line example (`loudness_scan [-t] [-c] files...`).
 
 #### ReplayGain cache
-Instead of passing `PlayAudioConfig.replaygain` every time, put the values in ffaudio's process-wide cache: a
-plain key-value store from path to `AuReplayGainInfo` (in memory only; ffaudio never tracks or reads the files
-for it). When a track starts, its path is looked up and a cached entry is used instead of the file's tags
+Instead of passing `PlayAudioConfig.replaygain` every time, put the values in ffaudio's ReplayGain cache: a
+persistent key-value store from path to `AuReplayGainInfo`, kept per user and shared by every program that uses
+ffaudio, so values measured once are there in every later run.
+
+| Platform | File |
+|---|---|
+| Linux / BSD | `$XDG_DATA_HOME/ffaudio/replaygain.cache` (default `~/.local/share/ffaudio/replaygain.cache`) |
+| macOS | `~/Library/Application Support/ffaudio/replaygain.cache` |
+| Windows | `%LOCALAPPDATA%\ffaudio\replaygain.cache` |
+| Android, iOS, others | `SDL_GetPrefPath("ffaudio", "ffaudio")` + `replaygain.cache` |
+
+`au_gain_cache_set_file()` selects another file (or `""` for memory only). Every change is appended to the file
+right away as one line, so nothing is lost if the program crashes and several programs can use the file at the
+same time; it is read on first use, compacted when it has grown with superseded lines, and
+`au_gain_cache_reload()` picks up changes from other programs. The folder is only created on the first write.
+ffaudio never tracks, checks or modifies the media files: paths are plain strings, and keeping them current is up
+to the application (`au_gain_cache_foreach()` + `au_gain_cache_remove()` to drop entries for deleted files).
+
+When a track starts, its path is looked up and a cached entry is used instead of the file's tags
 (order: `PlayAudioConfig.replaygain` > cache > tags). Setting or removing an entry also updates tracks that are
 already queued or playing, so a value may arrive after the track was queued:
 ```c
@@ -237,7 +253,7 @@ au_gain_cache_scan(path, NULL, NULL);         // measure + au_gain_cache_set(); 
 scan (well under a second for most songs). Album gains can be stored too: scan the album with one
 `AuLoudnessScanner` and `au_gain_cache_set()` each track with `au_loudness_to_replaygain(&track, &album)`.
 The cache works without `au_initialize()`, survives `au_shutdown()`, is thread-safe, and paths are compared as
-exact strings. `au_gain_cache_foreach()` lists the entries so you can persist them in your own format.
+exact strings (pass them the same way every time, e.g. always absolute).
 
 ### 7. Surround files and the output format
 By default the output uses the device's own channel count and sample rate. Files with more channels than the
@@ -292,7 +308,8 @@ au_shutdown();   // not from inside a callback; au_initialize() may be called ag
 - `test_stress`: random API sequences, a playlist driven entirely from callbacks, rapid track replacement
   (`FFAUDIO_STRESS_SEED`, `FFAUDIO_STRESS_ITERS`)
 - `test_loudness`: BS.1770 / EBU R128 measurement against reference signals, album gating, peaks, cancelling
-- `test_gain_cache`: the ReplayGain cache (store, threads, get-or-scan, priority over tags, live updates)
+- `test_gain_cache`: the ReplayGain cache (store, persistence, file format, threads, get-or-scan, priority over
+  tags, live updates)
 - `test_metadata`: tags, track/disc numbers and ReplayGain/R128 parsing in several formats
 - `test_output`: captures the mixed output and checks gapless joins sample by sample, crossfade lengths,
   fades, volume ramps and live filter changes

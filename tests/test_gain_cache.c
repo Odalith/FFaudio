@@ -4,6 +4,7 @@
 #include "test_common.h"
 #include "../lib/ffaudio_loudness.h"
 #include <math.h>
+#include <locale.h>
 
 static AuReplayGainInfo track_gain(const double db) {
     AuReplayGainInfo rg;
@@ -274,8 +275,180 @@ static void test_updates_during_shutdown(void) {
     au_gain_cache_clear();
 }
 
+/* ---------- persistence ---------- */
+
+static char cache_file[1100];
+
+static int count_lines(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    int n = 0, c;
+    while ((c = fgetc(f)) != EOF) if (c == '\n') n++;
+    fclose(f);
+    return n;
+}
+
+static void append_text(const char *path, const char *text) {
+    FILE *f = fopen(path, "ab");
+    REQUIRE(f);
+    fputs(text, f);
+    fclose(f);
+}
+
+static void use_fresh_file(void) {
+    remove(cache_file);
+    REQUIRE(au_gain_cache_set_file(cache_file) == AU_OK);
+    CHECK(au_gain_cache_count() == 0);
+}
+
+static void test_persistence(void) {
+    use_fresh_file();
+    AuReplayGainInfo full = { .has_track_gain = true, .track_gain_db = -7.25, .has_track_peak = true,
+                              .track_peak = 0.987654, .has_album_gain = true, .album_gain_db = -6.5,
+                              .has_album_peak = true, .album_peak = 1.0123, .from_r128 = true };
+    AuReplayGainInfo b = track_gain(-1), c = track_gain(3.5);
+    CHECK(au_gain_cache_set("/m/a.flac", &full) == AU_OK);
+    CHECK(au_gain_cache_set("/m/b.flac", &b) == AU_OK);
+    CHECK(au_gain_cache_set("/m/c.flac", &c) == AU_OK);
+    CHECK(au_gain_cache_remove("/m/b.flac"));
+    c.track_gain_db = 4.0;
+    CHECK(au_gain_cache_set("/m/c.flac", &c) == AU_OK);
+
+    char path[1100];
+    CHECK(au_gain_cache_get_file(path, sizeof(path)) == (int)strlen(cache_file));
+    CHECK(strcmp(path, cache_file) == 0);
+    CHECK(au_gain_cache_get_file(path, 4) == AU_ERR_INVALID_ARGUMENT);
+
+    // "Next run": load the file again
+    CHECK(au_gain_cache_reload() == AU_OK);
+    CHECK(au_gain_cache_count() == 2);
+    AuReplayGainInfo out;
+    CHECK(au_gain_cache_get("/m/a.flac", &out));
+    CHECK(out.has_track_gain && out.track_gain_db == -7.25);
+    CHECK(out.has_track_peak && fabs(out.track_peak - 0.987654) < 1e-9);
+    CHECK(out.has_album_gain && out.album_gain_db == -6.5);
+    CHECK(out.has_album_peak && fabs(out.album_peak - 1.0123) < 1e-9);
+    CHECK(out.from_r128);
+    CHECK(!au_gain_cache_get("/m/b.flac", NULL));
+    CHECK(au_gain_cache_get("/m/c.flac", &out) && out.track_gain_db == 4.0 && !out.has_track_peak);
+
+    // Clearing is persistent too
+    au_gain_cache_clear();
+    CHECK(au_gain_cache_reload() == AU_OK);
+    CHECK(au_gain_cache_count() == 0);
+}
+
+static void test_tricky_paths(void) {
+    use_fresh_file();
+    const char *paths[] = {
+        "/music/with\ttab.flac", "/music/with\nnewline.flac", "C:\\Music\\Windows path.flac",
+        "/music/Bj\xc3\xb6rk/J\xc3\xb3ga.flac", "/music/back\\slash\\n.flac", "relative/path.mp3", "\\", " ",
+    };
+    const int n = (int)(sizeof(paths) / sizeof(paths[0]));
+    for (int i = 0; i < n; i++) {
+        const AuReplayGainInfo rg = track_gain(-i);
+        CHECK(au_gain_cache_set(paths[i], &rg) == AU_OK);
+    }
+    CHECK(au_gain_cache_reload() == AU_OK);
+    CHECK(au_gain_cache_count() == n);
+    for (int i = 0; i < n; i++) {
+        AuReplayGainInfo out;
+        if (!au_gain_cache_get(paths[i], &out) || out.track_gain_db != -i) {
+            fprintf(stderr, "path %d did not survive the round trip\n", i);
+            CHECK(false);
+        }
+    }
+}
+
+static void test_compaction(void) {
+    use_fresh_file();
+    for (int i = 0; i < 1000; i++) {
+        const AuReplayGainInfo rg = track_gain(-i * 0.01);
+        au_gain_cache_set("/m/again.flac", &rg);
+    }
+    CHECK(count_lines(cache_file) == 1001);
+    CHECK(au_gain_cache_reload() == AU_OK);         // loading notices the superseded lines and compacts
+    CHECK(count_lines(cache_file) == 2);            // header + one entry
+    AuReplayGainInfo out;
+    CHECK(au_gain_cache_get("/m/again.flac", &out) && fabs(out.track_gain_db + 9.99) < 1e-9);
+}
+
+static void test_damaged_and_foreign_lines(void) {
+    use_fresh_file();
+    const AuReplayGainInfo rg = track_gain(-2);
+    CHECK(au_gain_cache_set("/m/ok.flac", &rg) == AU_OK);
+    append_text(cache_file, "garbage line\nS\tnot-a-number\t-\t-\t-\t0\t/m/bad.flac\nS\t-1\nR\n\n");
+    // Another process appended an entry
+    append_text(cache_file, "S\t-3.500000\t0.900000\t-\t-\t0\t/m/other process.flac\n");
+    CHECK(au_gain_cache_reload() == AU_OK);
+    CHECK(au_gain_cache_count() == 2);
+    AuReplayGainInfo out;
+    CHECK(au_gain_cache_get("/m/ok.flac", &out) && out.track_gain_db == -2);
+    CHECK(au_gain_cache_get("/m/other process.flac", &out) && out.track_gain_db == -3.5 && out.track_peak == 0.9);
+    CHECK(!au_gain_cache_get("/m/bad.flac", NULL));
+
+    // A file that is not a cache file is not used
+    remove(cache_file);
+    append_text(cache_file, "S\t-3.5\t-\t-\t-\t0\t/m/x.flac\n");
+    CHECK(au_gain_cache_reload() == AU_OK);
+    CHECK(au_gain_cache_count() == 0);
+}
+
+static void test_locale(void) {
+    const char *locales[] = { "de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8" };
+    const char *set = NULL;
+    for (size_t i = 0; i < sizeof(locales) / sizeof(locales[0]) && !set; i++)
+        set = setlocale(LC_NUMERIC, locales[i]);
+    if (!set) { printf("   (no comma-decimal locale installed, skipped)\n"); return; }
+    use_fresh_file();
+    const AuReplayGainInfo rg = track_gain(-6.5);
+    CHECK(au_gain_cache_set("/m/locale.flac", &rg) == AU_OK);
+    CHECK(au_gain_cache_reload() == AU_OK);
+    AuReplayGainInfo out;
+    CHECK(au_gain_cache_get("/m/locale.flac", &out) && out.track_gain_db == -6.5);
+    setlocale(LC_NUMERIC, "C");
+}
+
+static void test_memory_only_and_default_location(void) {
+    CHECK(au_gain_cache_set_file("") == AU_OK);
+    char path[1100] = "x";
+    CHECK(au_gain_cache_get_file(path, sizeof(path)) == 0 && path[0] == '\0');
+    const AuReplayGainInfo rg = track_gain(-1);
+    CHECK(au_gain_cache_set("/m/memory.flac", &rg) == AU_OK);
+    CHECK(au_gain_cache_reload() == AU_OK);
+    CHECK(au_gain_cache_count() == 0);              // nothing was written anywhere
+
+    CHECK(au_gain_cache_set_file(NULL) == AU_OK);
+    CHECK(au_gain_cache_get_file(path, sizeof(path)) > 0);
+    printf("   default location: %s\n", path);
+    const char *suffix = "ffaudio/replaygain.cache";
+    CHECK(strlen(path) > strlen(suffix) && strcmp(path + strlen(path) - strlen(suffix), suffix) == 0);
+
+    // Only write to the default location when CTest pointed it into the build tree
+    const char *xdg = getenv("XDG_DATA_HOME");
+    if (xdg && strstr(xdg, "xdg-data")) {
+        CHECK(strncmp(path, xdg, strlen(xdg)) == 0);
+        remove(path);
+        CHECK(au_gain_cache_set("/m/default.flac", &rg) == AU_OK);
+        CHECK(count_lines(path) == 2);              // directory created on the first write
+        au_gain_cache_clear();
+    }
+    REQUIRE(au_gain_cache_set_file(cache_file) == AU_OK);
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
+    // Never use the real per-user cache from the tests
+    snprintf(cache_file, sizeof(cache_file), "%s/test_gain_cache.cache", tc_fixture_dir);
+    remove(cache_file);
+    REQUIRE(au_gain_cache_set_file(cache_file) == AU_OK);
+
+    RUN_TEST(test_persistence);
+    RUN_TEST(test_tricky_paths);
+    RUN_TEST(test_compaction);
+    RUN_TEST(test_damaged_and_foreign_lines);
+    RUN_TEST(test_locale);
+    RUN_TEST(test_memory_only_and_default_location);
     RUN_TEST(test_basics);
     RUN_TEST(test_foreach);
     RUN_TEST(test_many_entries);

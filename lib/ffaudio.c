@@ -38,6 +38,7 @@
 #include "track.h"
 #include "metadata.h"
 #include "gain_cache.h"
+#include "once.h"
 
 
 #define CONTROL_TICK_MS 5
@@ -79,16 +80,16 @@ static bool on_control_thread(const AudioPlayer *ap) {
 
 // Held while audio_player is cleared in au_shutdown() and while the ReplayGain cache (usable from any thread,
 // at any time) posts to the player, so a cache update racing with au_shutdown() never touches a freed player.
-static void *lifecycle_mutex_ptr = NULL;
+static SDL_mutex *lifecycle_mutex_ptr = NULL;
+static FfOnce lifecycle_once = FF_ONCE_INIT;
+
+static void create_lifecycle_mutex(void) {
+    lifecycle_mutex_ptr = SDL_CreateMutex();
+}
 
 static SDL_mutex *lifecycle_mutex(void) {
-    SDL_mutex *m = SDL_AtomicGetPtr(&lifecycle_mutex_ptr);
-    if (m) return m;
-    SDL_mutex *created = SDL_CreateMutex();
-    if (!created) return NULL;
-    if (!SDL_AtomicCASPtr(&lifecycle_mutex_ptr, NULL, created))
-        SDL_DestroyMutex(created);
-    return SDL_AtomicGetPtr(&lifecycle_mutex_ptr);
+    ff_once(&lifecycle_once, create_lifecycle_mutex);
+    return lifecycle_mutex_ptr;
 }
 
 void ff_gain_cache_changed(const char *path) {
