@@ -216,6 +216,29 @@ callback in `AuLoudnessConfig` reports the position and can cancel a scan; `skip
 It runs at a few hundred times real time per thread; use one scanner per thread to scan a library in parallel.
 `tests/loudness_scan.c` is a small command-line example (`loudness_scan [-t] [-c] files...`).
 
+#### ReplayGain cache
+Instead of passing `PlayAudioConfig.replaygain` every time, put the values in ffaudio's process-wide cache: a
+plain key-value store from path to `AuReplayGainInfo` (in memory only; ffaudio never tracks or reads the files
+for it). When a track starts, its path is looked up and a cached entry is used instead of the file's tags
+(order: `PlayAudioConfig.replaygain` > cache > tags). Setting or removing an entry also updates tracks that are
+already queued or playing, so a value may arrive after the track was queued:
+```c
+static void on_prepare_next(int32_t current, void *user) {
+    const char *path = my_playlist_next();
+    au_set_next(path, NULL);                  // queue right away
+    if (!au_gain_cache_get(path, NULL))
+        my_worker_queue_scan(path);           // scanning blocks, so not on the callback thread
+}
+
+// worker thread
+au_gain_cache_scan(path, NULL, NULL);         // measure + au_gain_cache_set(); the queued track picks it up
+```
+`on_prepare_next` fires 10 s before the end of the current track by default, which leaves plenty of time for the
+scan (well under a second for most songs). Album gains can be stored too: scan the album with one
+`AuLoudnessScanner` and `au_gain_cache_set()` each track with `au_loudness_to_replaygain(&track, &album)`.
+The cache works without `au_initialize()`, survives `au_shutdown()`, is thread-safe, and paths are compared as
+exact strings. `au_gain_cache_foreach()` lists the entries so you can persist them in your own format.
+
 ### 7. Surround files and the output format
 By default the output uses the device's own channel count and sample rate. Files with more channels than the
 output are mixed down; files with fewer are spread onto the matching speakers.
@@ -269,6 +292,7 @@ au_shutdown();   // not from inside a callback; au_initialize() may be called ag
 - `test_stress`: random API sequences, a playlist driven entirely from callbacks, rapid track replacement
   (`FFAUDIO_STRESS_SEED`, `FFAUDIO_STRESS_ITERS`)
 - `test_loudness`: BS.1770 / EBU R128 measurement against reference signals, album gating, peaks, cancelling
+- `test_gain_cache`: the ReplayGain cache (store, threads, get-or-scan, priority over tags, live updates)
 - `test_metadata`: tags, track/disc numbers and ReplayGain/R128 parsing in several formats
 - `test_output`: captures the mixed output and checks gapless joins sample by sample, crossfade lengths,
   fades, volume ramps and live filter changes

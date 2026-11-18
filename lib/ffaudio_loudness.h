@@ -97,6 +97,13 @@ extern "C" {
     // (the sample peaks when true peak was skipped). Silent results give no gain.
     DLL_EXPORT AuReplayGainInfo au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album);
 
+    // The ReplayGain cache entry for `path` (see au_gain_cache_set() in ffaudio.h): returned straight away when
+    // cached, otherwise the file is measured (track values only; it blocks for the scan, typically well under a
+    // second per song) and the result is stored, which also updates the track if it is already queued or playing.
+    // out may be NULL. Returns AU_OK or an error from au_loudness_analyze(); nothing is stored on error.
+    // Avoid calling it from player callbacks: they run on the player's control thread, which would be held up.
+    DLL_EXPORT int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGainInfo *out);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

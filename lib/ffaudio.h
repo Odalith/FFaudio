@@ -291,6 +291,42 @@ extern "C" {
     DLL_EXPORT int au_get_track_gain_db(int32_t handle, double *out_gain_db);
 
     //+-----------------------------------------------------+
+    //| ReplayGain cache                                    |
+    //+-----------------------------------------------------+
+    // A process-wide store of ReplayGain values by path, for values your application generated (see
+    // ffaudio_loudness.h) or keeps in its own library. Works without au_initialize() and survives au_shutdown().
+    //
+    // When a track starts, ffaudio looks up its path (exactly as passed to au_play_audio()/au_set_next()) and
+    // uses a cached entry instead of the file's tags. Order: PlayAudioConfig.replaygain > cache > file tags.
+    // Setting or removing an entry also updates tracks that are already queued or playing (with a short ramp),
+    // so values can arrive after the track was queued:
+    //
+    //   on_prepare_next: path = next song; au_set_next(path, NULL);
+    //                    if (!au_gain_cache_get(path, NULL)) start a scan in a worker thread
+    //   worker thread:   au_gain_cache_scan(path, NULL, NULL);   // measures and stores; applied right away
+    //
+    // Paths are compared as plain strings (case-sensitive, no normalization); ffaudio never looks at or tracks
+    // the files. All functions are thread-safe and may be called from callbacks.
+
+    // Store (or replace) the values for a path. Returns AU_ERR_INVALID_ARGUMENT for a NULL/empty path or rg.
+    DLL_EXPORT int au_gain_cache_set(const char *path, const AuReplayGainInfo *rg);
+
+    // true and *out filled (out may be NULL) when the path is cached
+    DLL_EXPORT bool au_gain_cache_get(const char *path, AuReplayGainInfo *out);
+
+    // true when an entry was removed
+    DLL_EXPORT bool au_gain_cache_remove(const char *path);
+
+    DLL_EXPORT void au_gain_cache_clear(void);
+
+    DLL_EXPORT int au_gain_cache_count(void);
+
+    // Visit every entry (a snapshot, so the callback may call au_gain_cache_* functions). Return false from the
+    // callback to stop. Use it to save the cache in your own format. Returns the number of entries visited.
+    typedef bool (*AuGainCacheVisitor)(const char *path, const AuReplayGainInfo *rg, void *user);
+    DLL_EXPORT int au_gain_cache_foreach(AuGainCacheVisitor visitor, void *user);
+
+    //+-----------------------------------------------------+
     //| Metadata                                            |
     //+-----------------------------------------------------+
 

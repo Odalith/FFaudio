@@ -26,6 +26,7 @@
 
 #include "track.h"
 #include "metadata.h"
+#include "gain_cache.h"
 #include <math.h>
 #include "decoder_utils.h"
 #include "filtergraph.h"
@@ -223,14 +224,20 @@ void track_update_gain(TrackState *t) {
     const AuReplayGainConfig cfg = ap->replaygain;
     SDL_UnlockMutex(ap->format_mutex);
 
+    // Values come from, in order: PlayAudioConfig.replaygain, the ReplayGain cache, the file's tags
     SDL_LockMutex(t->seek_mutex);
     const bool known = t->info || t->has_replaygain_override;
+    const bool has_override = t->has_replaygain_override;
     AuReplayGainInfo rg;
-    if (t->has_replaygain_override) rg = t->replaygain_override;
+    if (has_override) rg = t->replaygain_override;
     else rg = au_media_replaygain(t->info);
     SDL_UnlockMutex(t->seek_mutex);
 
     if (!known) return; // not open yet: the read thread calls this again once the tags are known
+    if (!has_override) {
+        AuReplayGainInfo cached;
+        if (gain_cache_lookup(t->filename, &cached)) rg = cached;
+    }
     const double db = replaygain_gain_db(&cfg, &rg);
     SDL_AtomicSet(&t->gain_mb, (int)lrint(db * 100.0));
 }
