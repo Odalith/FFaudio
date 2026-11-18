@@ -22,12 +22,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The Ubuntu mirror is sometimes very slow (~100 kB/s for the ~107 MB of packages, 15+ minutes),
+      # so the downloaded .deb files are cached. The month in the key picks up package updates regularly.
+      - name: Cache key
+        id: apt-key
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-cache
+          key: apt-ubuntu-24.04-${{ steps.apt-key.outputs.month }}-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: |
+            apt-ubuntu-24.04-${{ steps.apt-key.outputs.month }}-
+            apt-ubuntu-24.04-
+
+      # cmake and pkg-config come with the runner image
       - name: Install dependencies
         run: |
+          mkdir -p ~/apt-cache/partial
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build pkg-config ffmpeg libsdl2-dev \
+          sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-cache" \
+            ninja-build ffmpeg libsdl2-dev \
             libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev libswresample-dev
+          # apt leaves root-owned files behind; the cache action needs to read them
+          sudo rm -f ~/apt-cache/lock
+          sudo chown -R "$USER" ~/apt-cache
 
       - name: Configure
         run: >
