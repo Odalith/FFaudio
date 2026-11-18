@@ -20,93 +20,6 @@
 
 #include "filtergraph.h"
 
-void add_to_filter_chain_end(AudioPlayer *ap, const char *filter_name) {
-    if (ap->track_filters && strlen(ap->track_filters) > 0) {
-
-        ap->track_filters = av_asprintf("%s,%s", ap->track_filters, filter_name);
-    } else {
-        ap->track_filters = av_strdup(filter_name);
-    }
-}
-
-void add_to_filter_chain_start(AudioPlayer *ap, const char *filter_name) {
-    if (ap->track_filters && strlen(ap->track_filters) > 0) {
-
-        ap->track_filters = av_asprintf("%s,%s", filter_name, ap->track_filters);
-    } else {
-        ap->track_filters = av_strdup(filter_name);
-    }
-}
-
-void clear_filter_chain(AudioPlayer *ap) {
-    av_freep(&ap->track_filters);
-}
-
-
-
-static const char *const bands[EQ_BAND_COUNT] = {
-    "f=31.25 w=22.1",
-    "f=62.5 w=44.2",
-    "f=125 w=88.4",
-    "f=250 w=176.8",
-    "f=500 w=353.6",
-    "f=1000 w=707.1",
-    "f=2000 w=1414.2",
-    "f=4000 w=2828.4",
-    "f=8000 w=5656.9",
-    "f=16000 w=11313.7",
-};
-
-void update_anequalizer_array(AudioPlayer *ap, const EqualizerConfig* params) {
-    if (!ap || params == NULL) {
-        return;
-    }
-
-    ap->anequalizer_values[0] = params->one_31Hz;
-    ap->anequalizer_values[1] = params->two_63Hz;
-    ap->anequalizer_values[2] = params->three_125Hz;
-    ap->anequalizer_values[3] = params->four_250Hz;
-    ap->anequalizer_values[4] = params->five_500Hz;
-    ap->anequalizer_values[5] = params->six_1000Hz;
-    ap->anequalizer_values[6] = params->seven_2000Hz;
-    ap->anequalizer_values[7] = params->eight_4000Hz;
-    ap->anequalizer_values[8] = params->nine_8000Hz;
-    ap->anequalizer_values[9] = params->ten_16000Hz;
-}
-
-void update_anequalizer_str(AudioPlayer *ap, const int16_t channels) {
-
-    bool is_first_set = false;
-    char *filter = NULL;
-    for (int i = 0; i < channels; i++) {
-        for (int j = 0; j < EQ_BAND_COUNT; j++) {
-            if (ap->anequalizer_values[j] == 0) {
-                continue;
-            }
-
-            if (!is_first_set) {
-                filter = av_asprintf("anequalizer=c%d %s g=%d", i, bands[j], ap->anequalizer_values[j]);
-                is_first_set = true;
-                continue;
-            }
-
-            char* temp = filter;
-            filter = av_asprintf("%s|c%d %s g=%d", filter, i, bands[j], ap->anequalizer_values[j]);
-            av_freep(&temp);
-        }
-
-    }
-
-    if (ap->anequalizer_filter) {
-        av_freep(&ap->anequalizer_filter);
-        ap->anequalizer_filter = NULL;
-    }
-
-
-    ap->anequalizer_filter = filter;
-}
-
-
 int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
                                  AVFilterContext *source_ctx, AVFilterContext *sink_ctx) {
     int ret;
@@ -154,7 +67,7 @@ int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
     return ret;
 }
 
-int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const char *track_filters, const bool force_output_format) {
+int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const bool force_output_format) {
     if (!ap || !is || !ap->audio_target || ap->audio_target->fmt == -1) return -1;
 
     const enum AVSampleFormat sample_fmts[] = { ap->audio_target->fmt, AV_SAMPLE_FMT_NONE };
@@ -165,24 +78,9 @@ int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const char *t
     AVBPrint bp;
     char asrc_args[256];
     const char* audio_filters = NULL;
-    int ret;
 
-    if (is->filtergraph_override) {
-        audio_filters = av_strdup(is->filtergraph_override);
-    }
-    else {
-        if (ap->anequalizer_filter) {
-            if (track_filters) {
-                audio_filters = av_asprintf("%s,%s", ap->anequalizer_filter, track_filters);
-            }
-            else {
-                audio_filters = av_strdup(ap->anequalizer_filter);
-            }
-
-        }
-        else if (track_filters) {
-            audio_filters = av_strdup(track_filters);
-        }
+    if (is->filtergraph_str) {
+        audio_filters = av_strdup(is->filtergraph_str);
     }
 
     avfilter_graph_free(&is->agraph);
@@ -204,10 +102,12 @@ int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const char *t
 
     av_channel_layout_describe_bprint(&is->audio_filter_src.ch_layout, &bp);
 
-    ret = snprintf(asrc_args, sizeof(asrc_args),
-                   "sample_rate=%d:sample_fmt=%s:time_base=%d/%d:channel_layout=%s",
-                   is->audio_filter_src.freq, av_get_sample_fmt_name(is->audio_filter_src.fmt),
-                   1, is->audio_filter_src.freq, bp.str);
+    int ret = snprintf(asrc_args, sizeof(asrc_args),
+                       "sample_rate=%d:sample_fmt=%s:time_base=%d/%d:channel_layout=%s",
+                       is->audio_filter_src.freq, av_get_sample_fmt_name(is->audio_filter_src.fmt),
+                       1, is->audio_filter_src.freq, bp.str);
+
+    if (ret < 0) goto end;
 
     ret = avfilter_graph_create_filter(&audio_source_filter,
                                        avfilter_get_by_name("abuffer"), "ffaudio_abuffer",

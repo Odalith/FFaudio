@@ -122,11 +122,24 @@ static void play_next(void) {
     const PlayAudioConfig config = {
         .skip_seconds = 0.0,
         .play_duration = 0.0,
-        .crossfeed_setting = NULL,
-        .loudnorm_settings = NULL
+        .av_filtergraph = "bs2b=profile=default",
     };
 
     au_play_audio(song, &config);
+
+    //sleep(10);
+
+    const PlayAudioConfig config2 = {
+        .skip_seconds = 0.0,
+        .play_duration = 0.0,
+        .av_filtergraph = NULL,
+    };
+
+    //au_set_next(queue_files[++queue_pos], &config2);
+
+    //sleep(10);
+
+    //au_skip_to_next();//This blocked
     ++queue_pos;
 }
 
@@ -142,7 +155,21 @@ static void eof_callback(bool is_eof_from_skip, bool is_from_error, int32_t hand
         return;
     }
 
-    play_next();
+    //play_next();
+}
+
+static void play_next_callback() {
+    if (queue_pos >= queue_count || (PLAY_COUNT > 0 && queue_pos >= (size_t)PLAY_COUNT)) {
+        printf("Done\n");
+        free_queue();
+        exit(0);
+    }
+
+    const char *song = queue_files[queue_pos];
+    printf("%zu Queuing %s\n", queue_pos + 1, song);
+
+    au_set_next(queue_files[queue_pos], NULL);
+    ++queue_pos;
 }
 
 static void restart_callback(const double position, const bool is_from_looping, const int32_t remaining_loop_count) {
@@ -176,13 +203,13 @@ int main(int argc, char **argv) {
     // Setup
     const InitializeConfig config = {
         .app_name = "Test App",
-        .initial_volume = 50,
+        .initial_volume = 55,
         .initial_loop_count = 0,
         .on_log = error_callback,
         .on_eof = eof_callback,
         .on_restart = restart_callback,
         .on_duration_update = NULL,
-        .on_prepare_next = NULL,
+        .on_prepare_next = play_next_callback,
     };
 
     au_initialize(&config);
@@ -197,9 +224,22 @@ int main(int argc, char **argv) {
         }
     }
 
+    const AudioDeviceConfig AudConfig1 = {
+        .audio_device = "Navi 10 HDMI Audio Digital Stereo (HDMI 3)",
+        .audio_device_index = 3
+    };
+
+    const AudioDeviceConfig AudConfig2 = {
+        .audio_device = "Bose QC Ultra Headphones",
+        .audio_device_index = 2
+    };
+
+    //au_configure_audio_device(&AudConfig1);
+
     au_configure_audio_device(NULL);
 
-    const EqualizerConfig params = {
+    //Todo error when custom device and PC sleep?
+    /*const EqualizerConfig params = {
         .one_31Hz = 2.0,
         .two_63Hz = 1.5,
         .three_125Hz = 1,
@@ -212,9 +252,25 @@ int main(int argc, char **argv) {
         .ten_16000Hz = 3
     };
 
-    au_set_equalizer(params);
+    au_set_equalizer(params);*/
 
     play_next();
+
+
+    /*int32_t counter = 0;
+    while (1) {
+        sleep(5);
+
+        counter++;
+        if (counter % 2 == 0) {
+            au_configure_audio_device(&AudConfig2);//Todo breaks when this device is removed, should default to default
+        }
+        else {
+            au_configure_audio_device(&AudConfig1);
+        }
+    }*/
+
+
 
     if (SKIP_AFTER_SECONDS > 0) {
         for (int i = 0; i < PLAY_COUNT; ++i) {

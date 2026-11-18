@@ -33,5 +33,6 @@ typedef void (*NotifyOfEndOfFile)(bool is_eof_from_skip, bool is_from_error, int
 typedef void (*NotifyOfRestart)(double position, bool is_from_looping, int32_t remaining_loop_count);
 typedef void (*NotifyOfDurationUpdate)(double new_duration);
 typedef void (*NotifyOfPrepareNext)();
+typedef void (*NotifyOfAudioDeviceUpdate)(int32_t channel_count, int32_t sample_rate, int32_t format);
 
 #endif //FFAUDIO_DELAGATES_H

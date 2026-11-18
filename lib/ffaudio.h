@@ -51,42 +51,22 @@ extern "C" {
         int audio_device_index;      // Index in enumerated list; See get_audio_devices()
     } AudioDeviceConfig;
 
-    // Values can be positive (amplification) or negative (attenuation). Measured in Decibels
-    typedef struct EqualizerConfig {
-        double one_31Hz;
-        double two_63Hz;
-        double three_125Hz;
-        double four_250Hz;
-        double five_500Hz;
-        double six_1000Hz;
-        double seven_2000Hz;
-        double eight_4000Hz;
-        double nine_8000Hz;
-        double ten_16000Hz;
-    } EqualizerConfig;
-
     typedef struct PlayAudioConfig {
         // Optional; Seek this many seconds before starting playback. <= 0 == plays from the start
         double skip_seconds;
         // Optional; How many seconds to play audio before quiting. <= 0 == plays to the end
         double play_duration;
-        // Optional; NULL to disable. Add loudness normalization filter.
-        // Ex: "I=-16:TP=-1.5:LRA=11:measured_I=-8.9:measured_LRA=5.2:measured_TP=1.1:measured_thresh=-19.1:offset=-0.8"
-        const char* loudnorm_settings;
-        // Optional; NULL to disable. Add crossfeed filter. Ex: "0.5"
-        const char* crossfeed_setting;
         // Optional; NULL to disable.
         // Used to insert your own audio filtergraph between the source `abuffer` and the `abuffersink`.
-        // Setting this to anything will override any `loudnorm`,`crossfeed`, or `equalizer` values. See filtergraph.c
         //
         // Note that `abuffersink` will always resample to the preferred format of the current audio device, so
         // something like "aresample=44100, aformat=sample_fmts=s16:channel_layouts=stereo" would be pointless.
         //
-        // Note 2, A new filtergraph is created for each call to au_play_audio() (or on_prepare_next),
+        // Note 2, A new filtergraph is created for each call to au_play_audio()
         // effectively setting this back to NULL.
         //
         // Filters can be found here https://ffmpeg.org/ffmpeg-filters.html
-        const char* av_filtergraph_override;
+        const char* av_filtergraph;
         //todo seek % and loop count?
     } PlayAudioConfig;
 
@@ -102,6 +82,12 @@ extern "C" {
     DLL_EXPORT void au_play_audio(const char *filename, const PlayAudioConfig* config);
 
     DLL_EXPORT void au_stop_audio();
+
+    DLL_EXPORT void au_set_next(const char *filename, const PlayAudioConfig* config);
+
+    DLL_EXPORT void au_skip_to_next();
+
+    DLL_EXPORT void au_clear_next();
 
     DLL_EXPORT void au_pause_audio(const bool value);
 
@@ -131,8 +117,7 @@ extern "C" {
     //List the user's audio devices
     DLL_EXPORT int au_get_audio_devices(int *out_total, char ***out_devices);
 
-    //Set or update equalizer settings; Persists through tracks
-    DLL_EXPORT bool au_set_equalizer(const EqualizerConfig params);
+    //Todo add au_update_filtergraph()
 
 #ifdef __cplusplus
 } // extern "C"

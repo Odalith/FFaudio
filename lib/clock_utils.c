@@ -21,7 +21,7 @@
 #include "clock_utils.h"
 
 
-double get_clock(Clock *c)
+double get_clock(const Clock *c)
 {
     if (*c->queue_serial != c->serial)
         return NAN;
@@ -33,7 +33,7 @@ double get_clock(Clock *c)
     }
 }
 
-void set_clock_at(Clock *c, double pts, int serial, double time)
+void set_clock_at(Clock *c, const double pts, const int serial, const double time)
 {
     c->pts = pts;
     c->last_updated = time;
@@ -41,13 +41,13 @@ void set_clock_at(Clock *c, double pts, int serial, double time)
     c->serial = serial;
 }
 
-void set_clock(Clock *c, double pts, int serial)
+void set_clock(Clock *c, const double pts, const int serial)
 {
     double time = av_gettime_relative() / 1000000.0;
     set_clock_at(c, pts, serial, time);
 }
 
-void set_clock_speed(Clock *c, double speed)
+void set_clock_speed(Clock *c, const double speed)
 {
     set_clock(c, get_clock(c), c->serial);
     c->speed = speed;
@@ -61,7 +61,7 @@ void init_clock(Clock *c, int *queue_serial)
     set_clock(c, NAN, -1);
 }
 
-void sync_clock_to_slave(Clock *c, Clock *slave)
+void sync_clock_to_slave(Clock *c, const Clock *slave)
 {
     double clock = get_clock(c);
     double slave_clock = get_clock(slave);
@@ -86,7 +86,7 @@ int get_master_sync_type(const TrackState *is)
 }
 
 /* get the current master clock value */
-double get_master_clock(TrackState *is)
+double get_master_clock(const TrackState *is)
 {
     double val;
 

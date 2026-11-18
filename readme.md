@@ -4,7 +4,7 @@
 It is a heavily modified version of FFplay, so all credit for its general design goes to the FFmpeg team and contributors.
 
 ## Features
-- Cross-platform can potentially support Windows, Linux, macOS, Android, and iOS
+- Cross-platform. Can potentially support Windows, Linux, macOS, Android, and iOS
 - Thanks to FFmpeg it can decode and play basically any file with an audio component:
   - Tested to work with mp3, flac, wav, aiff, m4a, wma, oga, ogg, aac, and dsf (dsd64)
 - Plentiful list of options and filters for customizing playback:
@@ -164,11 +164,14 @@ bool au_set_equalizer(const EqualizerConfig params);
   - Does not apply when audio device is configured with system default, SDL follows it but not custom set ones.
   - This will probably involve aborting playback, recreating the audio device, then playing the same stream with a seek to last pos
   - [X] Test with non audio file
-  - [ ] Try to resolve "Could not open input stream." error when playing a new song directly after reconfiguring. avformat_open_input failing is most likely because is->abort is set to true. Would be best to try and not play the original file if the user is waiting for the next one to play
+  - [X] Try to resolve "Could not open input stream." error when playing a new song directly after reconfiguring. avformat_open_input failing is most likely because is->abort is set to true. Would be best to try and not play the original file if the user is waiting for the next one to play
   - [X] Calling configure_audio_device(&AudConfig) then configure_audio_device(NULL) directly after causes segfault in strcmp().
+  - [X] ~~Only restart the stream if the audio device wants different format or sample rate.~~
+- [ ] ~~Resample buffer audio in audio_decode_frame() instead of re-starting the stream.~~
+- [X] Reconfigure filtergraph instead of re-starting the stream for ad reconfiguring.
 - [X] Write additional public api functions
 - [ ] Setup Github Actions for release
-- [ ] Release C# P/Invoke and create nuget packages
+- [X] Release C# P/Invoke and create nuget packages
 - [ ] Test on more platforms
   - [ ] Windows
   - [X] Linux
@@ -181,7 +184,10 @@ bool au_set_equalizer(const EqualizerConfig params);
   - [X] Try to test this, all my devices seem to prefer S16
 - [ ] Create gapless audio playback for non-realtime streams
   - [X] 'Soon to be done' callback
-  - [ ] Set up a second TrackState and swap in audio callback when the first stream is finished
+  - [X] Set up a second TrackState and swap in audio callback when the first stream is finished
+  - [X] Set up audio device reconfigure
+  - [ ] Test to make sure playing files with au_play_audio() still works
+  - [ ] Try to fix the occasional pop when au_set_next() is called with a new file
   - [ ] AV network init/de-init
   - [ ] Cancel TrackState when the user changes stream after callback is called
 - [ ] Regulate audio spec samples?
@@ -198,12 +204,28 @@ bool au_set_equalizer(const EqualizerConfig params);
 - [X] Setup logging with call instead of av_log()
 - [X] Add is_from_error flag to eof_callback
 - [X] Fix error flag == true when no errors
-- [ ] Remove CrossFeed from 'track_filters' and add them in a similar fashion to Equalizer
+- [ ] ~~Remove CrossFeed from 'track_filters' and add them in a similar fashion to Equalizer~~
 - [ ] Add/test support for audio formats with more than two channels
-- [ ] Compare the current audio spec to the new audio spec and only restart the stream if values differ
+- [ ] Create separate api for creating the filtergraph string
+  - [ ] Update channel-dependent filters with callback to the user during audio device reconfigure (E.g., the EQ)
 - [X] Add flags for was from loop (as opposed to a seek) and send the restart position notify_of_restart_callback
 - [ ] Find what to do about seek_*() not working immediately after play_audio() is called. (TrackState is not initialized yet)
 - [X] Add av_filtergraph_override to PlayAudioConfig
+- [X] Add au_set_next()
+- [ ] Add flag to eof callback to indicate that the queued file is playing?
 - [ ] Replace logging callback with `get_last_error()`?
 - [ ] Add playback speed adjustment
+- [ ] Build ffmpeg and sdl2 for audio only, include build options in repo
+- [ ] Build bins for linux, windows
+- [ ] Implement on_duration_update callback
+  - [ ] This will most likely be a new thread that polls the current track duration value, compares it to the last value, and sends the callback if it has changed.
+  - [ ] Use this timer thread to signal the start of the crossfade?
+  - [ ] Use this timer thread to send the prepare_next callback instead of going by packets == all? Would be better for when config.play_duration is set
+- [ ] Prepare for crossfade
+  - [ ] How to implement crossfade time
+  - [ ] How to implement crossfade curves (User defined?)
+  - [ ] How to handle different formates
+  - [ ] Study how the ffmpeg filter does it
+- [ ] Implement crossfade
+- [ ] Fix next track not queuing on error
 

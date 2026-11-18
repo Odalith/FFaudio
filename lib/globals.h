@@ -28,46 +28,36 @@
 #define EQ_BAND_COUNT 10
 #define SecondsToMicroseconds(x) ((x) * 1000000)
 #define AV_TIME_BASE_DOUBLE 1000000.0
+#define TRACK_COUNT 2
 
 #include <stdbool.h>
-#include <stddef.h>
-#include <libavcodec/avcodec.h>
-#include <libavfilter/avfilter.h>
-#include <libavformat/avformat.h>
-#include <libavutil/fifo.h>
-#include <SDL2/SDL_mutex.h>
-#include <SDL2/SDL_thread.h>
-#include <math.h>
-#include <limits.h>
 #include <stdint.h>
 
-#include "libavutil/avstring.h"        // Internal: String utilities
+#include "libavutil/avstring.h"        // String utilities
 #include "libavutil/channel_layout.h"
 #include "libavutil/mathematics.h"
-#include "libavutil/mem.h"             // Internal: Memory management utilities
+#include "libavutil/mem.h"             // Memory management utilities
 #include "libavutil/dict.h"
-#include "libavutil/fifo.h"            // Internal: FIFO buffer implementation
+#include "libavutil/fifo.h"            // FIFO buffer implementation
 #include "libavutil/samplefmt.h"
-#include "libavutil/time.h"            // Internal: Time utilities
-#include "libavutil/bprint.h"          // Internal: Binary print utilities
-#include "libavformat/avformat.h"
-//#include "libavdevice/avdevice.h"
-#include <time.h>
-#include <bits/time.h>
-
-#include "libswscale/swscale.h"
+#include "libavutil/time.h"            // Time utilities
+#include "libavutil/bprint.h"          // Binary print utilities
+#include "libavutil/avassert.h"
 #include "libavutil/opt.h"
-#include "libswresample/swresample.h"
+
 #include "libavcodec/avcodec.h"
 
-#include "libavfilter/avfilter.h"
+#include "libavformat/avformat.h"
+
+#include "libswresample/swresample.h"
+
 #include "libavfilter/buffersink.h"
 #include "libavfilter/buffersrc.h"
 
-#include <SDL2/SDL.h>
-#include <SDL2/SDL_thread.h>
+#include "SDL2/SDL.h"
+#include "SDL2/SDL_thread.h"
+#include "SDL2/SDL_mutex.h"
 
-#include "libavutil/avassert.h"
 #include "delegates.h"
 
 typedef struct MyAVPacketList {
@@ -152,6 +142,10 @@ typedef struct Decoder {
 
 typedef struct TrackState {
     int32_t handle;
+    bool should_play_next;             // default false
+    bool is_eof_from_error;
+    bool is_eof_from_skip;
+    bool is_eof_for_restart;
     SDL_Thread *read_tid;
     int32_t abort_request;
     int32_t paused;
@@ -169,7 +163,8 @@ typedef struct TrackState {
     Clock audclk;
     Clock extclk;
 
-    FrameQueue sampq;
+    FrameQueue sampq;// Holds the processed frames
+    bool flush_sampq; // default false
 
     Decoder audio_decoder;
     char *forced_audio_codec_name;     // default NULL
@@ -184,34 +179,28 @@ typedef struct TrackState {
     AVStream *audio_st;
     PacketQueue audio_queue;
     int32_t audio_hw_buf_size;
-    uint8_t *audio_buf0;
-    uint8_t *audio_buf1;
-    unsigned int audio_buf0_size; /* in bytes */
-    unsigned int audio_buf1_size;
-    int32_t audio_buf_index; /* in bytes */
-    int32_t audio_write_buf_size;
+    uint8_t *audio_buf0; // This is the primary audio buffer for finished, ready to play, audio
+    uint8_t *audio_buf1; // Secondary buffer used for resampling, ends up being put into audio_buf0
+    uint32_t audio_buf0_size; // in bytes
+    uint32_t audio_buf1_size; // in bytes
+    int32_t audio_buf_index; // in bytes. Increments to show the read position of the buffer
     int32_t audio_volume;
     int32_t muted;
 
     struct SwrContext *swr_ctx;
     //struct AudioParams audio_target; /*This is set to the global 'audio_target' not sure if this is needed*/
-    struct AudioParams audio_filter_src; /*This is the parameters of the current file */
+    struct AudioParams audio_filter_src; //This is the parameters of the current file
 
     AVChannelLayout channel_layout;
     AVDictionary *format_opts_n;       // default NULL
     AVDictionary *codec_opts_n;        // default NULL
     AVDictionary *swr_opts_n;          // default NULL
 
-    char *filtergraph_override;         // default NULL
+    bool reconfigure_target_filter;     // default false
+    char *filtergraph_str;              // default NULL
     AVFilterContext *in_audio_filter;   // the first filter in the audio chain
     AVFilterContext *out_audio_filter;  // the last filter in the audio chain
-    AVFilterGraph *agraph;              // audio filter graph
-
-    //AVTXContext *rdft; ~553KD
-    //av_tx_fn rdft_fn; ~553KD
-    //int rdft_bits; ~553KD
-    //float *real_data; ~553KD
-    //AVComplexFloat *rdft_data; ~553KD
+    AVFilterGraph *agraph;              // the whole audio filter graph
 
     int32_t eof;
     const char *filename;
@@ -223,14 +212,24 @@ typedef struct TrackState {
 } TrackState;
 
 
+/**
+ * @struct TrackStateEof
+ * @brief Contains a copy of information about the track state after it has been cleaned up
+ */
+typedef struct TrackStateEof {
+    int32_t handle;
+    bool should_play_next;
+    bool is_current_track;
+    bool is_eof_from_skip;
+    bool is_eof_from_error;
+    SDL_Thread *read_tid;
+} TrackStateEof;
+
 typedef struct AudioPlayer {
     int32_t startup_volume;                // default 100
     int32_t sdl_volume;                    // default 0
     int32_t filter_nbthreads;              // default 0
-    int64_t audio_callback_time;       // default 0
-    char *track_filters;               // default NULL
-    char *anequalizer_filter;          // default NULL
-    int16_t anequalizer_values[EQ_BAND_COUNT]; //default [0, ...]
+    int64_t audio_callback_time;           // default 0
     const char* wanted_stream_spec[AVMEDIA_TYPE_NB]; // default [NULL]
     int32_t seek_by_bytes;                 // default -1
     int32_t loop;                          // default 0
@@ -238,8 +237,8 @@ typedef struct AudioPlayer {
     int32_t find_stream_info;              // default 1
 
     int32_t handle_count;              // default 0
-    int32_t errored_handle;            // default -1, used when stream_open() fails
-    TrackState *current_track;         // default NULL
+    TrackState* tracks[TRACK_COUNT];   // default [NULL, NULL]
+    int32_t track_index;               // default 0
 
     SDL_Thread *event_thread;          // default NULL
     SDL_atomic_t event_thread_running; // default false
@@ -259,19 +258,19 @@ typedef struct AudioPlayer {
     int64_t request_count;             // default 0
     bool is_init_done;                 // default false
     bool is_audio_device_initialized;  // default false
-    bool is_eof_from_skip;             // default false
-    bool is_eof_from_error;            // default false
     int32_t is_restart_from_looping;   // default 0, contains loop remaining loop count if != 0
     bool reconfigure_audio_device;     // default false
     int64_t audio_reconfigure_time;    // AV_NOPTS_VALUE, where to seek after reconfigure is complete
 
 
-    const char *audio_device_name;     // default NULL
+    bool audio_device_paused;          // true
     int32_t audio_device_index;        // default -1
+    const char *audio_device_name;     // default NULL
     SDL_AudioDeviceID device_id;       // default 0
     SDL_AudioSpec given_spec;          // default NULL
     SDL_AudioFormat given_format;      // -1
     AudioParams *audio_target;         // default malloc
+    AudioParams *audio_swr_source;     // default malloc
 
     //Callbacks
     NotifyOfLog notify_of_log_callback;                  // default NULL
