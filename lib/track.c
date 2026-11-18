@@ -26,6 +26,7 @@
 
 #include "track.h"
 #include "metadata.h"
+#include "gain_cache.h"
 #include <math.h>
 #include "decoder_utils.h"
 #include "filtergraph.h"
@@ -223,16 +224,45 @@ void track_update_gain(TrackState *t) {
     const AuReplayGainConfig cfg = ap->replaygain;
     SDL_UnlockMutex(ap->format_mutex);
 
+    // Values come from, in order: PlayAudioConfig.replaygain, the ReplayGain cache, the file's tags
     SDL_LockMutex(t->seek_mutex);
     const bool known = t->info || t->has_replaygain_override;
+    const bool has_override = t->has_replaygain_override;
     AuReplayGainInfo rg;
-    if (t->has_replaygain_override) rg = t->replaygain_override;
+    if (has_override) rg = t->replaygain_override;
     else rg = au_media_replaygain(t->info);
     SDL_UnlockMutex(t->seek_mutex);
 
     if (!known) return; // not open yet: the read thread calls this again once the tags are known
+    if (!has_override) {
+        AuReplayGainInfo cached;
+        if (gain_cache_lookup(t->filename, &cached)) rg = cached;
+    }
     const double db = replaygain_gain_db(&cfg, &rg);
     SDL_AtomicSet(&t->gain_mb, (int)lrint(db * 100.0));
+}
+
+#define DEFAULT_MEASURE_WAIT_MS 500
+
+// Read thread, before the decoder starts: a track without any ReplayGain value gets an urgent measurement
+// (AuReplayGainConfig.measure_missing) and waits for it a little, so it can start at the right level
+static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
+    AudioPlayer *ap = t->ap;
+    SDL_LockMutex(ap->format_mutex);
+    const AuReplayGainConfig cfg = ap->replaygain;
+    SDL_UnlockMutex(ap->format_mutex);
+
+    if (cfg.mode == AU_REPLAYGAIN_OFF || !cfg.measure_missing || t->has_replaygain_override) return;
+    const AuReplayGainInfo tags = au_media_replaygain(info);
+    if (tags.has_track_gain || tags.has_album_gain) return;
+    if (gain_cache_lookup(t->filename, NULL)) return;
+
+    gain_scan_request_for_player(t->filename);
+    const int wait_ms = cfg.measure_wait_ms == 0 ? DEFAULT_MEASURE_WAIT_MS : cfg.measure_wait_ms;
+    if (wait_ms > 0 && !gain_cache_wait(t->filename, wait_ms, &t->abort_request) &&
+        !SDL_AtomicGet(&t->abort_request))
+        ff_log(AU_LOG_INFO, "'%s' starts before its loudness is measured; the gain follows when it is ready",
+               t->filename);
 }
 
 AuMediaInfo *track_copy_info(TrackState *t) {
@@ -447,6 +477,7 @@ static int read_thread(void *arg) {
         SDL_LockMutex(t->seek_mutex);
         t->info = info;
         SDL_UnlockMutex(t->seek_mutex);
+        wait_for_measurement(t, info);
         track_update_gain(t);
     }
 

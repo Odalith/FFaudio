@@ -71,6 +71,8 @@ ff -f lavfi -i "aevalsrc=exprs='0.5*sin(2*PI*12000*t+PI/4)|0.5*sin(2*PI*12000*t+
 ff -f lavfi -i "aevalsrc=exprs='0.0707946*sin(2*PI*1000*t)':s=48000:d=10" -af "pan=5.1(side)|FL=c0" -sample_fmt s16 ld_fl51.flac
 ff -f lavfi -i "aevalsrc=exprs='0.0707946*sin(2*PI*1000*t)':s=48000:d=10" -af "pan=5.1(side)|SL=c0" -sample_fmt s16 ld_sl51.flac
 ff -f lavfi -i "anullsrc=r=48000:cl=stereo" -t 3 ld_silence.flac
+# Many distinct paths for the measurement queue tests (hard links: no extra space)
+for i in $(seq -w 1 24); do ln -f ld_m23_48k.flac "scan_$i.flac"; done
 
 # Broken / non-audio inputs
 : > empty.flac

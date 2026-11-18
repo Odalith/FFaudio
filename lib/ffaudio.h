@@ -34,6 +34,7 @@
 #endif
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "delegates.h"
 
@@ -128,6 +129,13 @@ extern "C" {
         double preamp_db;            // added to tagged gains, -15..+15 dB
         double fallback_gain_db;     // used for files without ReplayGain/R128 tags, -30..+15 dB (e.g. -6)
         bool prevent_clipping;       // lower the gain so the tagged peak does not exceed full scale
+        // Measure a starting track that has no value (no PlayAudioConfig.replaygain, no cache entry, no
+        // ReplayGain/R128 tags) with the background queue and store it in the ReplayGain cache
+        // (ffaudio_loudness.h). Off by default because it writes to the per-user cache file.
+        bool measure_missing;
+        // How long such a track waits for its measurement before it starts at fallback_gain_db; the value is
+        // then faded in over 2 s when it arrives. 0 = 500 ms, < 0 = do not wait. At most 10000.
+        int measure_wait_ms;
     } AuReplayGainConfig;
 
     //+-----------------------------------------------------+
@@ -289,6 +297,64 @@ extern "C" {
     // The ReplayGain gain ffaudio applies to a track (handle 0 = the current track), in dB.
     // AU_ERR_NOTHING_TO_DO when the track is unknown or not open yet.
     DLL_EXPORT int au_get_track_gain_db(int32_t handle, double *out_gain_db);
+
+    //+-----------------------------------------------------+
+    //| ReplayGain cache                                    |
+    //+-----------------------------------------------------+
+    // A persistent, per-user store of ReplayGain values by path, for values your application generated (see
+    // ffaudio_loudness.h) or keeps in its own library. It is saved in the platform's user data directory and
+    // shared by every program using ffaudio (au_gain_cache_set_file() picks another file):
+    //   Linux/BSD: $XDG_DATA_HOME/ffaudio/replaygain.cache (default ~/.local/share/ffaudio/replaygain.cache)
+    //   macOS:     ~/Library/Application Support/ffaudio/replaygain.cache
+    //   Windows:   %LOCALAPPDATA%\ffaudio\replaygain.cache
+    //   others:    SDL_GetPrefPath("ffaudio", "ffaudio") + replaygain.cache (Android, iOS, ...)
+    // Each change is appended to the file right away (one small write; several processes may share the file),
+    // and the file is read on first use. Works without au_initialize() and survives au_shutdown().
+    // Media files are never touched.
+    //
+    // When a track starts, ffaudio looks up its path (exactly as passed to au_play_audio()/au_set_next()) and
+    // uses a cached entry instead of the file's tags. Order: PlayAudioConfig.replaygain > cache > file tags.
+    // Setting or removing an entry also updates tracks that are already queued or playing (with a short ramp),
+    // so values can arrive after the track was queued:
+    //
+    //   on_prepare_next: path = next song; au_set_next(path, NULL);
+    //                    if (!au_gain_cache_get(path, NULL)) start a scan in a worker thread
+    //   worker thread:   au_gain_cache_scan(path, NULL, NULL);   // measures and stores; applied right away
+    //
+    // Paths are compared as plain strings (case-sensitive, no normalization); ffaudio never looks at or tracks
+    // the files. All functions are thread-safe and may be called from callbacks.
+
+    // Use another cache file (UTF-8 path). NULL = the default location above, "" = memory only (nothing is read
+    // or written). Discards the entries in memory and loads the new file. Call it before the first use of the
+    // cache if your application wants its own file.
+    DLL_EXPORT int au_gain_cache_set_file(const char *path);
+
+    // The cache file in use, "" when memory only. Returns its length, or AU_ERR_INVALID_ARGUMENT if buf is too small.
+    DLL_EXPORT int au_gain_cache_get_file(char *buf, size_t size);
+
+    // Read the file again, e.g. to pick up entries another process added since this one loaded it
+    DLL_EXPORT int au_gain_cache_reload(void);
+
+    // Store (or replace) the values for a path. Returns AU_ERR_INVALID_ARGUMENT for a NULL/empty path or rg, and
+    // AU_ERR_FILE when the entry is in memory but could not be written to the cache file.
+    DLL_EXPORT int au_gain_cache_set(const char *path, const AuReplayGainInfo *rg);
+
+    // true and *out filled (out may be NULL) when the path is cached
+    DLL_EXPORT bool au_gain_cache_get(const char *path, AuReplayGainInfo *out);
+
+    // true when an entry was removed
+    DLL_EXPORT bool au_gain_cache_remove(const char *path);
+
+    // Remove every entry, also from the cache file
+    DLL_EXPORT void au_gain_cache_clear(void);
+
+    DLL_EXPORT int au_gain_cache_count(void);
+
+    // Visit every entry (a snapshot, so the callback may call au_gain_cache_* functions). Return false from the
+    // callback to stop (e.g. to export the cache or drop entries for files that no longer exist).
+    // Returns the number of entries visited.
+    typedef bool (*AuGainCacheVisitor)(const char *path, const AuReplayGainInfo *rg, void *user);
+    DLL_EXPORT int au_gain_cache_foreach(AuGainCacheVisitor visitor, void *user);
 
     //+-----------------------------------------------------+
     //| Metadata                                            |

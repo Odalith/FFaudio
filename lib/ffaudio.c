@@ -37,6 +37,8 @@
 #include "output.h"
 #include "track.h"
 #include "metadata.h"
+#include "gain_cache.h"
+#include "once.h"
 
 
 #define CONTROL_TICK_MS 5
@@ -74,6 +76,36 @@ static void msg_post(AudioPlayer *ap, Msg *m) {
 
 static bool on_control_thread(const AudioPlayer *ap) {
     return ap->control_thread_id && SDL_ThreadID() == ap->control_thread_id;
+}
+
+// Held while audio_player is cleared in au_shutdown() and while the ReplayGain cache (usable from any thread,
+// at any time) posts to the player, so a cache update racing with au_shutdown() never touches a freed player.
+static SDL_mutex *lifecycle_mutex_ptr = NULL;
+static FfOnce lifecycle_once = FF_ONCE_INIT;
+
+static void create_lifecycle_mutex(void) {
+    lifecycle_mutex_ptr = SDL_CreateMutex();
+}
+
+static SDL_mutex *lifecycle_mutex(void) {
+    ff_once(&lifecycle_once, create_lifecycle_mutex);
+    return lifecycle_mutex_ptr;
+}
+
+void ff_gain_cache_changed(const char *path) {
+    SDL_mutex *lock = lifecycle_mutex();
+    if (!lock) return;
+    SDL_LockMutex(lock);
+    AudioPlayer *ap = audio_player;
+    if (ap && !SDL_AtomicGet(&ap->shutting_down)) {
+        Msg *m = msg_new(CMD_GAIN_CACHE_CHANGED);
+        if (m && path && !(m->str = av_strdup(path))) {
+            msg_free(m);
+            m = NULL;
+        }
+        if (m) msg_post(ap, m);
+    }
+    SDL_UnlockMutex(lock);
 }
 
 void ff_post_track_msg(const MsgType type, const int32_t handle, const double d) {
@@ -757,6 +789,15 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_UPDATE_TRACK_FILTERS:
         case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
         case CMD_CONFIGURE_DEVICE: finish_sync(msg, cmd_configure_device(ap, msg)); msg->done = NULL; break;
+        case CMD_GAIN_CACHE_CHANGED:
+            for (int i = 0; i < ap->n_tracks; i++) {
+                TrackState *t = ap->tracks[i];
+                if (!t->ended && (!msg->str || strcmp(t->filename, msg->str) == 0)) {
+                    SDL_AtomicSet(&t->gain_slow, 1); // a value that arrives while playing fades in slowly
+                    track_update_gain(t);
+                }
+            }
+            break;
         case CMD_SET_REPLAYGAIN:
             SDL_LockMutex(ap->format_mutex);
             ap->replaygain = msg->replaygain;
@@ -928,11 +969,22 @@ int au_initialize(const InitializeConfig* config) {
     ap->use_soxr = filtergraph_soxr_available();
     avformat_network_init();
 
+    SDL_mutex *lock = lifecycle_mutex();
+    SDL_LockMutex(lock);
     audio_player = ap;
+    SDL_UnlockMutex(lock);
     ap->control_thread = SDL_CreateThread(control_thread, "ffa_control", ap);
     if (!ap->control_thread) {
         if (config->on_log) config->on_log(SDL_GetError(), 0, AU_LOG_FATAL, config->user_data);
+        SDL_LockMutex(lock);
         audio_player = NULL;
+        SDL_UnlockMutex(lock);
+        // A cache update may have queued a message in the meantime
+        while (ap->msg_head) {
+            Msg *m = ap->msg_head;
+            ap->msg_head = m->next;
+            msg_free(m);
+        }
         avformat_network_deinit();
         SDL_QuitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS);
         goto fail_sync;
@@ -974,7 +1026,10 @@ void au_shutdown(void) {
     SDL_DestroySemaphore(done);
     SDL_WaitThread(ap->control_thread, NULL);
 
+    SDL_mutex *lock = lifecycle_mutex();
+    SDL_LockMutex(lock);
     audio_player = NULL;
+    SDL_UnlockMutex(lock);
 
     Msg *rest = ap->msg_head;
     while (rest) {
@@ -1241,6 +1296,7 @@ int au_set_replaygain(const AuReplayGainConfig *config) {
         if (!isfinite(cfg.preamp_db) || cfg.preamp_db < -15 || cfg.preamp_db > 15) return AU_ERR_INVALID_ARGUMENT;
         if (!isfinite(cfg.fallback_gain_db) || cfg.fallback_gain_db < -30 || cfg.fallback_gain_db > 15)
             return AU_ERR_INVALID_ARGUMENT;
+        if (cfg.measure_wait_ms > 10000) return AU_ERR_INVALID_ARGUMENT;
     }
     SDL_AtomicIncRef(&ap->request_count);
     Msg *m = msg_new(CMD_SET_REPLAYGAIN);

@@ -62,6 +62,10 @@ add_library(ffaudio
         lib/filters.c
         lib/metadata.c
         lib/loudness.c
+        lib/gain_cache.c
+        lib/gain_cache.h
+        lib/gain_scan.c
+        lib/once.h
         lib/metadata.h
         lib/track.c
         lib/track.h
@@ -85,6 +89,10 @@ target_include_directories(ffaudio PUBLIC
 target_link_libraries(ffaudio PRIVATE ${FFAUDIO_SDL2} PkgConfig::FFMPEG)
 if(UNIX)
     target_link_libraries(ffaudio PRIVATE m)
+endif()
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(ffaudio PRIVATE Threads::Threads) # pthread_once
 endif()
 
 target_compile_definitions(ffaudio PRIVATE FFAUDIO_BUILDING)
@@ -164,13 +172,13 @@ if(FFAUDIO_BUILD_TESTS)
                 COMMENT "Generating audio fixtures")
         add_custom_target(ffaudio_fixtures ALL DEPENDS ${FIXTURE_DIR}/.stamp)
 
-        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness)
+        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})
             set_tests_properties(${t} PROPERTIES
                     TIMEOUT 180
-                    ENVIRONMENT "SDL_AUDIODRIVER=dummy;ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
+                    ENVIRONMENT "SDL_AUDIODRIVER=dummy;XDG_DATA_HOME=${CMAKE_BINARY_DIR}/xdg-data;ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
     endif()
 endif()

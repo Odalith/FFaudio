@@ -42,6 +42,16 @@ incompatible ways; see "API changes".
   and clipping prevention; ReplayGain 2.0 tags in every format FFmpeg reads, and R128 gain tags (the Opus
   standard, accepted in any format, converted from -23 to the -18 LUFS reference). Gains change with a short ramp; `PlayAudioConfig.replaygain` supplies values from
   the application; `au_get_track_gain_db()` reports the applied gain.
+- ReplayGain cache: a persistent, per-user, thread-safe path -> `AuReplayGainInfo` store in the platform's user
+  data directory (`au_gain_cache_set/get/remove/clear/count/foreach/reload/set_file/get_file`, and
+  `au_gain_cache_scan()` to measure and store on a miss). Append-only file, safe to share between programs. The
+  player uses cached values ahead of the file's tags (an explicit `PlayAudioConfig.replaygain` still wins), and
+  changes reach queued and playing tracks. No file tracking; media files are never touched.
+- Background measurement queue: `au_gain_cache_request()` / `au_gain_cache_request_album()` with prefetch and
+  urgent priority, de-duplication, `au_gain_cache_cancel_requests()`, `au_gain_cache_pending()`,
+  `au_gain_scan_configure()` (worker threads, `on_cached` callback on the worker thread) and `au_gain_scan_stop()`.
+  `AuReplayGainConfig.measure_missing` measures starting tracks without any value and holds their start for up to
+  `measure_wait_ms` (default 500 ms); values that arrive later fade in over 2 s.
 - Loudness analysis (`ffaudio_loudness.h`), independent of playback and read only: ITU-R BS.1770-4 / EBU R128
   integrated loudness, loudness range, true and sample peak per file, and album values gated over all tracks;
   ReplayGain 2.0 and R128 gains, progress/cancel callback, `au_loudness_to_replaygain()` for
