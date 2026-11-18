@@ -106,6 +106,7 @@ typedef struct Frame {
     double pts;           /* presentation timestamp of the first sample, seconds; NAN if unknown */
     double duration;      /* duration of the frame, seconds */
     int64_t pos;          /* byte position of the frame in the input file */
+    double speed;         /* playback speed it was made with: file seconds per output second */
 } Frame;
 
 typedef struct FrameQueue {
@@ -214,6 +215,14 @@ typedef struct TrackState {
     AudioParams audio_filter_src;       // format of the frames entering the convert graph
     FilterChain convert;                // audio thread only: decoder format -> output format
     FilterChain user;                   // audio thread only: user + global filters, may be empty
+    FilterChain speed_chain;            // audio thread only: tempo / rate change, empty at normal speed
+    double speed_cur;                   // audio thread only: speed the speed chain was built for
+    bool speed_keep_pitch_cur;          // audio thread only
+    int32_t speed_gen_seen;             // audio thread only: last applied AudioPlayer.speed_gen
+    double speed_seg_in;                // audio thread only: file position where the current speed segment began
+    double speed_in_end;                // audio thread only: file position just past the last frame fed into it
+    int64_t speed_seg_out;              // audio thread only: samples output since then
+    bool speed_seg_open;                // audio thread only: speed_seg_in is known
     int32_t convert_rate;               // output rate the graphs were built for
     AVDictionary *format_opts_n;
     int32_t realtime;
@@ -226,6 +235,7 @@ typedef struct TrackState {
     SDL_atomic_t failed;                // 1 when the track can not produce (more) audio because of an error
     SDL_atomic_t eos_serial;            // queue serial whose last frame has been pushed into sampq, -1 = none
     SDL_atomic_t loops_remaining;       // -1 infinite, 0 none
+    SDL_atomic_t loops_started;         // read thread: loops it has seeked back for (the mixer reports each once)
     SDL_atomic_t filter_reconfigure;    // 1 = rebuild the convert graph before the next frame (device changed)
     SDL_atomic_t user_filters_changed;  // 1 = rebuild the user graph before the next frame
     SDL_atomic_t had_error;             // 1 = the track ends as an error, even if some audio played
@@ -237,8 +247,11 @@ typedef struct TrackState {
     int32_t cur_offset;                 // samples of `cur` already played
     double position;                    // seconds, position of the next sample to be played
     double last_frame_pts;              // used to detect loop restarts
+    double play_speed;                  // speed of the audio being played (file seconds per output second)
     bool started;                       // produced at least one sample
     bool announced;                     // MIX_EV_TRACK_STARTED has been sent
+    int32_t loops_heard;                // loops reported so far (compared with loops_started)
+    int32_t last_frame_serial;          // serial of last_frame_pts
 
     // ---- slot bookkeeping, changed under the device lock ----
     TrackRole role;
@@ -390,6 +403,7 @@ typedef struct StatusSnapshot {
     double callback_time;           // seconds, SDL performance counter
     double duration;                // seconds, < 0 unknown
     bool advancing;                 // false while paused / underrun / idle
+    double speed;                   // playback speed of the audible audio
 } StatusSnapshot;
 
 typedef struct AudioPlayer {
@@ -415,6 +429,7 @@ typedef struct AudioPlayer {
     NotifyOfPrepareNext notify_of_prepare_next_callback;
     NotifyOfTrackStarted notify_of_track_started_callback;
     NotifyOfAudioDeviceUpdate notify_of_audio_device_update_callback;
+    NotifyOfAudioDevicesChanged notify_of_audio_devices_changed_callback;
 
     // ---- control thread ----
     SDL_Thread *control_thread;
@@ -437,6 +452,9 @@ typedef struct AudioPlayer {
     char *global_filters;               // guarded by format_mutex, applied after each track's own filters
     AU_DOWNMIX downmix;                 // guarded by format_mutex
     AuReplayGainConfig replaygain;      // guarded by format_mutex
+    double speed;                       // guarded by format_mutex, playback speed (1 = normal)
+    bool keep_pitch;                    // guarded by format_mutex
+    int32_t speed_gen;                  // guarded by format_mutex, bumped on every change
     char *downmix_filters;              // guarded by format_mutex, AU_DOWNMIX_CUSTOM only
     AudioParams audio_target;           // float32 interleaved at the device rate/layout, guarded by format_mutex
     SDL_AudioDeviceID device_id;
@@ -446,6 +464,11 @@ typedef struct AudioPlayer {
     bool use_default_device;
     int32_t audio_device_index;
     char *audio_device_name;
+    char *device_in_use;                // guarded by format_mutex: name of the open device (default resolved)
+    char **known_devices;               // control thread: last seen output device list
+    int32_t n_known_devices;
+    bool devices_checked_once;          // control thread: the first comparison only records the list
+    uint32_t devices_checked_at;        // control thread: SDL_GetTicks() of the last comparison
 
     // ---- mixer (SDL callback; others under SDL_LockAudioDevice) ----
     Mixer mixer;

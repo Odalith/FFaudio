@@ -45,11 +45,30 @@ static void test_reinit(void) {
     }
 }
 
+static void test_device_name_and_no_spurious_changes(void) {
+    char name[256];
+    CHECK(au_get_audio_device_name(name, sizeof(name)) == AU_ERR_NOT_INITIALIZED);
+    REQUIRE(tc_init_player(0) == 0);
+    const int len = au_get_audio_device_name(name, sizeof(name));
+    printf("   device in use: \"%s\"\n", name);
+    CHECK(len > 0 && (int)strlen(name) == len);
+    char tiny[2];
+    CHECK(au_get_audio_device_name(tiny, sizeof(tiny)) == AU_ERR_INVALID_ARGUMENT || len < 2);
+    CHECK(au_get_audio_device_name(NULL, 10) == AU_ERR_INVALID_ARGUMENT);
+
+    // SDL announces every device at start-up and the list is polled every 2 s: neither is a change
+    au_play_audio(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(4500);
+    CHECK(tc_snapshot().devices_changed == 0);
+    au_shutdown();
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
     RUN_TEST(test_calls_before_init);
     RUN_TEST(test_init_null_config);
     RUN_TEST(test_shutdown_while_playing);
     RUN_TEST(test_reinit);
+    RUN_TEST(test_device_name_and_no_spurious_changes);
     return tc_finish("test_lifecycle");
 }

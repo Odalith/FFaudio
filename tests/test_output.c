@@ -546,6 +546,125 @@ static void test_replaygain_live_change(void) {
     free(c.samples);
 }
 
+/* ---------- playback speed ---------- */
+
+// Frequency of the (sine) capture from its zero crossings
+static double capture_frequency(const Capture *c, size_t first, size_t last) {
+    size_t crossings = 0;
+    for (size_t i = first + 1; i < last; i++) {
+        const float a = c->samples[(i - 1) * c->channels], b = c->samples[i * c->channels];
+        if ((a < 0) != (b < 0)) crossings++;
+    }
+    return crossings / 2.0 / ((double)(last - first) / c->rate);
+}
+
+typedef struct SpeedResult {
+    double seconds, frequency;
+    size_t silence;
+} SpeedResult;
+
+static SpeedResult play_at_speed(const char *name, const char *file, const double speed, const bool keep_pitch) {
+    start_capture(name);
+    CHECK(au_set_playback_speed(speed, keep_pitch) == AU_OK);
+    au_play_audio(fx(file), NULL);
+    wait_until_idle(1, 15000);
+    Capture c = stop_capture();
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const SpeedResult r = { (double)(last - first) / c.rate, capture_frequency(&c, first, last),
+                            longest_silence(&c, first, last) };
+    printf("   %-24s %.3f s, %.1f Hz, longest silence %zu\n", name, r.seconds, r.frequency, r.silence);
+    free(c.samples);
+    return r;
+}
+
+static void test_speed(void) {
+    // 6 s of 440 Hz at 2x keeping the pitch: 3 s, still 440 Hz
+    SpeedResult r = play_at_speed("2x keep pitch", "long_6s.flac", 2.0, true);
+    CHECK(fabs(r.seconds - 3.0) < 0.1);
+    CHECK(fabs(r.frequency - 440) < 5);
+    CHECK(r.silence < 4);
+
+    // Tape-style: 3 s at 880 Hz
+    r = play_at_speed("2x tape", "long_6s.flac", 2.0, false);
+    CHECK(fabs(r.seconds - 3.0) < 0.1);
+    CHECK(fabs(r.frequency - 880) < 5);
+
+    // Half speed: 1 s becomes 2 s
+    r = play_at_speed("0.5x keep pitch", "join_a.flac", 0.5, true);
+    CHECK(fabs(r.seconds - 2.0) < 0.1);
+    CHECK(fabs(r.frequency - 440) < 5);
+
+    CHECK(au_initialize(NULL) != AU_OK); // (no player: the setter below must refuse)
+    CHECK(au_set_playback_speed(2.0, true) == AU_ERR_NOT_INITIALIZED);
+}
+
+static void test_speed_limits_and_position(void) {
+    start_capture("speed_position");
+    CHECK(au_set_playback_speed(5.0, true) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_playback_speed(0.1, true) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_playback_speed(2.0, true) == AU_OK);
+    CHECK(au_get_playback_speed() == 2.0);
+    au_play_audio(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(1000);
+    const double pos = au_get_audio_play_time();
+    printf("   after 1 s at 2x the position is %.2f s of %.2f s\n", pos, au_get_audio_duration());
+    CHECK(pos > 1.6 && pos < 2.4);                    // file time advances twice as fast
+    CHECK(fabs(au_get_audio_duration() - 6.0) < 0.1); // duration stays in file time
+    au_stop_audio();
+    wait_until_idle(1, 3000);
+    Capture c = stop_capture();
+    free(c.samples);
+}
+
+static void test_speed_gapless_and_crossfade(void) {
+    // Gapless at 2x: two 1 s tracks join into 1 s without a gap
+    start_capture("speed_gapless");
+    au_set_playback_speed(2.0, true);
+    au_play_audio(fx("join_a.flac"), NULL);
+    au_set_next(fx("join_b.flac"), NULL);
+    wait_until_idle(2, 6000);
+    size_t silence;
+    double s = transition_seconds("gapless at 2x", &silence, NULL);
+    CHECK(fabs(s - 1.0) < 0.05);
+    CHECK(silence < 4);
+
+    // A 0.25 s crossfade at 2x: 3 s + 0.5 s - 0.25 s (fade lengths are wall clock time)
+    start_capture("speed_crossfade");
+    au_set_playback_speed(2.0, true);
+    const CrossfadeConfig xf = { .on_track_end = { .seconds = 0.25, .curve = AU_FADE_EQUAL_POWER },
+                                 .min_track_seconds = 0.4 };
+    au_set_crossfade(&xf);
+    au_play_audio(fx("long_6s.flac"), NULL);
+    au_set_next(fx("join_b.flac"), NULL);
+    wait_until_idle(2, 8000);
+    s = transition_seconds("crossfade at 2x", &silence, NULL);
+    CHECK(fabs(s - 3.25) < 0.08);
+    CHECK(silence < 4);
+}
+
+static void test_speed_change_while_playing(void) {
+    start_capture("speed_change");
+    au_play_audio(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(1000);
+    CHECK(au_set_playback_speed(2.0, true) == AU_OK);  // 1x -> 2x: a speed stage is inserted
+    tc_sleep_ms(1000);
+    CHECK(au_set_playback_speed(1.5, true) == AU_OK);  // 2x -> 1.5x: a command to the running filters
+    tc_sleep_ms(500);
+    CHECK(au_set_playback_speed(1.0, true) == AU_OK);  // back to normal: the stage plays out and goes away
+    wait_until_idle(1, 10000);
+    Capture c = stop_capture();
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const double seconds = (double)(last - first) / c.rate;
+    printf("   speed changes: %.2f s audible, longest silence %zu, %.1f Hz\n", seconds,
+           longest_silence(&c, first, last), capture_frequency(&c, first, last));
+    CHECK(seconds > 3.5 && seconds < 5.5);            // shorter than 6 s, longer than all-2x
+    CHECK(longest_silence(&c, first, last) < 4);      // no gap at any of the changes
+    CHECK(fabs(capture_frequency(&c, first, last) - 440) < 5);
+    free(c.samples);
+}
+
 static void test_bad_filter_fails_cleanly(void) {
     start_capture("badfilter");
     const PlayAudioConfig bad = { .av_filtergraph = "this_filter_does_not_exist=1" };
@@ -576,6 +695,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_multichannel_routing);
     RUN_TEST(test_replaygain_levels);
     RUN_TEST(test_replaygain_live_change);
+    RUN_TEST(test_speed);
+    RUN_TEST(test_speed_limits_and_position);
+    RUN_TEST(test_speed_gapless_and_crossfade);
+    RUN_TEST(test_speed_change_while_playing);
     RUN_TEST(test_bad_filter_fails_cleanly);
     return tc_finish("test_output");
 }

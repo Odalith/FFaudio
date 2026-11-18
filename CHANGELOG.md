@@ -38,6 +38,10 @@ incompatible ways; see "API changes".
 - `on_track_started` and `on_audio_device_update` callbacks; `on_prepare_next` now fires
   `prepare_next_seconds` (default 10) before the end of the current track.
 - `au_get_current_handle`, `au_get_output_spec`, `au_is_paused`, `au_is_muted`, `au_get_version`.
+- Playback speed: `au_set_playback_speed()` (0.25x..4x, keeping the pitch with atempo or tape-style) and
+  `au_get_playback_speed()`. Positions stay in file time; changes while playing are gapless.
+- Device notifications: `on_audio_devices_changed` when outputs are added or removed, and
+  `au_get_audio_device_name()` for the device in use.
 - Automatic ReplayGain: `au_set_replaygain()` with track/album mode, preamp, fallback gain for untagged files
   and clipping prevention; ReplayGain 2.0 tags in every format FFmpeg reads, and R128 gain tags (the Opus
   standard, accepted in any format, converted from -23 to the -18 LUFS reference). Gains change with a short ramp; `PlayAudioConfig.replaygain` supplies values from

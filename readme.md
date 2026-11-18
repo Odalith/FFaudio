@@ -24,8 +24,10 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers that
   build equalizer, crossfeed and bs2b strings
 - Volume with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
+- Playback speed 0.25x to 4x, keeping the pitch or tape-style, changeable while playing without gaps
 - Callbacks for track start/end, prepare-next, restarts (seek/loop), duration, device changes and logs
-- Follows the system default device, or uses a chosen one and falls back to the default if it disappears
+- Follows the system default device, or uses a chosen one and falls back to the default if it disappears;
+  `on_audio_devices_changed` reports outputs that are plugged in or removed
 - Surround files up to 7.1 play on multichannel outputs with SDL's speaker order, or are mixed down at full level
   (like mpv), normalized (never clips), or with your own filters (e.g. `sofalizer` for headphones)
 - Safe to drive from any thread, including from inside its own callbacks
@@ -85,9 +87,17 @@ au_pause_audio(true);
 au_seek_time(90 * 1000);
 au_skip_to_next();
 au_stop_audio();
+
+au_set_playback_speed(1.25, true);     // 0.25..4; true keeps the pitch, false is tape-style
 ```
 Playback functions never block: they are queued and run in order on ffaudio's control thread.
 `au_get_audio_play_time()`, `au_get_audio_duration()` and `au_get_current_handle()` describe the audible track.
+At other speeds, positions and durations stay in file time, while crossfade lengths and `prepare_next_seconds` stay
+in wall clock time; a speed change is heard within about half a second and never leaves a gap.
+
+Devices: `au_get_audio_devices()` lists the outputs, `au_get_audio_device_name()` names the one in use, and
+`on_audio_devices_changed` fires when outputs are plugged in or removed. With `au_configure_audio_device(NULL)`
+playback follows the system default device; a chosen device that disappears falls back to the default.
 
 ### 3. Crossfades
 ```c
@@ -344,11 +354,11 @@ plays a folder on real hardware for listening tests.
 - [x] Metadata API and probing a file without playing it
 - [ ] Embedded cover art
 - [x] Measure R128 / ReplayGain values for files (loudness analysis; read only)
-- [ ] Playback speed (tempo with and without pitch change)
+- [x] Playback speed (tempo with and without pitch change)
 - [ ] Network streams: HTTP/Icecast with "now playing" metadata, reconnects, buffering state (rtp/rtsp)
 - [ ] Cue sheets / gapless playback of track ranges inside one file
 - [x] Verified multichannel (5.1/7.1) playback and configurable downmixing
-- [ ] Device added/removed notifications for the application
+- [x] Device added/removed notifications for the application
 - [ ] SDL3 port
 - [ ] Release binaries for Linux and Windows; test macOS, Android and iOS
 - [ ] Update the C# bindings (FFAudioSharp) to this API

@@ -157,22 +157,24 @@ static double planned_end_fade(Mixer *m, const AuFade **fade_out, double *remain
     const AuFade *fade = next->has_fade_in_override ? &next->fade_in_override : &m->end_fade;
     if (fade->seconds <= 0) return 0;
 
+    // Everything below is in output (wall clock) seconds: file seconds / playback speed
+    const double speed = cur->play_speed > 0 ? cur->play_speed : 1.0;
     const double end = track_end_position(cur);
-    const double cur_len = track_duration(cur);
+    const double cur_len = track_duration(cur) / speed;
     if (end < 0 || cur_len < 0) return 0; // unknown length: play gapless instead
 
     const double min_len = m->min_track_seconds > 0 ? m->min_track_seconds : 2.0 * fade->seconds;
     if (cur_len < min_len) return 0;
 
     double fade_s = FFMIN(fade->seconds, cur_len / 2.0);
-    const double next_len = track_duration(next);
+    const double next_len = track_duration(next) / speed;
     if (next_len >= 0) {
         if (next_len < min_len) return 0;
         fade_s = FFMIN(fade_s, next_len / 2.0);
     }
 
     *fade_out = fade;
-    *remaining = end - cur->position;
+    *remaining = (end - cur->position) / speed;
     return fade_s;
 }
 
@@ -403,6 +405,7 @@ static void publish_status(AudioPlayer *ap, const bool advancing) {
     s.duration = t ? track_duration(t) : -1;
     s.callback_time = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
     s.advancing = advancing;
+    s.speed = t ? t->play_speed : 1.0;
     SDL_LockMutex(ap->status_mutex);
     ap->status = s;
     SDL_UnlockMutex(ap->status_mutex);
@@ -482,6 +485,7 @@ void output_close(AudioPlayer *ap) {
 
     SDL_LockMutex(ap->format_mutex);
     ap->output_ready = false;
+    av_freep(&ap->device_in_use);
     SDL_UnlockMutex(ap->format_mutex);
 
     av_freep(&ap->mixer.mix_buf);
@@ -491,6 +495,7 @@ void output_close(AudioPlayer *ap) {
 
 int output_open(AudioPlayer *ap, const bool use_default, const char *device_name, const int device_index) {
     SDL_AudioSpec preferred = {0}, wanted = {0}, obtained = {0};
+    char *in_use = NULL;
 
     if (use_default) {
         char *name = NULL;
@@ -498,9 +503,14 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
             preferred.freq = 48000;
             preferred.channels = 2;
         }
+        in_use = av_strdup(name && name[0] ? name : "System default");
         SDL_free(name);
     }
     else {
+        in_use = av_strdup(device_name ? device_name : "");
+    }
+    if (!in_use) return AU_ERR_NO_MEMORY;
+    if (!use_default) {
         // Prefer the name: indexes change when devices come and go
         int index = -1;
         const int count = SDL_GetNumAudioDevices(0);
@@ -511,6 +521,7 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
         if (index < 0) index = device_index;
         if (index < 0 || SDL_GetAudioDeviceSpec(index, 0, &preferred) != 0) {
             ff_log(AU_LOG_ERROR, "Failed to get the preferred spec of audio device '%s'", device_name ? device_name : "?");
+            av_free(in_use);
             return AU_ERR_DEVICE;
         }
     }
@@ -543,6 +554,7 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
     }
     if (!id) {
         ff_log(AU_LOG_ERROR, "SDL_OpenAudioDevice (%d channels, %d Hz): %s", wanted.channels, wanted.freq, SDL_GetError());
+        av_free(in_use);
         return AU_ERR_DEVICE;
     }
 
@@ -561,6 +573,7 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
         SDL_CloseAudioDevice(id);
         av_freep(&m->mix_buf);
         av_freep(&m->voice_buf);
+        av_free(in_use);
         return AU_ERR_NO_MEMORY;
     }
 
@@ -577,6 +590,9 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
     ap->audio_target.frame_size = (int32_t)(obtained.channels * sizeof(float));
     ap->audio_target.bytes_per_sec = ap->audio_target.frame_size * obtained.freq;
     ap->output_ready = true;
+    av_free(ap->device_in_use);
+    ap->device_in_use = in_use;
+    in_use = NULL;
     SDL_CondBroadcast(ap->format_cond);
     SDL_UnlockMutex(ap->format_mutex);
 

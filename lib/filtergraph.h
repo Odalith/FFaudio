@@ -45,6 +45,12 @@ int build_user_graph(FilterChain *out, const char *track_filters, const char *gl
 
 void free_filter_chain(FilterChain *c);
 
+// Speed stage at the output format: atempo x2 (keep_pitch) or asetrate + aresample (pitch follows speed)
+#define SPEED_FILTER_1 "ffaudio_tempo1"
+#define SPEED_FILTER_2 "ffaudio_tempo2"
+int build_speed_graph(FilterChain *out, int rate, const AVChannelLayout *layout, double speed, bool keep_pitch,
+                      bool use_soxr, int nb_threads);
+
 // Checks that custom downmix filters accept a 7.1 input and link to a stereo output (>= 0 on success)
 int validate_downmix_filters(const char *filters);
 
