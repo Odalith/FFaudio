@@ -72,7 +72,8 @@ Frame *frame_queue_peek_writable(FrameQueue *f)
 {
     /* wait until we have space to put a new frame */
     SDL_LockMutex(f->mutex);
-    while (f->size >= f->max_size && !packet_queue_aborted(f->pktq)) {
+    while ((f->size >= f->max_size || (f->max_samples > 0 && f->size > 0 && f->queued_samples >= f->max_samples))
+           && !packet_queue_aborted(f->pktq)) {
         SDL_CondWaitTimeout(f->cond, f->mutex, 100);
     }
     SDL_UnlockMutex(f->mutex);
@@ -96,21 +97,33 @@ Frame *frame_queue_peek_nb(FrameQueue *f)
 
 void frame_queue_push(FrameQueue *f)
 {
+    const int samples = f->queue[f->windex].frame->nb_samples;
     if (++f->windex == f->max_size)
         f->windex = 0;
     SDL_LockMutex(f->mutex);
     f->size++;
+    f->queued_samples += samples;
     SDL_CondSignal(f->cond);
     SDL_UnlockMutex(f->mutex);
 }
 
 void frame_queue_next(FrameQueue *f)
 {
+    const int samples = f->queue[f->rindex].frame->nb_samples;
     frame_queue_unref_item(&f->queue[f->rindex]);
     if (++f->rindex == f->max_size)
         f->rindex = 0;
     SDL_LockMutex(f->mutex);
     f->size--;
+    f->queued_samples -= samples;
+    SDL_CondSignal(f->cond);
+    SDL_UnlockMutex(f->mutex);
+}
+
+void frame_queue_set_max_samples(FrameQueue *f, const int64_t max_samples)
+{
+    SDL_LockMutex(f->mutex);
+    f->max_samples = max_samples;
     SDL_CondSignal(f->cond);
     SDL_UnlockMutex(f->mutex);
 }

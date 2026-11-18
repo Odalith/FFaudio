@@ -32,6 +32,8 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 add_library(ffaudio SHARED
         lib/ffaudio.c
         lib/ffaudio.h
+        lib/ffaudio_filters.h
+        lib/filters.c
         lib/cmdutils.c
         lib/cmdutils.h
         lib/packet_queue_utils.c
@@ -92,7 +94,7 @@ if(FFAUDIO_BUILD_TESTS)
                 COMMENT "Generating audio fixtures")
         add_custom_target(ffaudio_fixtures ALL DEPENDS ${FIXTURE_DIR}/.stamp)
 
-        set(FFAUDIO_TESTS test_basic test_lifecycle test_stress test_output)
+        set(FFAUDIO_TESTS test_filters test_basic test_lifecycle test_stress test_output)
         foreach(t ${FFAUDIO_TESTS})
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)

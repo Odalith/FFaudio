@@ -344,6 +344,44 @@ static void test_custom_curve(void) {
     CHECK(silence < 4);
 }
 
+static float window_peak(const Capture *c, size_t first, double from_s, double to_s) {
+    float p = 0;
+    const size_t a = first + (size_t)(from_s * c->rate), b = first + (size_t)(to_s * c->rate);
+    for (size_t i = a; i < b && i < c->frames; i++) p = fmaxf(p, frame_peak(c, i));
+    return p;
+}
+
+static void test_live_filter_changes(void) {
+    start_capture("livefilters");
+    au_play_audio(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(1000);
+    CHECK(au_set_global_filtergraph("not_a_filter=1") == AU_ERR_INVALID_ARGUMENT); // rejected, nothing changes
+    CHECK(au_set_global_filtergraph("volume=0.5") == AU_OK);
+    tc_sleep_ms(1500);
+    CHECK(au_send_filter_command(0, "volume", "volume", "0.25") == AU_OK);
+    tc_sleep_ms(1500);
+    CHECK(au_update_filtergraph(0, "volume=2") == AU_OK); // track filter runs before the global one
+    tc_sleep_ms(1500);
+    au_stop_audio();
+    wait_until_idle(1, 3000);
+    Capture c = stop_capture();
+
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const float p0 = window_peak(&c, first, 0.2, 0.8);
+    const float p1 = window_peak(&c, first, 2.0, 2.4);   // global volume=0.5
+    const float p2 = window_peak(&c, first, 3.5, 3.9);   // command: 0.25
+    const float p3 = window_peak(&c, first, 5.0, 5.4);   // track volume=2 * global 0.25 (rebuilt: back to 0.5)
+    printf("   live filters: %.4f -> %.4f -> %.4f -> %.4f, longest silence %zu\n", p0, p1, p2, p3,
+           longest_silence(&c, first, last));
+    CHECK(fabsf(p1 / p0 - 0.5f) < 0.02f);
+    CHECK(fabsf(p2 / p0 - 0.25f) < 0.02f);
+    // Rebuilding the user graph re-applies the global string (volume=0.5), the command value is not kept
+    CHECK(fabsf(p3 / p0 - 1.0f) < 0.03f);
+    CHECK(longest_silence(&c, first, last) < 6); // quietest section: zero crossings span ~3 frames
+    free(c.samples);
+}
+
 static void test_bad_filter_fails_cleanly(void) {
     start_capture("badfilter");
     const PlayAudioConfig bad = { .av_filtergraph = "this_filter_does_not_exist=1" };
@@ -368,6 +406,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_per_track_fade_override);
     RUN_TEST(test_short_tracks_stay_gapless);
     RUN_TEST(test_custom_curve);
+    RUN_TEST(test_live_filter_changes);
     RUN_TEST(test_bad_filter_fails_cleanly);
     return tc_finish("test_output");
 }

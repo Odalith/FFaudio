@@ -188,6 +188,29 @@ extern "C" {
     DLL_EXPORT int au_set_crossfade(const CrossfadeConfig *config);
 
     //+-----------------------------------------------------+
+    //| Filters                                             |
+    //+-----------------------------------------------------+
+    // Filter strings use FFmpeg's filtergraph syntax (https://ffmpeg.org/ffmpeg-filters.html) and run
+    // at the output format: float samples at the device rate and channel layout. ffaudio_filters.h has
+    // helpers that build common strings (equalizer, crossfeed, loudness normalization, ...).
+    // Changes take effect within about half a second (the audio already decoded plays out first).
+
+    // Filters applied to every track, after the track's own av_filtergraph. NULL or "" removes them.
+    // Returns AU_ERR_INVALID_ARGUMENT (and changes nothing) if the string does not parse.
+    DLL_EXPORT int au_set_global_filtergraph(const char *filters);
+
+    // Replace the filters of one track (handle from au_play_audio()/au_set_next(), 0 = the current track).
+    DLL_EXPORT int au_update_filtergraph(int32_t handle, const char *filters);
+
+    // Send a runtime command to a filter, see avfilter_graph_send_command() and each filter's
+    // "Commands" section, e.g. ("volume", "volume", "0.5") or ("anequalizer", "change", "0|f=1000|w=500|g=-6").
+    // `target` is a filter name or instance name ("all" for every filter). handle 0 = every live track.
+    DLL_EXPORT int au_send_filter_command(int32_t handle, const char *target, const char *command, const char *arg);
+
+    // Check a filter string against the current output format (or 48 kHz stereo before a device is open)
+    DLL_EXPORT int au_validate_filtergraph(const char *filters);
+
+    //+-----------------------------------------------------+
     //| Volume, looping                                     |
     //+-----------------------------------------------------+
 

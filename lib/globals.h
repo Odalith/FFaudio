@@ -114,6 +114,8 @@ typedef struct FrameQueue {
     int32_t windex;   // producer only
     int32_t size;     // guarded by mutex
     int32_t max_size;
+    int64_t queued_samples;   // guarded by mutex
+    int64_t max_samples;      // guarded by mutex; 0 = only max_size limits the queue
     SDL_mutex *mutex;
     SDL_cond *cond;
     PacketQueue *pktq;
@@ -154,6 +156,19 @@ typedef enum TrackEndReason {
 
 struct AudioPlayer;
 
+typedef struct FilterChain {
+    AVFilterGraph *graph;
+    AVFilterContext *src;
+    AVFilterContext *sink;
+} FilterChain;
+
+typedef struct FilterCmd {
+    char *target;
+    char *cmd;
+    char *arg;
+    struct FilterCmd *next;
+} FilterCmd;
+
 typedef struct TrackState {
     struct AudioPlayer *ap;
     int32_t handle;
@@ -171,7 +186,8 @@ typedef struct TrackState {
     SDL_mutex *wait_mutex;
 
     // ---- seek requests (control thread -> read thread), guarded by seek_mutex ----
-    SDL_mutex *seek_mutex;
+    SDL_mutex *seek_mutex;              // also guards filtergraph_str, filter_cmds, duration_us and end_pos_us
+    FilterCmd *filter_cmds;             // pending avfilter_graph_send_command() calls
     bool seek_req;
     int64_t seek_pos;                   // AV_TIME_BASE units
     double pending_seek_percent;        // < 0 = none; resolved by the read thread once the duration is known
@@ -184,10 +200,10 @@ typedef struct TrackState {
     PacketQueue audio_queue;
     Decoder audio_decoder;
     FrameQueue sampq;
-    AudioParams audio_filter_src;       // format of the frames entering the filter graph
-    AVFilterGraph *agraph;
-    AVFilterContext *in_audio_filter;
-    AVFilterContext *out_audio_filter;
+    AudioParams audio_filter_src;       // format of the frames entering the convert graph
+    FilterChain convert;                // audio thread only: decoder format -> output format
+    FilterChain user;                   // audio thread only: user + global filters, may be empty
+    int32_t convert_rate;               // output rate the graphs were built for
     AVDictionary *format_opts_n;
     AVDictionary *codec_opts_n;
     AVDictionary *swr_opts_n;
@@ -201,7 +217,8 @@ typedef struct TrackState {
     SDL_atomic_t failed;                // 1 when the track can not produce (more) audio because of an error
     SDL_atomic_t eos_serial;            // queue serial whose last frame has been pushed into sampq, -1 = none
     SDL_atomic_t loops_remaining;       // -1 infinite, 0 none
-    SDL_atomic_t filter_reconfigure;    // 1 = rebuild the filter graph before the next frame
+    SDL_atomic_t filter_reconfigure;    // 1 = rebuild the convert graph before the next frame (device changed)
+    SDL_atomic_t user_filters_changed;  // 1 = rebuild the user graph before the next frame
     SDL_atomic_t had_error;             // 1 = the track ends as an error, even if some audio played
     int64_t duration_us;                // written before `opened` is set, AV_NOPTS_VALUE = unknown
     int64_t end_pos_us;                 // file position where playback ends, written before `opened` is set
@@ -309,6 +326,9 @@ typedef enum MsgType {
     CMD_SET_LOOP,
     CMD_CONFIGURE_DEVICE,
     CMD_SET_CROSSFADE,
+    CMD_SET_GLOBAL_FILTERS,
+    CMD_UPDATE_TRACK_FILTERS,
+    CMD_FILTER_COMMAND,
     CMD_SHUTDOWN,
     MSG_LOG,
     MSG_TRACK_OPENED,
@@ -322,6 +342,7 @@ typedef struct Msg {
     int32_t handle;
     char *str;                      // owned
     char *str2;                     // owned
+    char *str3;                     // owned
     PlayAudioConfig play_config;    // av_filtergraph points at str2
     bool has_play_config;
     AuFade fade_in_override;
@@ -392,6 +413,7 @@ typedef struct AudioPlayer {
     SDL_mutex *format_mutex;
     SDL_cond *format_cond;              // signalled when the output format becomes available
     bool output_ready;                  // guarded by format_mutex
+    char *global_filters;               // guarded by format_mutex, applied after each track's own filters
     AudioParams audio_target;           // float32 interleaved at the device rate/layout, guarded by format_mutex
     SDL_AudioDeviceID device_id;
     SDL_AudioSpec obtained_spec;

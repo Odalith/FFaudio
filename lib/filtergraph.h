@@ -23,17 +23,29 @@
 
 #include "globals.h"
 
-// (Re)builds the track's filter graph for the current output format.
-// Returns AVERROR(EAGAIN) when no output device has been configured yet.
-int configure_audio_filters(AudioPlayer *ap, TrackState *is);
+/*
+ * Each track runs two graphs:
+ *
+ *   convert: abuffer (decoder format) -> aresample (float, output rate + layout) -> aformat -> abuffersink
+ *   user:    abuffer (output format) -> [track filters] -> [global filters] -> aformat -> abuffersink
+ *
+ * The convert graph is rebuilt only when the decoded format, the serial (seek) or the device changes.
+ * The user graph exists only when filters are set and can be replaced while playing without
+ * restarting the resampler.
+ */
 
-// Frees the track's filter graph and clears the in/out filter pointers
-void free_audio_filters(TrackState *is);
+// (Re)builds the track's convert graph for the current output format.
+// Returns AVERROR(EAGAIN) when no output device has been configured yet.
+int configure_convert_graph(AudioPlayer *ap, TrackState *t);
+
+// Builds a user graph for the given filter strings (either may be NULL) at the given output format.
+// With no filters at all, *out is left empty and 0 is returned.
+int build_user_graph(FilterChain *out, const char *track_filters, const char *global_filters,
+                     int rate, const AVChannelLayout *layout, int nb_threads);
+
+void free_filter_chain(FilterChain *c);
 
 // Whether aresample can use the higher quality soxr resampler
 bool filtergraph_soxr_available(void);
-
-// Checks that a user filter string parses and links (>= 0 on success)
-int filtergraph_validate(const char *filtergraph);
 
 #endif //FFAUDIO_FILTERGRAPH_H

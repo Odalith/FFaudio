@@ -182,6 +182,14 @@ void track_destroy(TrackState *t) {
     SDL_DestroyMutex(t->seek_mutex);
     av_free(t->filename);
     av_free(t->filtergraph_str);
+    while (t->filter_cmds) {
+        FilterCmd *c = t->filter_cmds;
+        t->filter_cmds = c->next;
+        av_free(c->target);
+        av_free(c->cmd);
+        av_free(c->arg);
+        av_free(c);
+    }
     av_free(t);
 }
 
@@ -203,6 +211,36 @@ void track_request_seek_percent(TrackState *t, const double percent) {
     SDL_LockMutex(t->seek_mutex);
     t->pending_seek_percent = percent;
     SDL_UnlockMutex(t->seek_mutex);
+}
+
+int track_set_filters(TrackState *t, const char *filters) {
+    char *copy = NULL;
+    if (filters && filters[0] && !(copy = av_strdup(filters)))
+        return AVERROR(ENOMEM);
+    SDL_LockMutex(t->seek_mutex);
+    av_free(t->filtergraph_str);
+    t->filtergraph_str = copy;
+    SDL_UnlockMutex(t->seek_mutex);
+    SDL_AtomicSet(&t->user_filters_changed, 1);
+    return 0;
+}
+
+int track_queue_filter_command(TrackState *t, const char *target, const char *cmd, const char *arg) {
+    FilterCmd *c = av_mallocz(sizeof(FilterCmd));
+    if (!c) return AVERROR(ENOMEM);
+    c->target = av_strdup(target);
+    c->cmd = av_strdup(cmd);
+    c->arg = arg ? av_strdup(arg) : NULL;
+    if (!c->target || !c->cmd || (arg && !c->arg)) {
+        av_free(c->target); av_free(c->cmd); av_free(c->arg); av_free(c);
+        return AVERROR(ENOMEM);
+    }
+    SDL_LockMutex(t->seek_mutex);
+    FilterCmd **tail = &t->filter_cmds;
+    while (*tail) tail = &(*tail)->next;
+    *tail = c;
+    SDL_UnlockMutex(t->seek_mutex);
+    return 0;
 }
 
 //+-----------------------------------------------------+
@@ -510,35 +548,68 @@ end:
 //| Audio (decoder) thread                              |
 //+-----------------------------------------------------+
 
-static int push_filtered_frames(TrackState *t, AVFrame *frame, const int serial) {
-    int ret;
-    while ((ret = av_buffersink_get_frame_flags(t->out_audio_filter, frame, 0)) >= 0) {
-        const AVRational tb = av_buffersink_get_time_base(t->out_audio_filter);
-        Frame *af = frame_queue_peek_writable(&t->sampq);
-        if (!af) {
-            av_frame_unref(frame);
-            return AVERROR_EXIT;
-        }
-        af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
-        af->pos = -1;
-        af->serial = serial;
-        af->duration = av_q2d((AVRational){frame->nb_samples, frame->sample_rate});
-        av_frame_move_ref(af->frame, frame);
-        frame_queue_push(&t->sampq);
+// Decoded audio kept ready for the mixer, after all filters. Small enough that filter changes are
+// heard quickly, large enough to ride out scheduling hiccups.
+#define DECODED_BUFFER_SECONDS 0.5
 
-        if (packet_queue_serial(&t->audio_queue) != serial)
-            break;
+static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const int serial) {
+    Frame *af = frame_queue_peek_writable(&t->sampq);
+    if (!af) {
+        av_frame_unref(frame);
+        return AVERROR_EXIT;
     }
-    return ret;
+    af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
+    af->pos = -1;
+    af->serial = serial;
+    af->duration = av_q2d((AVRational){frame->nb_samples, frame->sample_rate});
+    av_frame_move_ref(af->frame, frame);
+    frame_queue_push(&t->sampq);
+    return 0;
 }
 
-// (Re)configure the graph, waiting for an output device if none is open yet. < 0 = give up.
-static int ensure_filters(TrackState *t) {
+// Feed one converted frame (NULL = flush) through the user graph, or straight into the queue.
+// Returns AVERROR_EOF when the user graph ended by itself, AVERROR_EXIT when aborted.
+static int feed_user(TrackState *t, AVFrame *frame, AVFrame *tmp, const AVRational tb, const int serial) {
+    if (!t->user.graph)
+        return frame ? queue_frame(t, frame, tb, serial) : 0;
+
+    if (av_buffersrc_add_frame(t->user.src, frame) < 0) {
+        if (frame) av_frame_unref(frame);
+        return 0;
+    }
+    int ret;
+    while ((ret = av_buffersink_get_frame_flags(t->user.sink, tmp, 0)) >= 0) {
+        if ((ret = queue_frame(t, tmp, av_buffersink_get_time_base(t->user.sink), serial)) < 0)
+            return ret;
+        if (packet_queue_serial(&t->audio_queue) != serial)
+            return 0;
+    }
+    return ret == AVERROR_EOF ? AVERROR_EOF : 0;
+}
+
+// Pass everything the convert graph has produced on to the user graph
+static int drain_convert(TrackState *t, AVFrame *conv, AVFrame *tmp, const int serial) {
+    int ret;
+    while ((ret = av_buffersink_get_frame_flags(t->convert.sink, conv, 0)) >= 0) {
+        const AVRational tb = av_buffersink_get_time_base(t->convert.sink);
+        if ((ret = feed_user(t, conv, tmp, tb, serial)) < 0)
+            return ret;
+        if (packet_queue_serial(&t->audio_queue) != serial)
+            return 0;
+    }
+    return ret == AVERROR_EOF ? AVERROR_EOF : 0;
+}
+
+// (Re)configure the convert graph, waiting for an output device if none is open yet. < 0 = give up.
+static int ensure_convert_graph(TrackState *t) {
     AudioPlayer *ap = t->ap;
     for (;;) {
-        const int ret = configure_audio_filters(ap, t);
-        if (ret != AVERROR(EAGAIN))
+        const int ret = configure_convert_graph(ap, t);
+        if (ret != AVERROR(EAGAIN)) {
+            if (ret >= 0)
+                frame_queue_set_max_samples(&t->sampq, (int64_t)(t->convert_rate * DECODED_BUFFER_SECONDS));
             return ret;
+        }
         SDL_LockMutex(ap->format_mutex);
         if (!ap->output_ready && !packet_queue_aborted(&t->audio_queue))
             SDL_CondWaitTimeout(ap->format_cond, ap->format_mutex, 100);
@@ -548,15 +619,86 @@ static int ensure_filters(TrackState *t) {
     }
 }
 
+// Rebuild the user graph from the current track and global filter strings. On failure the previous
+// graph is kept, except on the first build (then the error is returned and the track fails).
+static int rebuild_user_graph(TrackState *t, const bool first) {
+    AudioPlayer *ap = t->ap;
+    char *track_filters = NULL, *global_filters = NULL;
+    AVChannelLayout layout = {0};
+
+    SDL_LockMutex(t->seek_mutex);
+    if (t->filtergraph_str) track_filters = av_strdup(t->filtergraph_str);
+    SDL_UnlockMutex(t->seek_mutex);
+
+    SDL_LockMutex(ap->format_mutex);
+    if (ap->global_filters) global_filters = av_strdup(ap->global_filters);
+    const int rate = ap->audio_target.freq;
+    int ret = av_channel_layout_copy(&layout, &ap->audio_target.ch_layout);
+    SDL_UnlockMutex(ap->format_mutex);
+
+    FilterChain fresh = {0};
+    if (ret >= 0)
+        ret = build_user_graph(&fresh, track_filters, global_filters, rate, &layout, ap->filter_nbthreads);
+
+    if (ret < 0) {
+        ff_log(AU_LOG_ERROR, "Invalid filters for '%s' (track: \"%s\", global: \"%s\"): %s%s", t->filename,
+               track_filters ? track_filters : "", global_filters ? global_filters : "", av_err2str(ret),
+               first ? "" : "; keeping the previous filters");
+    }
+    else {
+        free_filter_chain(&t->user);
+        t->user = fresh;
+    }
+
+    av_free(track_filters);
+    av_free(global_filters);
+    av_channel_layout_uninit(&layout);
+    return first ? ret : 0;
+}
+
+static void run_filter_commands(TrackState *t) {
+    SDL_LockMutex(t->seek_mutex);
+    FilterCmd *list = t->filter_cmds;
+    t->filter_cmds = NULL;
+    SDL_UnlockMutex(t->seek_mutex);
+
+    while (list) {
+        FilterCmd *c = list;
+        list = c->next;
+        if (t->user.graph) {
+            char response[256] = "";
+            const int ret = avfilter_graph_send_command(t->user.graph, c->target, c->cmd, c->arg,
+                                                        response, sizeof(response), 0);
+            if (ret < 0)
+                ff_log(AU_LOG_WARNING, "Filter command '%s %s %s' failed: %s", c->target, c->cmd,
+                       c->arg ? c->arg : "", av_err2str(ret));
+        }
+        av_free(c->target);
+        av_free(c->cmd);
+        av_free(c->arg);
+        av_free(c);
+    }
+}
+
+static void fail_track(TrackState *t) {
+    SDL_AtomicSet(&t->had_error, 1);
+    SDL_AtomicSet(&t->failed, 1);
+    SDL_AtomicSet(&t->eos_serial, packet_queue_serial(&t->audio_queue));
+    ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
+}
+
 static int audio_thread(void *arg) {
     TrackState *t = arg;
     AVFrame *frame = av_frame_alloc();
+    AVFrame *conv = av_frame_alloc();
+    AVFrame *tmp = av_frame_alloc();
     int last_serial = -1;
-    int flushed_serial = -1;   // serial whose graph has been flushed at EOF
+    int ended_serial = -1;     // serial whose audio has completely been queued
+    bool user_built = false;
     int ret = 0;
 
-    if (!frame)
-        return AVERROR(ENOMEM);
+    if (!frame || !conv || !tmp)
+        goto end;
 
     for (;;) {
         const int got_frame = decoder_decode_frame(&t->audio_decoder, frame);
@@ -566,68 +708,85 @@ static int audio_thread(void *arg) {
         const int serial = t->audio_decoder.pkt_serial;
 
         if (!got_frame) {
-            // Decoder drained: flush the filter graph so its buffered tail is played, then mark the end
+            // Decoder drained: flush both graphs so their buffered tails are played, then mark the end
             if (t->audio_decoder.finished == serial && serial == packet_queue_serial(&t->audio_queue)
-                && flushed_serial != serial) {
-                if (t->in_audio_filter && last_serial == serial) {
-                    if (av_buffersrc_add_frame(t->in_audio_filter, NULL) >= 0)
-                        if (push_filtered_frames(t, frame, serial) == AVERROR_EXIT)
-                            break;
+                && ended_serial != serial) {
+                if (t->convert.graph && last_serial == serial) {
+                    if (av_buffersrc_add_frame(t->convert.src, NULL) >= 0 &&
+                        drain_convert(t, conv, tmp, serial) == AVERROR_EXIT)
+                        break;
+                    if (feed_user(t, NULL, tmp, (AVRational){1, t->convert_rate}, serial) == AVERROR_EXIT)
+                        break;
                 }
-                flushed_serial = serial;
+                ended_serial = serial;
                 SDL_AtomicSet(&t->eos_serial, serial);
             }
             continue;
         }
 
-        const bool reconfigure =
-            !t->in_audio_filter
+        if (ended_serial == serial) {
+            // The user graph already ended (e.g. an atrim filter): drop the rest until the next seek
+            av_frame_unref(frame);
+            continue;
+        }
+
+        const bool rebuild_convert =
+            !t->convert.graph
             || SDL_AtomicGet(&t->filter_reconfigure)
             || serial != last_serial
-            || flushed_serial == last_serial
             || t->audio_filter_src.fmt != frame->format
             || av_channel_layout_compare(&t->audio_filter_src.ch_layout, &frame->ch_layout)
             || t->audio_filter_src.freq != frame->sample_rate;
 
-        if (reconfigure) {
+        if (rebuild_convert) {
             SDL_AtomicSet(&t->filter_reconfigure, 0);
             t->audio_filter_src.fmt = frame->format;
             if ((ret = av_channel_layout_copy(&t->audio_filter_src.ch_layout, &frame->ch_layout)) < 0)
                 break;
             t->audio_filter_src.freq = frame->sample_rate;
             last_serial = serial;
-            if (flushed_serial == serial) flushed_serial = -1;
 
-            if ((ret = ensure_filters(t)) < 0) {
+            if ((ret = ensure_convert_graph(t)) < 0) {
                 if (ret != AVERROR_EXIT) {
-                    ff_log(AU_LOG_ERROR, "Could not configure the filter graph for '%s'%s%s: %s", t->filename,
-                           t->filtergraph_str ? " with filters " : "", t->filtergraph_str ? t->filtergraph_str : "",
-                           av_err2str(ret));
-                    SDL_AtomicSet(&t->had_error, 1);
-                    SDL_AtomicSet(&t->failed, 1);
-                    SDL_AtomicSet(&t->eos_serial, packet_queue_serial(&t->audio_queue));
-                    ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
+                    ff_log(AU_LOG_ERROR, "Could not configure the conversion for '%s': %s", t->filename, av_err2str(ret));
+                    fail_track(t);
                 }
                 break;
             }
+            // The user graph restarts with the conversion (seek, device change): stale state is dropped
+            SDL_AtomicSet(&t->user_filters_changed, 1);
         }
 
-        if ((ret = av_buffersrc_add_frame(t->in_audio_filter, frame)) < 0) {
+        if (SDL_AtomicGet(&t->user_filters_changed)) {
+            SDL_AtomicSet(&t->user_filters_changed, 0);
+            if (rebuild_user_graph(t, !user_built) < 0) {
+                fail_track(t);
+                break;
+            }
+            user_built = true;
+        }
+
+        run_filter_commands(t);
+
+        if (av_buffersrc_add_frame(t->convert.src, frame) < 0) {
             av_frame_unref(frame);
             continue;
         }
-        ret = push_filtered_frames(t, frame, serial);
+        ret = drain_convert(t, conv, tmp, serial);
         if (ret == AVERROR_EXIT)
             break;
         if (ret == AVERROR_EOF) {
-            // Graph ended on its own (e.g. a trim filter): treat as the end of this serial
-            flushed_serial = serial;
+            ended_serial = serial;
             SDL_AtomicSet(&t->eos_serial, serial);
         }
     }
 
-    free_audio_filters(t);
+end:
+    free_filter_chain(&t->convert);
+    free_filter_chain(&t->user);
     av_frame_free(&frame);
+    av_frame_free(&conv);
+    av_frame_free(&tmp);
     return ret;
 }
 

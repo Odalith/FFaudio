@@ -60,6 +60,7 @@ static void msg_free(Msg *m) {
     if (!m) return;
     av_free(m->str);
     av_free(m->str2);
+    av_free(m->str3);
     av_free(m);
 }
 
@@ -464,6 +465,44 @@ static void apply_crossfade_config(AudioPlayer *ap, const CrossfadeConfig *cfg) 
     unlock_mixer(ap);
 }
 
+static TrackState *track_for_handle(AudioPlayer *ap, const int32_t handle) {
+    if (handle) return registry_find(ap, handle);
+    lock_mixer(ap);
+    TrackState *cur = ap->mixer.current;
+    unlock_mixer(ap);
+    return cur;
+}
+
+static void cmd_filters(AudioPlayer *ap, const Msg *msg) {
+    switch (msg->type) {
+        case CMD_SET_GLOBAL_FILTERS: {
+            SDL_LockMutex(ap->format_mutex);
+            av_free(ap->global_filters);
+            ap->global_filters = msg->str && msg->str[0] ? av_strdup(msg->str) : NULL;
+            SDL_UnlockMutex(ap->format_mutex);
+            for (int i = 0; i < ap->n_tracks; i++)
+                if (!ap->tracks[i]->ended)
+                    SDL_AtomicSet(&ap->tracks[i]->user_filters_changed, 1);
+            break;
+        }
+        case CMD_UPDATE_TRACK_FILTERS: {
+            TrackState *t = track_for_handle(ap, msg->handle);
+            if (t && !t->ended) track_set_filters(t, msg->str);
+            else ff_log(AU_LOG_WARNING, "au_update_filtergraph: no track with handle %d", msg->handle);
+            break;
+        }
+        case CMD_FILTER_COMMAND:
+            for (int i = 0; i < ap->n_tracks; i++) {
+                TrackState *t = ap->tracks[i];
+                if (!t->ended && (!msg->handle || t->handle == msg->handle))
+                    track_queue_filter_command(t, msg->str, msg->str2, msg->str3);
+            }
+            break;
+        default:
+            break;
+    }
+}
+
 // Re-open the output. When the format changes, the tracks are re-synchronised by seeking them to
 // where they are, which flushes audio decoded for the old format.
 static int reopen_output(AudioPlayer *ap, const bool use_default, const char *name, const int index) {
@@ -703,6 +742,9 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_SEEK_PERCENT:     cmd_seek(ap, msg); break;
         case CMD_SET_LOOP:         cmd_set_loop(ap, (int)msg->i64); break;
         case CMD_SET_CROSSFADE:    apply_crossfade_config(ap, &msg->crossfade); break;
+        case CMD_SET_GLOBAL_FILTERS:
+        case CMD_UPDATE_TRACK_FILTERS:
+        case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
         case CMD_CONFIGURE_DEVICE: finish_sync(msg, cmd_configure_device(ap, msg)); msg->done = NULL; break;
         case CMD_SHUTDOWN:         return false;
         case MSG_LOG:
@@ -904,6 +946,7 @@ void au_shutdown(void) {
     }
     av_free(ap->tracks);
     av_free(ap->audio_device_name);
+    av_free(ap->global_filters);
     av_channel_layout_uninit(&ap->audio_target.ch_layout);
     SDL_DestroyMutex(ap->msg_mutex);
     SDL_DestroyCond(ap->msg_cond);
@@ -1076,6 +1119,70 @@ int au_set_crossfade(const CrossfadeConfig *config) {
     if (config) m->crossfade = *config;
     msg_post(ap, m);
     return AU_OK;
+}
+
+//+-----------------------------------------------------+
+//| Public API: filters                                 |
+//+-----------------------------------------------------+
+
+int au_validate_filtergraph(const char *filters) {
+    AudioPlayer *ap = audio_player;
+    if (!filters || !filters[0]) return AU_OK;
+
+    int rate = 48000;
+    AVChannelLayout layout = AV_CHANNEL_LAYOUT_STEREO;
+    if (ap) {
+        SDL_LockMutex(ap->format_mutex);
+        if (ap->output_ready) {
+            rate = ap->audio_target.freq;
+            av_channel_layout_copy(&layout, &ap->audio_target.ch_layout);
+        }
+        SDL_UnlockMutex(ap->format_mutex);
+    }
+    FilterChain c = {0};
+    const int ret = build_user_graph(&c, filters, NULL, rate, &layout, 0);
+    free_filter_chain(&c);
+    av_channel_layout_uninit(&layout);
+    return ret < 0 ? AU_ERR_INVALID_ARGUMENT : AU_OK;
+}
+
+static int post_filter_msg(const MsgType type, const int32_t handle, const char *s1, const char *s2, const char *s3) {
+    AudioPlayer *ap = audio_player;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
+    SDL_AtomicIncRef(&ap->request_count);
+    Msg *m = msg_new(type);
+    if (!m) return AU_ERR_NO_MEMORY;
+    m->handle = handle;
+    if ((s1 && !(m->str = av_strdup(s1))) || (s2 && !(m->str2 = av_strdup(s2))) || (s3 && !(m->str3 = av_strdup(s3)))) {
+        msg_free(m);
+        return AU_ERR_NO_MEMORY;
+    }
+    msg_post(ap, m);
+    return AU_OK;
+}
+
+int au_set_global_filtergraph(const char *filters) {
+    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+    if (au_validate_filtergraph(filters) != AU_OK) {
+        ff_log(AU_LOG_ERROR, "au_set_global_filtergraph: invalid filters \"%s\"", filters);
+        return AU_ERR_INVALID_ARGUMENT;
+    }
+    return post_filter_msg(CMD_SET_GLOBAL_FILTERS, 0, filters, NULL, NULL);
+}
+
+int au_update_filtergraph(const int32_t handle, const char *filters) {
+    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+    if (handle < 0) return AU_ERR_INVALID_ARGUMENT;
+    if (au_validate_filtergraph(filters) != AU_OK) {
+        ff_log(AU_LOG_ERROR, "au_update_filtergraph: invalid filters \"%s\"", filters);
+        return AU_ERR_INVALID_ARGUMENT;
+    }
+    return post_filter_msg(CMD_UPDATE_TRACK_FILTERS, handle, filters, NULL, NULL);
+}
+
+int au_send_filter_command(const int32_t handle, const char *target, const char *command, const char *arg) {
+    if (!target || !command || handle < 0) return AU_ERR_INVALID_ARGUMENT;
+    return post_filter_msg(CMD_FILTER_COMMAND, handle, target, command, arg);
 }
 
 //+-----------------------------------------------------+

@@ -35,6 +35,12 @@ void track_request_seek(TrackState *t, int64_t pos_us);
 // Control thread: seek to a percentage of the duration, resolved once the duration is known
 void track_request_seek_percent(TrackState *t, double percent);
 
+// Any thread: replace the track's own filters (NULL = none); applied before the next decoded frame
+int track_set_filters(TrackState *t, const char *filters);
+
+// Any thread: run avfilter_graph_send_command() on the track's user graph before the next decoded frame
+int track_queue_filter_command(TrackState *t, const char *target, const char *cmd, const char *arg);
+
 // Any thread: duration in seconds of the part that will play, -1 when unknown
 double track_duration(TrackState *t);
 

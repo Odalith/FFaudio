@@ -43,4 +43,7 @@ void frame_queue_next(FrameQueue *f);
 
 int frame_queue_nb_remaining(FrameQueue *f);
 
+// Limit the queue to roughly this many samples of audio (0 = no limit besides the frame count)
+void frame_queue_set_max_samples(FrameQueue *f, int64_t max_samples);
+
 #endif //FFAUDIO_FRAME_QUEUE_UTILS_H
