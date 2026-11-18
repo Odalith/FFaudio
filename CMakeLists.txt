@@ -59,6 +59,8 @@ add_library(ffaudio
         ${FFAUDIO_PUBLIC_HEADERS}
         lib/ffaudio.c
         lib/filters.c
+        lib/metadata.c
+        lib/metadata.h
         lib/track.c
         lib/track.h
         lib/output.c
@@ -157,7 +159,7 @@ if(FFAUDIO_BUILD_TESTS)
                 COMMENT "Generating audio fixtures")
         add_custom_target(ffaudio_fixtures ALL DEPENDS ${FIXTURE_DIR}/.stamp)
 
-        foreach(t test_basic test_lifecycle test_stress test_output)
+        foreach(t test_basic test_lifecycle test_stress test_output test_metadata)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})

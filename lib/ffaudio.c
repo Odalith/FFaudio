@@ -36,6 +36,7 @@
 #include "filtergraph.h"
 #include "output.h"
 #include "track.h"
+#include "metadata.h"
 
 
 #define CONTROL_TICK_MS 5
@@ -756,6 +757,27 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_UPDATE_TRACK_FILTERS:
         case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
         case CMD_CONFIGURE_DEVICE: finish_sync(msg, cmd_configure_device(ap, msg)); msg->done = NULL; break;
+        case CMD_SET_REPLAYGAIN:
+            SDL_LockMutex(ap->format_mutex);
+            ap->replaygain = msg->replaygain;
+            SDL_UnlockMutex(ap->format_mutex);
+            for (int i = 0; i < ap->n_tracks; i++)
+                if (!ap->tracks[i]->ended)
+                    track_update_gain(ap->tracks[i]);
+            break;
+        case CMD_GET_TRACK_INFO: {
+            TrackState *t = track_for_handle(ap, msg->handle);
+            *msg->out_ptr = (t && !t->ended) ? track_copy_info(t) : NULL;
+            break;
+        }
+        case CMD_GET_TRACK_GAIN: {
+            TrackState *t = track_for_handle(ap, msg->handle);
+            const bool known = t && !t->ended && SDL_AtomicGet(&t->opened);
+            if (known) *msg->out_double = SDL_AtomicGet(&t->gain_mb) / 100.0;
+            finish_sync(msg, known ? AU_OK : AU_ERR_NOTHING_TO_DO);
+            msg->done = NULL;
+            break;
+        }
         case CMD_SHUTDOWN:         return false;
         case MSG_LOG:
             note_add((Note){ .type = NOTE_LOG, .text = msg->str, .i = msg->level, .request = msg->request });
@@ -1078,6 +1100,11 @@ static int32_t post_track_command(const MsgType type, const char *filename, cons
             m->has_fade_in_override = true;
             m->play_config.fade_in = &m->fade_in_override;
         }
+        if (config->replaygain) {
+            m->replaygain_override = *config->replaygain;
+            m->has_replaygain_override = true;
+            m->play_config.replaygain = &m->replaygain_override;
+        }
     }
     m->handle = SDL_AtomicAdd(&ap->handle_count, 1) + 1;
     const int32_t handle = m->handle;
@@ -1196,6 +1223,54 @@ int au_update_filtergraph(const int32_t handle, const char *filters) {
         return AU_ERR_INVALID_ARGUMENT;
     }
     return post_filter_msg(CMD_UPDATE_TRACK_FILTERS, handle, filters, NULL, NULL);
+}
+
+//+-----------------------------------------------------+
+//| Public API: ReplayGain, track info                  |
+//+-----------------------------------------------------+
+
+int au_set_replaygain(const AuReplayGainConfig *config) {
+    AudioPlayer *ap = audio_player;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
+    AuReplayGainConfig cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    if (config) {
+        cfg = *config;
+        if (cfg.mode != AU_REPLAYGAIN_OFF && cfg.mode != AU_REPLAYGAIN_TRACK && cfg.mode != AU_REPLAYGAIN_ALBUM)
+            return AU_ERR_INVALID_ARGUMENT;
+        if (!isfinite(cfg.preamp_db) || cfg.preamp_db < -15 || cfg.preamp_db > 15) return AU_ERR_INVALID_ARGUMENT;
+        if (!isfinite(cfg.fallback_gain_db) || cfg.fallback_gain_db < -30 || cfg.fallback_gain_db > 15)
+            return AU_ERR_INVALID_ARGUMENT;
+    }
+    SDL_AtomicIncRef(&ap->request_count);
+    Msg *m = msg_new(CMD_SET_REPLAYGAIN);
+    if (!m) return AU_ERR_NO_MEMORY;
+    m->replaygain = cfg;
+    msg_post(ap, m);
+    return AU_OK;
+}
+
+AuMediaInfo *au_get_track_info(const int32_t handle) {
+    AudioPlayer *ap = audio_player;
+    if (!ap || handle < 0) return NULL;
+    void *info = NULL;
+    Msg *m = msg_new(CMD_GET_TRACK_INFO);
+    if (!m) return NULL;
+    m->handle = handle;
+    m->out_ptr = &info;
+    run_sync(ap, m);
+    return info;
+}
+
+int au_get_track_gain_db(const int32_t handle, double *out_gain_db) {
+    AudioPlayer *ap = audio_player;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
+    if (handle < 0 || !out_gain_db) return AU_ERR_INVALID_ARGUMENT;
+    Msg *m = msg_new(CMD_GET_TRACK_GAIN);
+    if (!m) return AU_ERR_NO_MEMORY;
+    m->handle = handle;
+    m->out_double = out_gain_db;
+    return run_sync(ap, m);
 }
 
 int au_set_downmix(const AU_DOWNMIX mode, const char *custom_filters) {

@@ -36,6 +36,24 @@ for c in FL FC LFE SL; do
        -af "pan=5.1(side)|${c}=c0" -sample_fmt s16 "surround_${c}.flac"
 done
 
+# Tagged files for metadata / ReplayGain tests. The sine is at -18.06 dBFS in both channels.
+TAGS=(-metadata title="Test Song" -metadata artist="Test Artist" -metadata album="Test Album"
+      -metadata album_artist="Various" -metadata track=3/12 -metadata disc=1/2 -metadata date=2024
+      -metadata genre=Rock -metadata REPLAYGAIN_TRACK_GAIN="-6.00 dB" -metadata REPLAYGAIN_TRACK_PEAK=0.125
+      -metadata REPLAYGAIN_ALBUM_GAIN="-3.00 dB" -metadata REPLAYGAIN_ALBUM_PEAK=0.2)
+rg_sine() { # name seconds [ffmpeg output args...]
+    local name=$1 secs=$2; shift 2
+    ff -f lavfi -i "sine=frequency=440:duration=${secs}:sample_rate=48000" -af "pan=stereo|c0=c0|c1=c0" "$@" "$name"
+}
+rg_sine rg_tagged.flac 1 -sample_fmt s16 "${TAGS[@]}"
+rg_sine rg_tagged.mp3  1 "${TAGS[@]}"
+rg_sine rg_long.flac   3 -sample_fmt s16 "${TAGS[@]}"
+# Opus R128 gain -2816 = -11 dB re -23 LUFS = -6 dB re ReplayGain's -18 LUFS
+rg_sine rg_r128.opus   1 -c:a libopus -b:a 192k -metadata title="Opus Song" -metadata R128_TRACK_GAIN=-2816
+# +12 dB with a peak of 0.5: clipping prevention limits the gain to +6.02 dB
+rg_sine rg_hot.flac    1 -sample_fmt s16 -metadata REPLAYGAIN_TRACK_GAIN="+12.00 dB" -metadata REPLAYGAIN_TRACK_PEAK=0.5
+rg_sine rg_untagged.flac 1 -sample_fmt s16
+
 # Broken / non-audio inputs
 : > empty.flac
 echo "this is not audio" > text.mp3

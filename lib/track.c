@@ -25,6 +25,8 @@
  */
 
 #include "track.h"
+#include "metadata.h"
+#include <math.h>
 #include "decoder_utils.h"
 #include "filtergraph.h"
 #include "frame_queue_utils.h"
@@ -132,6 +134,10 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
             t->fade_in_override = *config->fade_in;
             t->has_fade_in_override = true;
         }
+        if (config->replaygain) {
+            t->replaygain_override = *config->replaygain;
+            t->has_replaygain_override = true;
+        }
     }
 
     if (packet_queue_init(&t->audio_queue) < 0) goto fail;
@@ -177,6 +183,7 @@ void track_destroy(TrackState *t) {
     SDL_DestroyCond(t->continue_read_thread);
     SDL_DestroyMutex(t->wait_mutex);
     SDL_DestroyMutex(t->seek_mutex);
+    au_media_info_free(t->info);
     av_free(t->filename);
     av_free(t->filtergraph_str);
     while (t->filter_cmds) {
@@ -208,6 +215,31 @@ void track_request_seek_percent(TrackState *t, const double percent) {
     SDL_LockMutex(t->seek_mutex);
     t->pending_seek_percent = percent;
     SDL_UnlockMutex(t->seek_mutex);
+}
+
+void track_update_gain(TrackState *t) {
+    AudioPlayer *ap = t->ap;
+    SDL_LockMutex(ap->format_mutex);
+    const AuReplayGainConfig cfg = ap->replaygain;
+    SDL_UnlockMutex(ap->format_mutex);
+
+    SDL_LockMutex(t->seek_mutex);
+    const bool known = t->info || t->has_replaygain_override;
+    AuReplayGainInfo rg;
+    if (t->has_replaygain_override) rg = t->replaygain_override;
+    else rg = au_media_replaygain(t->info);
+    SDL_UnlockMutex(t->seek_mutex);
+
+    if (!known) return; // not open yet: the read thread calls this again once the tags are known
+    const double db = replaygain_gain_db(&cfg, &rg);
+    SDL_AtomicSet(&t->gain_mb, (int)lrint(db * 100.0));
+}
+
+AuMediaInfo *track_copy_info(TrackState *t) {
+    SDL_LockMutex(t->seek_mutex);
+    AuMediaInfo *copy = media_info_copy(t->info);
+    SDL_UnlockMutex(t->seek_mutex);
+    return copy;
 }
 
 int track_set_filters(TrackState *t, const char *filters) {
@@ -407,6 +439,17 @@ static int read_thread(void *arg) {
         ic->streams[i]->discard = AVDISCARD_ALL;
 
     const int st_index = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+
+    // Tags and the ReplayGain gain are ready before the decoder starts, so the first sample is already
+    // at the right level
+    if (st_index >= 0) {
+        AuMediaInfo *info = media_info_from_context(ic, st_index, t->filename);
+        SDL_LockMutex(t->seek_mutex);
+        t->info = info;
+        SDL_UnlockMutex(t->seek_mutex);
+        track_update_gain(t);
+    }
+
     if (st_index < 0 || stream_component_open(t, st_index) < 0 || t->audio_stream < 0) {
         if (!SDL_AtomicGet(&t->abort_request))
             ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);

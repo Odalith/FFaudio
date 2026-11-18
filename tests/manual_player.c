@@ -19,7 +19,7 @@
 /*
  * Interactive player for listening tests on real hardware.
  *
- *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels] [-d full|norm|"filters"]
+ *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels] [-d full|norm|"filters"] [-r track|album]
  *
  * Plays the files under <music-dir> (shuffled with -s), queueing the next one from on_prepare_next.
  * Keys (no Enter needed in a terminal): n = next, p = pause/resume, s = stop, m = mute, + / - = volume,
@@ -144,7 +144,21 @@ static void on_eof(bool skip, bool error, int32_t handle, void *ud) {
 static void on_started(int32_t handle, void *ud) {
     (void)ud;
     clear_queued_if(handle);
-    printf("> now playing #%d\n", handle);
+    AuMediaInfo *info = au_get_track_info(handle);
+    double gain = 0;
+    const bool has_gain = au_get_track_gain_db(handle, &gain) == AU_OK && gain != 0;
+    if (info) {
+        const char *artist = au_media_tag(info, "artist"), *title = au_media_tag(info, "title");
+        printf("> now playing #%d: %s - %s  [%s %d Hz %d ch%s]", handle, artist ? artist : "?",
+               title ? title : au_media_filename(info), au_media_codec(info), au_media_sample_rate(info),
+               au_media_channels(info), au_media_replaygain(info).has_track_gain ? ", ReplayGain" : "");
+        au_media_info_free(info);
+    }
+    else {
+        printf("> now playing #%d", handle);
+    }
+    if (has_gain) printf("  gain %+.2f dB", gain);
+    printf("\n");
 }
 
 static void on_duration(int32_t handle, double duration, void *ud) {
@@ -170,7 +184,8 @@ static void on_restart(int32_t handle, double pos, bool looped, int32_t remainin
     (void)ud;
     printf("  #%d restarted at %.2f%s (loops left %d)\n", handle, pos, looped ? " by looping" : "", remaining);
 }
-
+    const char *downmix = NULL;
+    const char *replaygain = NULL;
 static void on_device(int32_t channels, int32_t rate, void *ud) {
     (void)ud;
     printf("  output: %d Hz, %d channels\n", rate, channels);
@@ -178,7 +193,7 @@ static void on_device(int32_t channels, int32_t rate, void *ud) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"]\n", argv[0]);
+        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album]\n", argv[0]);
         return 1;
     }
     double crossfade = 0;
@@ -192,6 +207,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-s")) shuffle = true;
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) channels = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) downmix = argv[++i];
+        else if (!strcmp(argv[i], "-r") && i + 1 < argc) replaygain = argv[++i];
     }
 
     if (nftw(argv[1], collect, 20, FTW_PHYS) != 0 || file_count == 0) {
@@ -227,6 +243,16 @@ int main(int argc, char **argv) {
         free(devs);
     }
     au_configure_audio_device(NULL);
+
+    if (replaygain) {
+        const AuReplayGainConfig rg = {
+            .mode = !strcmp(replaygain, "album") ? AU_REPLAYGAIN_ALBUM : AU_REPLAYGAIN_TRACK,
+            .fallback_gain_db = -6.0,
+            .prevent_clipping = true,
+        };
+        au_set_replaygain(&rg);
+        printf("ReplayGain: %s mode, -6 dB for untagged files\n", rg.mode == AU_REPLAYGAIN_ALBUM ? "album" : "track");
+    }
 
     if (downmix) {
         const AU_DOWNMIX mode = !strcmp(downmix, "full") ? AU_DOWNMIX_FULL_LEVEL

@@ -149,21 +149,6 @@ int au_fb_add_volume_db(AuFilterBuilder *fb, const double gain_db) {
     return appendf(fb, "volume=%sdB", num(g, gain_db));
 }
 
-int au_fb_add_replaygain(AuFilterBuilder *fb, const double gain_db, const double peak, const double preamp_db,
-                         const bool prevent_clipping) {
-    if (!fb) return AU_ERR_INVALID_ARGUMENT;
-    if (!in_range(gain_db, -60.0, 30.0)) return fail(fb, "ReplayGain gain must be between -60 and +30 dB");
-    if (!in_range(preamp_db, -30.0, 30.0)) return fail(fb, "ReplayGain preamp must be between -30 and +30 dB");
-    double g = gain_db + preamp_db;
-    if (prevent_clipping && peak > 0 && isfinite(peak)) {
-        const double max_gain = -20.0 * log10(peak);
-        if (g > max_gain) g = max_gain;
-    }
-    if (g < -60.0) g = -60.0;
-    if (g > 30.0) g = 30.0;
-    return au_fb_add_volume_db(fb, g);
-}
-
 //+-----------------------------------------------------+
 //| Equalizer                                           |
 //+-----------------------------------------------------+
@@ -269,61 +254,4 @@ int au_fb_add_bs2b(AuFilterBuilder *fb, const int fcut_hz, const int feed_tenth_
     if (fcut_hz < 300 || fcut_hz > 2000) return fail(fb, "bs2b fcut must be between 300 and 2000 Hz");
     if (feed_tenth_db < 10 || feed_tenth_db > 150) return fail(fb, "bs2b feed must be between 10 and 150 (tenths of a dB)");
     return appendf(fb, "bs2b=fcut=%d:feed=%d", fcut_hz, feed_tenth_db);
-}
-
-//+-----------------------------------------------------+
-//| Loudness                                            |
-//+-----------------------------------------------------+
-
-AuLoudnorm au_loudnorm_defaults(void) {
-    AuLoudnorm l;
-    memset(&l, 0, sizeof(l));
-    l.target_i = -24.0;
-    l.target_lra = 7.0;
-    l.target_tp = -2.0;
-    return l;
-}
-
-static int check_targets(AuFilterBuilder *fb, const double i, const double lra, const double tp) {
-    if (!in_range(i, -70.0, -5.0)) return fail(fb, "integrated loudness target must be between -70 and -5 LUFS");
-    if (!in_range(lra, 1.0, 50.0)) return fail(fb, "loudness range target must be between 1 and 50 LU");
-    if (!in_range(tp, -9.0, 0.0)) return fail(fb, "true peak target must be between -9 and 0 dBTP");
-    return AU_OK;
-}
-
-int au_fb_add_loudnorm_linear(AuFilterBuilder *fb, const AuLoudnorm *l) {
-    if (!fb) return AU_ERR_INVALID_ARGUMENT;
-    if (!l) return fail(fb, "no loudnorm settings");
-    int ret = check_targets(fb, l->target_i, l->target_lra, l->target_tp);
-    if (ret < 0) return ret;
-    if (!in_range(l->offset, -99.0, 99.0)) return fail(fb, "offset must be between -99 and +99 dB");
-    if (!in_range(l->measured_i, -99.0, 0.0) || l->measured_i == 0)
-        return fail(fb, "measured integrated loudness must be >= -99 and < 0 LUFS");
-    if (!in_range(l->measured_lra, 0.0, 50.0) || l->measured_lra == 0)
-        return fail(fb, "measured loudness range must be > 0 and <= 50 LU");
-    if (!in_range(l->measured_tp, -99.0, 99.0) || l->measured_tp == 99.0)
-        return fail(fb, "measured true peak must be >= -99 and < 99 dBTP");
-    if (!in_range(l->measured_thresh, -99.0, 0.0))
-        return fail(fb, "measured threshold must be between -99 and 0 LUFS");
-
-    // Same conditions as FFmpeg's loudnorm for linear mode
-    const double offset = l->target_i - l->measured_i;
-    const double resulting_tp = l->measured_tp + offset;
-    if (resulting_tp > l->target_tp)
-        return fail(fb, "linear normalization would raise the true peak to %.2f dBTP, above the %.2f target",
-                    resulting_tp, l->target_tp);
-    if (l->measured_lra > l->target_lra)
-        return fail(fb, "measured loudness range %.2f LU exceeds the %.2f LU target", l->measured_lra, l->target_lra);
-
-    const double gain = offset + l->offset;
-    if (!in_range(gain, -60.0, 30.0)) return fail(fb, "resulting gain %.2f dB is out of range", gain);
-    return au_fb_add_volume_db(fb, gain);
-}
-
-int au_fb_add_loudnorm_dynamic(AuFilterBuilder *fb, const double target_i, const double target_lra, const double target_tp) {
-    if (!fb) return AU_ERR_INVALID_ARGUMENT;
-    const int ret = check_targets(fb, target_i, target_lra, target_tp);
-    if (ret < 0) return ret;
-    char i[32], lra[32], tp[32];
-    return appendf(fb, "loudnorm=I=%s:LRA=%s:TP=%s", num(i, target_i), num(lra, target_lra), num(tp, target_tp));
 }

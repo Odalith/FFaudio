@@ -204,17 +204,36 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 //| Mixing                                              |
 //+-----------------------------------------------------+
 
-static void add_voice(float *dst, const float *src, const int frames, const int channels,
+// The track's ReplayGain gain: jumps to the target before the first sample, ramps on later changes
+static float track_gain_step(Mixer *m, TrackState *t, float *target_out) {
+    const float target = powf(10.0f, (float)SDL_AtomicGet(&t->gain_mb) / 2000.0f);
+    if (!t->gain_started) {
+        t->gain_cur = target;
+        t->gain_started = true;
+    }
+    *target_out = target;
+    return (target - t->gain_cur) / (float)FFMAX(1, m->vol_ramp_frames);
+}
+
+static void add_voice(Mixer *m, TrackState *t, float *dst, const float *src, const int frames, const int channels,
                       const FadeState *fade, const bool fading_out) {
     const bool constant = !fade->active;
+    float target;
+    const float step = track_gain_step(m, t, &target);
+    float gain = t->gain_cur;
     for (int i = 0; i < frames; i++) {
-        const float g = constant ? (fading_out ? 0.0f : 1.0f)
-                                 : (fading_out ? fade_out_gain(fade, i) : fade_in_gain(fade, i));
+        if (step != 0.0f) {
+            gain += step;
+            if ((step > 0 && gain > target) || (step < 0 && gain < target)) gain = target;
+        }
+        const float g = gain * (constant ? (fading_out ? 0.0f : 1.0f)
+                                         : (fading_out ? fade_out_gain(fade, i) : fade_in_gain(fade, i)));
         const float *s = src + (size_t)i * channels;
         float *d = dst + (size_t)i * channels;
         for (int c = 0; c < channels; c++)
             d[c] += s[c] * g;
     }
+    if (frames > 0) t->gain_cur = gain;
 }
 
 static void render_outgoing(AudioPlayer *ap, const int frames) {
@@ -226,7 +245,7 @@ static void render_outgoing(AudioPlayer *ap, const int frames) {
     const int64_t left = m->out_fade.len - m->out_fade.pos;
     const int want = (int)FFMIN((int64_t)frames, FFMAX(0, left));
     const int got = want > 0 ? track_pull(t, m->voice_buf, want, m->rate, m->channels, &eos, &looped) : 0;
-    add_voice(m->mix_buf, m->voice_buf, got, m->channels, &m->out_fade, true);
+    add_voice(m, t, m->mix_buf, m->voice_buf, got, m->channels, &m->out_fade, true);
     m->out_fade.pos += got;
 
     if (eos || m->out_fade.pos >= m->out_fade.len) {
@@ -256,7 +275,7 @@ static int render_current(AudioPlayer *ap, const int frames) {
         if (looped)
             push_event(m, MIX_EV_TRACK_LOOPED, t, t->position);
 
-        add_voice(m->mix_buf + (size_t)pos * m->channels, m->voice_buf, got, m->channels, &m->in_fade, false);
+        add_voice(m, t, m->mix_buf + (size_t)pos * m->channels, m->voice_buf, got, m->channels, &m->in_fade, false);
         if (m->in_fade.active) {
             m->in_fade.pos += got;
             if (m->in_fade.pos >= m->in_fade.len)
