@@ -16,6 +16,9 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - **ReplayGain / R128**: tags are applied automatically (track or album mode, preamp, fallback gain for untagged
   files, clipping prevention); R128 gain tags (the Opus standard, read from any format) are converted to the
   ReplayGain reference
+- **Loudness analysis**: measure files (EBU R128 / ITU-R BS.1770-4 integrated loudness, loudness range, true
+  peak) per track and per album, independent of playback, and get ReplayGain/R128 gains back. Read only:
+  ffaudio never modifies your files
 - **Metadata**: tags (normalized names across formats), track/disc numbers and format details, for playing
   tracks or by probing a file without playing it
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers that
@@ -185,7 +188,35 @@ fades and before the master volume, so changing it never rebuilds a filter graph
 Tag names are FFmpeg's normalized ones (`title`, `artist`, `album`, `album_artist`, `date`, `track`, `disc`, ...);
 lookups are case-insensitive and also find common alternative spellings.
 
-### 6. Surround files and the output format
+### 6. Measuring loudness
+Files without ReplayGain/R128 tags (most libraries) can be measured with `ffaudio_loudness.h`. It is separate from
+playback: no `au_initialize()` needed, it can run in a background thread while music plays, and it only reads
+files. Store the results in your own database and hand them back with `PlayAudioConfig.replaygain`.
+```c
+#include <ffaudio_loudness.h>
+
+AuLoudnessScanner *scanner = au_loudness_scanner_create(NULL);   // one album
+AuLoudness track[N], album;
+for (int i = 0; i < N; i++)
+    au_loudness_scan_file(scanner, album_files[i], &track[i]);    // AU_OK, AU_ERR_FILE, AU_ERR_CANCELLED
+au_loudness_album(scanner, &album);                              // gated over all tracks together
+au_loudness_scanner_free(scanner);
+
+// track[i].integrated_lufs, .loudness_range_lu, .true_peak, .sample_peak,
+//         .replaygain_gain_db (re -18 LUFS), .r128_gain_db / .r128_gain_q78 (re -23 LUFS)
+
+AuReplayGainInfo rg = au_loudness_to_replaygain(&track[0], &album);   // save it with the track...
+const PlayAudioConfig cfg = { .replaygain = &rg };                     // ...and use it when playing
+au_play_audio(album_files[0], &cfg);
+```
+The measurement follows ITU-R BS.1770-4 / EBU R128 (K-weighting at any sample rate, 400 ms gating blocks with
+the -70 LUFS absolute and -10 LU relative gates, EBU Tech 3342 loudness range, 4x oversampled true peak,
+surround channels weighted +1.5 dB and LFE excluded) and agrees with FFmpeg's `ebur128` filter. A progress
+callback in `AuLoudnessConfig` reports the position and can cancel a scan; `skip_true_peak` makes it faster.
+It runs at a few hundred times real time per thread; use one scanner per thread to scan a library in parallel.
+`tests/loudness_scan.c` is a small command-line example (`loudness_scan [-t] [-c] files...`).
+
+### 7. Surround files and the output format
 By default the output uses the device's own channel count and sample rate. Files with more channels than the
 output are mixed down; files with fewer are spread onto the matching speakers.
 ```c
@@ -201,7 +232,7 @@ au_set_downmix(AU_DOWNMIX_CUSTOM,              // or a matrix that keeps the LFE
 ```
 The standard matrix (ITU-R BS.775) puts the centre and surrounds in at -3 dB and drops the LFE.
 
-### 7. Shut down
+### 8. Shut down
 ```c
 au_shutdown();   // not from inside a callback; au_initialize() may be called again afterwards
 ```
@@ -237,6 +268,7 @@ au_shutdown();   // not from inside a callback; au_initialize() may be called ag
 - `test_lifecycle`: calls before init, shutdown while playing, re-initialization
 - `test_stress`: random API sequences, a playlist driven entirely from callbacks, rapid track replacement
   (`FFAUDIO_STRESS_SEED`, `FFAUDIO_STRESS_ITERS`)
+- `test_loudness`: BS.1770 / EBU R128 measurement against reference signals, album gating, peaks, cancelling
 - `test_metadata`: tags, track/disc numbers and ReplayGain/R128 parsing in several formats
 - `test_output`: captures the mixed output and checks gapless joins sample by sample, crossfade lengths,
   fades, volume ramps and live filter changes
@@ -249,7 +281,7 @@ plays a folder on real hardware for listening tests.
 - [x] ReplayGain / R128 read from tags automatically (track/album mode, preamp, clipping prevention)
 - [x] Metadata API and probing a file without playing it
 - [ ] Embedded cover art
-- [ ] Generate R128 / ReplayGain values for files (loudness scanner)
+- [x] Measure R128 / ReplayGain values for files (loudness analysis; read only)
 - [ ] Playback speed (tempo with and without pitch change)
 - [ ] Network streams: HTTP/Icecast with "now playing" metadata, reconnects, buffering state (rtp/rtsp)
 - [ ] Cue sheets / gapless playback of track ranges inside one file

@@ -42,6 +42,11 @@ incompatible ways; see "API changes".
   and clipping prevention; ReplayGain 2.0 tags in every format FFmpeg reads, and R128 gain tags (the Opus
   standard, accepted in any format, converted from -23 to the -18 LUFS reference). Gains change with a short ramp; `PlayAudioConfig.replaygain` supplies values from
   the application; `au_get_track_gain_db()` reports the applied gain.
+- Loudness analysis (`ffaudio_loudness.h`), independent of playback and read only: ITU-R BS.1770-4 / EBU R128
+  integrated loudness, loudness range, true and sample peak per file, and album values gated over all tracks;
+  ReplayGain 2.0 and R128 gains, progress/cancel callback, `au_loudness_to_replaygain()` for
+  `PlayAudioConfig.replaygain`. `tests/loudness_scan.c` is a command-line example.
+- `AU_ERR_FILE` and `AU_ERR_CANCELLED` result codes; `au_probe()` reports unreadable files as `AU_ERR_FILE`.
 - Metadata: `au_probe()` (no player needed) and `au_get_track_info()` return an `AuMediaInfo` with format
   details, tags (case-insensitive, common aliases), track/disc numbers and ReplayGain values.
 - `au_set_downmix()`: full level (default, like mpv), normalized (never clips) or custom filters on the original

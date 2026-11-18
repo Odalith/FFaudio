@@ -54,6 +54,24 @@ rg_sine rg_r128.opus   1 -c:a libopus -b:a 192k -metadata title="Opus Song" -met
 rg_sine rg_hot.flac    1 -sample_fmt s16 -metadata REPLAYGAIN_TRACK_GAIN="+12.00 dB" -metadata REPLAYGAIN_TRACK_PEAK=0.5
 rg_sine rg_untagged.flac 1 -sample_fmt s16
 
+# Loudness reference signals (EBU Tech 3341 / 3342 style): 1 kHz sines in both channels, amplitude in dBFS
+ld_sine() { # name amplitude seconds rate
+    ff -f lavfi -i "aevalsrc=exprs='$2*sin(2*PI*1000*t)|$2*sin(2*PI*1000*t)':s=$4:d=$3" -sample_fmt s16 "$1"
+}
+ld_sine ld_m23_48k.flac 0.0707946 10 48000   # -23 dBFS -> -23.0 LUFS
+ld_sine ld_m33_48k.flac 0.0223872 10 48000   # -33 dBFS -> -33.0 LUFS
+ld_sine ld_m23_44k.flac 0.0707946 10 44100
+# -36 / -23 / -36 dBFS for 5 / 20 / 5 s: the relative gate removes the quiet parts -> -23.0
+ff -f lavfi -i "aevalsrc=exprs='if(between(t,5,25),0.0707946,0.0158489)*sin(2*PI*1000*t)|if(between(t,5,25),0.0707946,0.0158489)*sin(2*PI*1000*t)':s=48000:d=30" -sample_fmt s16 ld_gate.flac
+# 10 s at -20 dBFS then 10 s at -30 dBFS -> loudness range 10 LU
+ff -f lavfi -i "aevalsrc=exprs='if(lt(t,10),0.1,0.0316228)*sin(2*PI*1000*t)|if(lt(t,10),0.1,0.0316228)*sin(2*PI*1000*t)':s=48000:d=20" -sample_fmt s16 ld_lra10.flac
+# 12 kHz at 48 kHz, 45 degree phase: samples only reach 0.707 of the waveform's peak
+ff -f lavfi -i "aevalsrc=exprs='0.5*sin(2*PI*12000*t+PI/4)|0.5*sin(2*PI*12000*t+PI/4)':s=48000:d=3" -c:a pcm_f32le ld_truepeak.wav
+# 5.1 with the -23 dBFS sine only in front left, and only in side left (surround channels weigh +1.5 dB)
+ff -f lavfi -i "aevalsrc=exprs='0.0707946*sin(2*PI*1000*t)':s=48000:d=10" -af "pan=5.1(side)|FL=c0" -sample_fmt s16 ld_fl51.flac
+ff -f lavfi -i "aevalsrc=exprs='0.0707946*sin(2*PI*1000*t)':s=48000:d=10" -af "pan=5.1(side)|SL=c0" -sample_fmt s16 ld_sl51.flac
+ff -f lavfi -i "anullsrc=r=48000:cl=stereo" -t 3 ld_silence.flac
+
 # Broken / non-audio inputs
 : > empty.flac
 echo "this is not audio" > text.mp3

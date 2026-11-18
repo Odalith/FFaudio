@@ -56,6 +56,8 @@ extern "C" {
         AU_ERR_DEVICE = -6,
         AU_ERR_WRONG_THREAD = -7,
         AU_ERR_NOTHING_TO_DO = -8,
+        AU_ERR_FILE = -9,              // a file could not be opened or decoded
+        AU_ERR_CANCELLED = -10,
     } AU_RESULT;
 
     //+-----------------------------------------------------+
