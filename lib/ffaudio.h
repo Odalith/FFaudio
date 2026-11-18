@@ -84,8 +84,9 @@ extern "C" {
         AuFade on_play;        // au_play_audio() while another track is playing
         AuFade on_stop;        // au_stop_audio(): fade out, then stop
         AuFade on_pause;       // au_pause_audio(true) fades out, au_pause_audio(false) fades back in
-        // Tracks shorter than this many seconds never get an end crossfade longer than half their length.
-        // 0 = use 2 * on_track_end.seconds.
+        // Tracks (current or queued) shorter than this many seconds are not crossfaded at their end;
+        // they play gapless instead. 0 = 2 * on_track_end.seconds. An end crossfade is also never
+        // longer than half of either track. Tracks of unknown length always play gapless.
         double min_track_seconds;
     } CrossfadeConfig;
 

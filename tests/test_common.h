@@ -34,13 +34,17 @@ static int tc_failures = 0;
 /* ---------- fixtures ---------- */
 
 static const char *tc_fixture_dir = NULL;
+static SDL_mutex *tc_mutex = NULL;
 
 static const char *fx(const char *name) {
-    /* Small ring of buffers so several fx() results can be used in one expression */
-    static char bufs[8][1024];
+    /* Ring of buffers so several fx() results can be used in one expression. Callbacks call this
+     * from the control thread too, and the library copies the path right away, so a lock is enough. */
+    static char bufs[16][1024];
     static int idx = 0;
-    char *b = bufs[idx++ & 7];
+    if (tc_mutex) SDL_LockMutex(tc_mutex);
+    char *b = bufs[idx++ & 15];
     snprintf(b, 1024, "%s/%s", tc_fixture_dir, name);
+    if (tc_mutex) SDL_UnlockMutex(tc_mutex);
     return b;
 }
 
@@ -62,7 +66,6 @@ typedef struct TcEvents {
     double last_duration;
 } TcEvents;
 
-static SDL_mutex *tc_mutex = NULL;
 static SDL_cond *tc_cond = NULL;
 static TcEvents tc_ev;
 static bool tc_verbose = false;

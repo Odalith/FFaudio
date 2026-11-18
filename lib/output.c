@@ -27,6 +27,7 @@
 
 #include "output.h"
 #include "track.h"
+#include <limits.h>
 #include <math.h>
 
 #define VOLUME_RAMP_SECONDS 0.010
@@ -147,36 +148,56 @@ void mixer_set_pause(AudioPlayer *ap, const bool paused, const AuFade *fade) {
 }
 
 // Crossfade into the queued track when the current one is about to end
-static void maybe_start_end_crossfade(AudioPlayer *ap) {
-    Mixer *m = &ap->mixer;
+// Length (seconds) of the crossfade the current track should get at its end; 0 = play gapless.
+// *remaining is set to the seconds left in the current track.
+static double planned_end_fade(Mixer *m, const AuFade **fade_out, double *remaining) {
     TrackState *cur = m->current, *next = m->next;
-    if (!cur || !next || m->outgoing) return;
+    if (!cur || !next || m->outgoing) return 0;
 
     const AuFade *fade = next->has_fade_in_override ? &next->fade_in_override : &m->end_fade;
-    if (fade->seconds <= 0) return;
+    if (fade->seconds <= 0) return 0;
 
     const double end = track_end_position(cur);
     const double cur_len = track_duration(cur);
-    if (end < 0 || cur_len < 0) return; // unknown length: play gapless instead
+    if (end < 0 || cur_len < 0) return 0; // unknown length: play gapless instead
 
     const double min_len = m->min_track_seconds > 0 ? m->min_track_seconds : 2.0 * fade->seconds;
-    if (cur_len < min_len) return;
+    if (cur_len < min_len) return 0;
 
     double fade_s = FFMIN(fade->seconds, cur_len / 2.0);
     const double next_len = track_duration(next);
     if (next_len >= 0) {
-        if (next_len < min_len) return;
+        if (next_len < min_len) return 0;
         fade_s = FFMIN(fade_s, next_len / 2.0);
     }
 
-    const double remaining = end - cur->position;
-    if (remaining > fade_s || remaining <= 0.005) return;
-    if (!track_has_audio(next)) return; // not decoded yet: try again next callback (or end gapless)
+    *fade_out = fade;
+    *remaining = end - cur->position;
+    return fade_s;
+}
+
+// Frames that can be rendered before the end crossfade has to start (INT_MAX = no crossfade planned)
+static int frames_until_end_crossfade(Mixer *m) {
+    const AuFade *fade = NULL;
+    double remaining = 0;
+    const double fade_s = planned_end_fade(m, &fade, &remaining);
+    if (fade_s <= 0 || remaining <= fade_s) return INT_MAX;
+    const double frames = ceil((remaining - fade_s) * m->rate);
+    return frames >= INT_MAX ? INT_MAX : FFMAX(1, (int)frames);
+}
+
+static void maybe_start_end_crossfade(AudioPlayer *ap) {
+    Mixer *m = &ap->mixer;
+    const AuFade *fade = NULL;
+    double remaining = 0;
+    const double fade_s = planned_end_fade(m, &fade, &remaining);
+    if (fade_s <= 0 || remaining > fade_s + 0.5 / m->rate || remaining <= 0.005) return;
+    if (!track_has_audio(m->next)) return; // not decoded yet: try again next chunk (or end gapless)
 
     AuFade f = *fade;
     f.seconds = remaining; // end exactly when the current track does
-    cur->fade_reason = END_NATURAL;
-    mixer_start_transition(ap, cur, next, &f);
+    m->current->fade_reason = END_NATURAL;
+    mixer_start_transition(ap, m->current, m->next, &f);
 }
 
 //+-----------------------------------------------------+
@@ -365,7 +386,10 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
 
     int done = 0;
     while (done < total) {
-        const int n = FFMIN(total - done, m->buf_frames);
+        int n = FFMIN(total - done, m->buf_frames);
+        // Split the chunk so a crossfade at a track end starts on the exact sample
+        if (!m->frozen)
+            n = FFMIN(n, frames_until_end_crossfade(m));
         memset(m->mix_buf, 0, (size_t)n * m->channels * sizeof(float));
 
         if (!m->frozen) {
