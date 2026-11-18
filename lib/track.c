@@ -25,7 +25,6 @@
  */
 
 #include "track.h"
-#include "cmdutils.h"
 #include "decoder_utils.h"
 #include "filtergraph.h"
 #include "frame_queue_utils.h"
@@ -174,9 +173,7 @@ void track_destroy(TrackState *t) {
     if (t->sampq.mutex) frame_queue_destroy(&t->sampq);
     if (t->audio_queue.mutex) packet_queue_destroy(&t->audio_queue);
     av_channel_layout_uninit(&t->audio_filter_src.ch_layout);
-    av_dict_free(&t->swr_opts_n);
     av_dict_free(&t->format_opts_n);
-    av_dict_free(&t->codec_opts_n);
     SDL_DestroyCond(t->continue_read_thread);
     SDL_DestroyMutex(t->wait_mutex);
     SDL_DestroyMutex(t->seek_mutex);
@@ -387,16 +384,7 @@ static int read_thread(void *arg) {
     t->ic = ic;
 
     if (ap->find_stream_info) {
-        AVDictionary **opts = NULL;
-        const unsigned int orig_nb_streams = ic->nb_streams;
-        if (setup_find_stream_info_opts_n(ic, t->codec_opts_n, &opts) < 0) {
-            ff_log(AU_LOG_ERROR, "Error setting up avformat_find_stream_info() options");
-            goto fail;
-        }
-        ret = avformat_find_stream_info(ic, opts);
-        for (unsigned int i = 0; i < orig_nb_streams; i++)
-            av_dict_free(&opts[i]);
-        av_freep(&opts);
+        ret = avformat_find_stream_info(ic, NULL);
         if (ret < 0) {
             if (!SDL_AtomicGet(&t->abort_request))
                 ff_log(AU_LOG_WARNING, "%s: could not find codec parameters", t->filename);

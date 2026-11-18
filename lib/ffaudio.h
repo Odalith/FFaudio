@@ -21,8 +21,14 @@
 #ifndef FFAUDIO_H
 #define FFAUDIO_H
 
-#ifdef _WIN32
-    #define DLL_EXPORT __declspec(dllexport)
+#if defined(FFAUDIO_STATIC)
+    #define DLL_EXPORT
+#elif defined(_WIN32)
+    #if defined(FFAUDIO_BUILDING)
+        #define DLL_EXPORT __declspec(dllexport)
+    #else
+        #define DLL_EXPORT __declspec(dllimport)
+    #endif
 #else
     #define DLL_EXPORT __attribute__((visibility("default")))
 #endif

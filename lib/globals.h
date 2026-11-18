@@ -205,8 +205,6 @@ typedef struct TrackState {
     FilterChain user;                   // audio thread only: user + global filters, may be empty
     int32_t convert_rate;               // output rate the graphs were built for
     AVDictionary *format_opts_n;
-    AVDictionary *codec_opts_n;
-    AVDictionary *swr_opts_n;
     int32_t realtime;
     int32_t seek_by_bytes;
     bool infinite_buffer;

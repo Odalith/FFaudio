@@ -33,13 +33,10 @@
 #include <math.h>
 #include "ffaudio.h"
 #include "globals.h"
-#include "cmdutils.h"
 #include "filtergraph.h"
 #include "output.h"
 #include "track.h"
 
-const char program_name[] = "ffaudio";
-const int program_birth_year = 2025;
 
 #define CONTROL_TICK_MS 5
 #define DEFAULT_PREPARE_NEXT_SECONDS 10.0
@@ -864,7 +861,6 @@ int au_initialize(const InitializeConfig* config) {
         goto fail_sync;
     publish_idle_status(ap);
 
-    init_dynload();
     av_log_set_level(AV_LOG_ERROR);
 
     // A library must not take over the host's Ctrl-C / SIGTERM handling
