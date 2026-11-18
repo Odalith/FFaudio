@@ -28,13 +28,9 @@ static void test_gain(void) {
     CHECK_STR(au_fb_peek(fb), "volume=-6.5dB");   // unchanged on error
     CHECK(strlen(au_fb_last_error(fb)) > 0);
     au_fb_clear(fb);
-
-    // ReplayGain +4 dB with a 0.9 peak and clipping prevention: limited to -20*log10(0.9) = 0.915 dB
-    CHECK(au_fb_add_replaygain(fb, 4.0, 0.9, 0.0, true) == AU_OK);
+    CHECK(au_fb_add_volume_db(fb, 0.91515) == AU_OK);
     CHECK_STR(au_fb_peek(fb), "volume=0.91515dB");
-    au_fb_clear(fb);
-    CHECK(au_fb_add_replaygain(fb, -7.0, 0.9, 2.0, true) == AU_OK);
-    CHECK_STR(au_fb_peek(fb), "volume=-5dB");
+    CHECK(au_validate_filtergraph(au_fb_peek(fb)) == AU_OK);
     au_fb_free(fb);
 }
 
@@ -84,35 +80,6 @@ static void test_headphones(void) {
     au_fb_free(fb);
 }
 
-static void test_loudnorm(void) {
-    AuFilterBuilder *fb = au_fb_create();
-    AuLoudnorm l = au_loudnorm_defaults();
-    l.target_i = -16;
-    l.target_lra = 11;
-    l.target_tp = -1.5;
-    l.measured_i = -20.5;
-    l.measured_lra = 5.2;
-    l.measured_tp = -6.1;
-    l.measured_thresh = -31.0;
-    l.offset = -0.5;
-    // gain = -16 - -20.5 + -0.5 = 4 dB; peak -6.1 + 4.5 = -1.6 <= -1.5
-    CHECK(au_fb_add_loudnorm_linear(fb, &l) == AU_OK);
-    CHECK_STR(au_fb_peek(fb), "volume=4dB");
-
-    // Would push the true peak above the target: refused, like loudnorm's linear mode
-    l.measured_tp = -2.0;
-    CHECK(au_fb_add_loudnorm_linear(fb, &l) == AU_ERR_INVALID_ARGUMENT);
-    // Not measured at all
-    AuLoudnorm none = au_loudnorm_defaults();
-    CHECK(au_fb_add_loudnorm_linear(fb, &none) == AU_ERR_INVALID_ARGUMENT);
-    CHECK_STR(au_fb_peek(fb), "volume=4dB");
-
-    CHECK(au_fb_add_loudnorm_dynamic(fb, -16, 11, -1.5) == AU_OK);
-    CHECK_STR(au_fb_peek(fb), "volume=4dB,loudnorm=I=-16:LRA=11:TP=-1.5");
-    CHECK(au_validate_filtergraph(au_fb_peek(fb)) == AU_OK);
-    au_fb_free(fb);
-}
-
 static void test_locale_independent(void) {
     const char *locales[] = { "de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "nl_NL.UTF-8" };
     const char *set = NULL;
@@ -150,7 +117,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_gain);
     RUN_TEST(test_equalizer);
     RUN_TEST(test_headphones);
-    RUN_TEST(test_loudnorm);
     RUN_TEST(test_locale_independent);
     RUN_TEST(test_raw_and_validate);
     return tc_finish("test_filters");

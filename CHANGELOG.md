@@ -31,8 +31,8 @@ incompatible ways; see "API changes".
   logarithmic, exponential, custom) and per-track overrides (`au_set_crossfade`, `PlayAudioConfig.fade_in`).
 - 32-bit float mixing at the device rate and layout, soxr resampling when available, TPDF dither for integer
   devices, ramped volume/mute/pause.
-- Filter-string builder (`ffaudio_filters.h`): equalizer, crossfeed, bs2b, ReplayGain, linear and dynamic
-  EBU R128 loudness, plain gain.
+- Filter-string builder (`ffaudio_filters.h`): equalizer, crossfeed, bs2b and plain gain. (Loudness
+  normalization is built in, see `au_set_replaygain()`.)
 - Global filters and live filter changes: `au_set_global_filtergraph`, `au_update_filtergraph`,
   `au_send_filter_command`, `au_validate_filtergraph`.
 - `on_track_started` and `on_audio_device_update` callbacks; `on_prepare_next` now fires

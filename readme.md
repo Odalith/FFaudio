@@ -19,7 +19,7 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - **Metadata**: tags (normalized names across formats), track/disc numbers and format details, for playing
   tracks or by probing a file without playing it
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers that
-  build equalizer, crossfeed, bs2b and EBU R128 loudness strings
+  build equalizer, crossfeed and bs2b strings
 - Volume with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
 - Callbacks for track start/end, prepare-next, restarts (seek/loop), duration, device changes and logs
 - Follows the system default device, or uses a chosen one and falls back to the default if it disappears

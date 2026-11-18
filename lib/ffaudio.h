@@ -236,7 +236,7 @@ extern "C" {
     //+-----------------------------------------------------+
     // Filter strings use FFmpeg's filtergraph syntax (https://ffmpeg.org/ffmpeg-filters.html) and run
     // at the output format: float samples at the device rate and channel layout. ffaudio_filters.h has
-    // helpers that build common strings (equalizer, crossfeed, loudness normalization, ...).
+    // helpers that build common strings (equalizer, crossfeed, bs2b, gain).
     // Changes take effect within about half a second (the audio already decoded plays out first).
 
     // Filters applied to every track, after the track's own av_filtergraph. NULL or "" removes them.
