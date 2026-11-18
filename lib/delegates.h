@@ -63,4 +63,8 @@ typedef void (*NotifyOfTrackStarted)(int32_t handle, void *user_data);
 // The output device was opened or changed. Useful to rebuild channel-dependent filter strings.
 typedef void (*NotifyOfAudioDeviceUpdate)(int32_t channel_count, int32_t sample_rate, void *user_data);
 
+// An output device was added or removed (headphones plugged in, a USB/Bluetooth device appeared, ...).
+// Call au_get_audio_devices() for the new list.
+typedef void (*NotifyOfAudioDevicesChanged)(void *user_data);
+
 #endif //FFAUDIO_DELAGATES_H

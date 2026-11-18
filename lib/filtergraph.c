@@ -146,6 +146,49 @@ fail:
     return ret;
 }
 
+int build_speed_graph(FilterChain *out, const int rate, const AVChannelLayout *layout, const double speed,
+                      const bool keep_pitch, const bool use_soxr, const int nb_threads) {
+    memset(out, 0, sizeof(*out));
+    char layout_str[128], args[256];
+    int ret = describe_layout(layout, layout_str, sizeof(layout_str));
+    if (ret < 0) return ret;
+
+    AVFilterContext *src = NULL, *a = NULL, *b = NULL, *format = NULL, *sink = NULL;
+    if (!(out->graph = avfilter_graph_alloc())) return AVERROR(ENOMEM);
+    out->graph->nb_threads = nb_threads;
+    if ((ret = create_float_source(out->graph, &src, rate, layout_str)) < 0) goto fail;
+    if ((ret = create_output_end(out->graph, &format, &sink, rate, layout_str)) < 0) goto fail;
+
+    if (keep_pitch) {
+        // Two atempo stages at sqrt(speed) each keep both in their best range (0.5..2) for 0.25..4x;
+        // their instance names let speed changes be sent as commands without rebuilding
+        snprintf(args, sizeof(args), "tempo=%.9f", sqrt(speed));
+        if ((ret = avfilter_graph_create_filter(&a, avfilter_get_by_name("atempo"), SPEED_FILTER_1, args, NULL, out->graph)) < 0 ||
+            (ret = avfilter_graph_create_filter(&b, avfilter_get_by_name("atempo"), SPEED_FILTER_2, args, NULL, out->graph)) < 0)
+            goto fail;
+    }
+    else {
+        // Tape-style: relabel the sample rate (faster and higher), then resample back to the output rate
+        snprintf(args, sizeof(args), "sample_rate=%d", (int)lrint(rate * speed));
+        if ((ret = avfilter_graph_create_filter(&a, avfilter_get_by_name("asetrate"), "ffaudio_setrate", args, NULL, out->graph)) < 0)
+            goto fail;
+        snprintf(args, sizeof(args), "%sout_sample_rate=%d", use_soxr ? "resampler=soxr:precision=28:" : "", rate);
+        if ((ret = avfilter_graph_create_filter(&b, avfilter_get_by_name("aresample"), "ffaudio_speed_resample", args, NULL, out->graph)) < 0)
+            goto fail;
+    }
+    if ((ret = avfilter_link(src, 0, a, 0)) < 0 || (ret = avfilter_link(a, 0, b, 0)) < 0 ||
+        (ret = avfilter_link(b, 0, format, 0)) < 0)
+        goto fail;
+    if ((ret = avfilter_graph_config(out->graph, NULL)) < 0) goto fail;
+    out->src = src;
+    out->sink = sink;
+    return 0;
+
+fail:
+    free_filter_chain(out);
+    return ret;
+}
+
 // Build a convert graph: abuffer (src_args) -> [downmix filters] -> aresample -> aformat -> abuffersink
 static int build_convert_graph(FilterChain *out, const char *src_args, const char *downmix_filters,
                                const char *downmix_maxval, const bool use_soxr, const int out_rate,

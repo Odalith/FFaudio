@@ -148,6 +148,7 @@ void ff_log(const enum AU_LOG_LEVEL level, const char *fmt, ...) {
 
 typedef enum NoteType {
     NOTE_LOG, NOTE_EOF, NOTE_RESTART, NOTE_DURATION, NOTE_PREPARE_NEXT, NOTE_TRACK_STARTED, NOTE_DEVICE,
+    NOTE_DEVICES_CHANGED,
 } NoteType;
 
 typedef struct Note {
@@ -201,6 +202,9 @@ static void dispatch_notes(AudioPlayer *ap) {
                     break;
                 case NOTE_TRACK_STARTED:
                     if (ap->notify_of_track_started_callback) ap->notify_of_track_started_callback(n->handle, ud);
+                    break;
+                case NOTE_DEVICES_CHANGED:
+                    if (ap->notify_of_audio_devices_changed_callback) ap->notify_of_audio_devices_changed_callback(ud);
                     break;
                 case NOTE_DEVICE:
                     if (ap->notify_of_audio_device_update_callback) ap->notify_of_audio_device_update_callback(n->i, (int32_t)n->d, ud);
@@ -732,6 +736,46 @@ static void process_mixer_events(AudioPlayer *ap) {
     if (n > 0) update_device_running(ap);
 }
 
+#define DEVICE_POLL_MS 2000
+
+static void free_device_list(char **list, const int n) {
+    for (int i = 0; i < n; i++) av_free(list[i]);
+    av_free(list);
+}
+
+// Compare the output devices with the last known list; notify the application when they differ.
+// Comparing (instead of trusting the events) also ignores the "added" events SDL sends for every
+// device at start-up.
+static void check_device_list(AudioPlayer *ap) {
+    ap->devices_checked_at = SDL_GetTicks();
+    const int n = SDL_GetNumAudioDevices(0);
+    if (n < 0) return;
+    char **list = n ? av_calloc(n, sizeof(char *)) : NULL;
+    if (n && !list) return;
+    for (int i = 0; i < n; i++) {
+        const char *name = SDL_GetAudioDeviceName(i, 0);
+        list[i] = av_strdup(name ? name : "");
+    }
+
+    bool same = n == ap->n_known_devices;
+    for (int i = 0; same && i < n; i++)
+        same = list[i] && ap->known_devices[i] && !strcmp(list[i], ap->known_devices[i]);
+
+    const bool had_list = ap->devices_checked_once;
+    ap->devices_checked_once = true;
+    if (same) {
+        free_device_list(list, n);
+        return;
+    }
+    free_device_list(ap->known_devices, ap->n_known_devices);
+    ap->known_devices = list;
+    ap->n_known_devices = n;
+    if (had_list) {
+        ff_log(AU_LOG_INFO, "Audio output devices changed (%d now)", n);
+        note_add((Note){ .type = NOTE_DEVICES_CHANGED });
+    }
+}
+
 static void housekeeping(AudioPlayer *ap) {
     lock_mixer(ap);
     TrackState *cur = ap->mixer.current;
@@ -743,15 +787,21 @@ static void housekeeping(AudioPlayer *ap) {
         && SDL_AtomicGet(&cur->loops_remaining) == 0) {
         const double end = track_end_position(cur);
         const double lead = ap->prepare_next_seconds + FFMAX(0.0, ap->crossfade.on_track_end.seconds);
-        if (end >= 0 && end - pos <= lead) {
+        SDL_LockMutex(ap->format_mutex);
+        const double speed = ap->speed > 0 ? ap->speed : 1.0;
+        SDL_UnlockMutex(ap->format_mutex);
+        if (end >= 0 && (end - pos) / speed <= lead) { // lead is wall clock time
             cur->prepare_next_sent = true;
             note_add((Note){ .type = NOTE_PREPARE_NEXT, .handle = cur->handle });
         }
     }
 
     // Devices coming and going
+    bool check_devices = false;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
+        if ((e.type == SDL_AUDIODEVICEADDED || e.type == SDL_AUDIODEVICEREMOVED) && !e.adevice.iscapture)
+            check_devices = true;
         if (e.type == SDL_AUDIODEVICEREMOVED && !e.adevice.iscapture && ap->device_id &&
             e.adevice.which == ap->device_id) {
             ff_log(AU_LOG_WARNING, "Audio device removed, switching to the default device");
@@ -761,6 +811,9 @@ static void housekeeping(AudioPlayer *ap) {
             reopen_output(ap, true, NULL, -1);
         }
     }
+    // SDL2 only reports the removal of the open device, so the list is also compared every few seconds
+    if (check_devices || SDL_GetTicks() - ap->devices_checked_at >= DEVICE_POLL_MS)
+        check_device_list(ap);
 }
 
 //+-----------------------------------------------------+
@@ -920,6 +973,8 @@ int au_initialize(const InitializeConfig* config) {
     ap->output_channels = config->output_channels;
     ap->output_sample_rate = config->output_sample_rate;
     ap->downmix = AU_DOWNMIX_FULL_LEVEL;
+    ap->speed = 1.0;
+    ap->keep_pitch = true;
     ap->find_stream_info = 1;
     ap->audio_device_index = -1;
     ap->use_default_device = true;
@@ -931,6 +986,7 @@ int au_initialize(const InitializeConfig* config) {
     ap->notify_of_prepare_next_callback = config->on_prepare_next;
     ap->notify_of_track_started_callback = config->on_track_started;
     ap->notify_of_audio_device_update_callback = config->on_audio_device_update;
+    ap->notify_of_audio_devices_changed_callback = config->on_audio_devices_changed;
     ap->audio_target.fmt = AV_SAMPLE_FMT_NONE;
     ap->mixer.pause_gain = 1.0f;
     ap->mixer.pause_to = 1.0f;
@@ -1040,6 +1096,8 @@ void au_shutdown(void) {
     }
     av_free(ap->tracks);
     av_free(ap->audio_device_name);
+    av_free(ap->device_in_use);
+    free_device_list(ap->known_devices, ap->n_known_devices);
     av_free(ap->global_filters);
     av_free(ap->downmix_filters);
     av_channel_layout_uninit(&ap->audio_target.ch_layout);
@@ -1116,6 +1174,19 @@ int au_get_audio_devices(int *out_total, char ***out_devices) {
     *out_total = count;
     *out_devices = devices;
     return AU_OK;
+}
+
+int au_get_audio_device_name(char *buf, const size_t size) {
+    AudioPlayer *ap = audio_player;
+    if (!buf || !size) return AU_ERR_INVALID_ARGUMENT;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
+    SDL_LockMutex(ap->format_mutex);
+    const char *name = ap->device_in_use ? ap->device_in_use : "";
+    const size_t len = strlen(name);
+    const int ret = len < size ? (int)len : AU_ERR_INVALID_ARGUMENT;
+    if (len < size) memcpy(buf, name, len + 1);
+    SDL_UnlockMutex(ap->format_mutex);
+    return ret;
 }
 
 int au_get_output_spec(int *out_sample_rate, int *out_channels) {
@@ -1208,6 +1279,31 @@ void au_seek_percent(const double percentPos) {
 void au_seek_time(const int64_t milliseconds) {
     if (milliseconds < 0) return;
     post_simple(CMD_SEEK_US, milliseconds * 1000, 0, false);
+}
+
+int au_set_playback_speed(const double speed, const bool keep_pitch) {
+    AudioPlayer *ap = audio_player;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
+    if (!isfinite(speed) || speed < 0.25 || speed > 4.0) return AU_ERR_INVALID_ARGUMENT;
+    SDL_AtomicIncRef(&ap->request_count);
+    // The audio threads pick the change up before their next decoded frame
+    SDL_LockMutex(ap->format_mutex);
+    if (ap->speed != speed || ap->keep_pitch != keep_pitch) {
+        ap->speed = speed;
+        ap->keep_pitch = keep_pitch;
+        ap->speed_gen++;
+    }
+    SDL_UnlockMutex(ap->format_mutex);
+    return AU_OK;
+}
+
+double au_get_playback_speed(void) {
+    AudioPlayer *ap = audio_player;
+    if (!ap) return 1.0;
+    SDL_LockMutex(ap->format_mutex);
+    const double speed = ap->speed;
+    SDL_UnlockMutex(ap->format_mutex);
+    return speed;
 }
 
 int au_set_crossfade(const CrossfadeConfig *config) {
@@ -1420,7 +1516,8 @@ double au_get_audio_play_time(void) {
     const double period = ap->obtained_spec.samples / rate;
     const double now = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
     const double elapsed = FFMIN(FFMAX(now - s.callback_time, 0.0), period);
-    return FFMAX(0.0, s.position - 2 * period + elapsed);
+    const double speed = s.speed > 0 ? s.speed : 1.0;
+    return FFMAX(0.0, s.position + (elapsed - 2 * period) * speed);
 }
 
 double au_get_audio_duration(void) {

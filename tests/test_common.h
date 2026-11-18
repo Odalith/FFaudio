@@ -60,6 +60,7 @@ typedef struct TcEvents {
     int started;
     int duration;
     int device;
+    int devices_changed;
     int log_error;
     int32_t last_eof_handle;
     int32_t last_started_handle;
@@ -143,6 +144,11 @@ static void tc_duration_cb(int32_t handle, double duration, void *ud) {
     SDL_UnlockMutex(tc_mutex);
 }
 
+static void tc_devices_changed_cb(void *ud) {
+    (void)ud;
+    tc_bump(&tc_ev.devices_changed);
+}
+
 static void tc_device_cb(int32_t channels, int32_t rate, void *ud) {
     (void)channels; (void)rate; (void)ud;
     tc_bump(&tc_ev.device);
@@ -201,6 +207,7 @@ static int tc_init_player_cfg(int loop_count, double prepare_next_seconds) {
         .on_prepare_next = tc_prepare_next_cb,
         .on_track_started = tc_started_cb,
         .on_audio_device_update = tc_device_cb,
+        .on_audio_devices_changed = tc_devices_changed_cb,
     };
     const int ret = au_initialize(&config);
     if (ret != 0) return ret;

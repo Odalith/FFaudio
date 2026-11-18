@@ -109,7 +109,8 @@ static void enable_key_mode(void) {
 }
 
 static void print_help(void) {
-    printf("keys: n=next  p=pause/resume  s=stop  m=mute  +/-=volume  >/<=seek 10s  space=position  h=help  q=quit\n");
+    printf("keys: n=next  p=pause/resume  s=stop  m=mute  +/-=volume  >/<=seek 10s  [/]=speed  \\=pitch mode\n"
+           "      space=position  h=help  q=quit\n");
 }
 
 static int collect(const char *path, const struct stat *sb, int type, struct FTW *ftw) {
@@ -228,6 +229,17 @@ static void on_restart(int32_t handle, double pos, bool looped, int32_t remainin
     printf("  #%d restarted at %.2f%s (loops left %d)\n", handle, pos, looped ? " by looping" : "", remaining);
 }
 
+static void on_devices_changed(void *ud) {
+    (void)ud;
+    int n = 0;
+    char **devs = NULL;
+    printf("  output devices changed:\n");
+    if (au_get_audio_devices(&n, &devs) == AU_OK) {
+        for (int i = 0; i < n; i++) { printf("    %d: %s\n", i, devs[i]); free(devs[i]); }
+        free(devs);
+    }
+}
+
 static void on_device(int32_t channels, int32_t rate, void *ud) {
     (void)ud;
     printf("  output: %d Hz, %d channels\n", rate, channels);
@@ -280,6 +292,7 @@ int main(int argc, char **argv) {
         .on_track_started = on_started,
         .on_duration_update = on_duration,
         .on_audio_device_update = on_device,
+        .on_audio_devices_changed = on_devices_changed,
     };
     if (au_initialize(&config) != AU_OK) return 1;
 
@@ -339,7 +352,7 @@ int main(int argc, char **argv) {
     enable_key_mode();
     print_help();
 
-    bool paused = false, muted = false;
+    bool paused = false, muted = false, keep_pitch = true;
     int c;
     while ((c = getchar()) != EOF && c != 'q') {
         switch (c) {
@@ -401,6 +414,19 @@ int main(int argc, char **argv) {
             case ' ':
             case '\n':
                 printf("  #%d  %.2f / %.2f s\n", au_get_current_handle(), au_get_audio_play_time(), au_get_audio_duration());
+                break;
+            case '[':
+            case ']': {
+                double sp = au_get_playback_speed() + (c == ']' ? 0.25 : -0.25);
+                sp = sp < 0.25 ? 0.25 : (sp > 4.0 ? 4.0 : sp);
+                au_set_playback_speed(sp, keep_pitch);
+                printf("  speed %.2fx%s\n", sp, keep_pitch ? "" : " (tape)");
+                break;
+            }
+            case '\\':
+                keep_pitch = !keep_pitch;
+                au_set_playback_speed(au_get_playback_speed(), keep_pitch);
+                printf("  %s\n", keep_pitch ? "speed keeps the pitch" : "speed changes the pitch (tape)");
                 break;
             case 'h':
             case '?':

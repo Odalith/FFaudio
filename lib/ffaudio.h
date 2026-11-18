@@ -159,6 +159,7 @@ extern "C" {
         NotifyOfPrepareNext on_prepare_next;
         NotifyOfTrackStarted on_track_started;
         NotifyOfAudioDeviceUpdate on_audio_device_update;
+        NotifyOfAudioDevicesChanged on_audio_devices_changed;
     } InitializeConfig;
 
     typedef struct AudioDeviceConfig {
@@ -203,6 +204,12 @@ extern "C" {
     // List the user's audio devices. Free each string and the array with free().
     DLL_EXPORT int au_get_audio_devices(int *out_total, char ***out_devices);
 
+    // Name of the output device in use (for the system default, the device it currently resolves to when SDL
+    // can tell, otherwise "System default"). "" when no device is open. Returns the length, or
+    // AU_ERR_INVALID_ARGUMENT if buf is too small. With au_configure_audio_device(NULL) playback follows the
+    // system default device; a chosen device that disappears falls back to the default.
+    DLL_EXPORT int au_get_audio_device_name(char *buf, size_t size);
+
     // The output format every track is converted to (float32 internally).
     DLL_EXPORT int au_get_output_spec(int *out_sample_rate, int *out_channels);
 
@@ -240,6 +247,14 @@ extern "C" {
 
     // Set when and how fades and crossfades happen. NULL disables them all (gapless + hard cuts).
     DLL_EXPORT int au_set_crossfade(const CrossfadeConfig *config);
+
+    // Playback speed for all tracks, 0.25..4 (1 = normal). keep_pitch: change the tempo only (atempo);
+    // false: tape-style, pitch follows the speed. Takes effect within about half a second (the audio that is
+    // already decoded plays out first). Positions, durations and seeking stay in file time; crossfade lengths
+    // and prepare_next_seconds stay in wall clock time.
+    DLL_EXPORT int au_set_playback_speed(double speed, bool keep_pitch);
+
+    DLL_EXPORT double au_get_playback_speed(void);
 
     //+-----------------------------------------------------+
     //| Filters                                             |

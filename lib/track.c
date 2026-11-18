@@ -118,6 +118,7 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     t->pending_seek_percent = -1;
     t->seek_by_bytes = -1;
     t->last_frame_pts = NAN;
+    t->play_speed = 1.0;
     SDL_AtomicSet(&t->eos_serial, -1);
     SDL_AtomicSet(&t->loops_remaining, SDL_AtomicGet(&ap->loop_count));
 
@@ -623,6 +624,7 @@ static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const
     af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
     af->pos = -1;
     af->serial = serial;
+    af->speed = t->speed_chain.graph ? t->speed_cur : 1.0;
     af->duration = av_q2d((AVRational){frame->nb_samples, frame->sample_rate});
     av_frame_move_ref(af->frame, frame);
     frame_queue_push(&t->sampq);
@@ -649,12 +651,103 @@ static int feed_user(TrackState *t, AVFrame *frame, AVFrame *tmp, const AVRation
     return ret == AVERROR_EOF ? AVERROR_EOF : 0;
 }
 
-// Pass everything the convert graph has produced on to the user graph
-static int drain_convert(TrackState *t, AVFrame *conv, AVFrame *tmp, const int serial) {
+// Pull what the speed graph produced and pass it on. Tempo and rate filters do not keep file timestamps, so the
+// file position is counted instead: segment start + output samples * speed.
+static int drain_speed(TrackState *t, AVFrame *spd, AVFrame *tmp, const int serial) {
+    int ret;
+    const int rate = t->convert_rate;
+    while ((ret = av_buffersink_get_frame_flags(t->speed_chain.sink, spd, 0)) >= 0) {
+        const double file_pos = t->speed_seg_in + (double)t->speed_seg_out / rate * t->speed_cur;
+        t->speed_seg_out += spd->nb_samples;
+        spd->pts = llrint(file_pos * rate);
+        if ((ret = feed_user(t, spd, tmp, (AVRational){1, rate}, serial)) < 0)
+            return ret;
+        if (packet_queue_serial(&t->audio_queue) != serial)
+            return 0;
+    }
+    return ret == AVERROR_EOF ? AVERROR_EOF : 0;
+}
+
+// Feed one converted frame through the speed graph (when the speed is not 1), then on to the user graph
+static int feed_speed(TrackState *t, AVFrame *frame, AVFrame *spd, AVFrame *tmp, const AVRational tb, const int serial) {
+    if (!t->speed_chain.graph)
+        return feed_user(t, frame, tmp, tb, serial);
+    if (!t->speed_seg_open) {
+        t->speed_seg_in = frame->pts != AV_NOPTS_VALUE ? frame->pts * av_q2d(tb) : 0.0;
+        t->speed_seg_out = 0;
+        t->speed_seg_open = true;
+    }
+    if (av_buffersrc_add_frame(t->speed_chain.src, frame) < 0) {
+        av_frame_unref(frame);
+        return 0;
+    }
+    const int ret = drain_speed(t, spd, tmp, serial);
+    return ret == AVERROR_EOF ? 0 : ret;
+}
+
+// Let the speed graph play out what it still holds (into the user graph), then free it
+static int close_speed_graph(TrackState *t, AVFrame *spd, AVFrame *tmp, const int serial) {
+    int ret = 0;
+    if (t->speed_chain.graph && t->speed_seg_open && av_buffersrc_add_frame(t->speed_chain.src, NULL) >= 0)
+        ret = drain_speed(t, spd, tmp, serial);
+    free_filter_chain(&t->speed_chain);
+    t->speed_seg_open = false;
+    return ret == AVERROR_EXIT ? ret : 0;
+}
+
+// Apply a changed playback speed: a command to the running atempo filters when possible, otherwise the old speed
+// graph plays out and a new one (or none, at normal speed) takes over, so no audio is dropped
+static int apply_speed(TrackState *t, AVFrame *spd, AVFrame *tmp, const int serial) {
+    AudioPlayer *ap = t->ap;
+    AVChannelLayout layout = {0};
+    SDL_LockMutex(ap->format_mutex);
+    const int32_t gen = ap->speed_gen;
+    const double speed = ap->speed > 0 ? ap->speed : 1.0;
+    const bool keep_pitch = ap->keep_pitch;
+    int ret = gen != t->speed_gen_seen ? av_channel_layout_copy(&layout, &ap->audio_target.ch_layout) : 0;
+    SDL_UnlockMutex(ap->format_mutex);
+    if (gen == t->speed_gen_seen || ret < 0) {
+        av_channel_layout_uninit(&layout);
+        return 0;
+    }
+    t->speed_gen_seen = gen;
+
+    const bool want = fabs(speed - 1.0) > 1e-6;
+    if (want && t->speed_chain.graph && keep_pitch && t->speed_keep_pitch_cur) {
+        char arg[32];
+        snprintf(arg, sizeof(arg), "%.9f", sqrt(speed));
+        if (avfilter_graph_send_command(t->speed_chain.graph, SPEED_FILTER_1, "tempo", arg, NULL, 0, 0) >= 0 &&
+            avfilter_graph_send_command(t->speed_chain.graph, SPEED_FILTER_2, "tempo", arg, NULL, 0, 0) >= 0) {
+            // A new segment starts where the old one got to
+            if (t->speed_seg_open) {
+                t->speed_seg_in += (double)t->speed_seg_out / t->convert_rate * t->speed_cur;
+                t->speed_seg_out = 0;
+            }
+            t->speed_cur = speed;
+            av_channel_layout_uninit(&layout);
+            return 0;
+        }
+    }
+
+    if ((ret = close_speed_graph(t, spd, tmp, serial)) < 0) {
+        av_channel_layout_uninit(&layout);
+        return ret;
+    }
+    if (want && (ret = build_speed_graph(&t->speed_chain, t->convert_rate, &layout, speed, keep_pitch,
+                                         ap->use_soxr, ap->filter_nbthreads)) < 0)
+        ff_log(AU_LOG_ERROR, "Could not set the playback speed to %.2f: %s", speed, av_err2str(ret));
+    t->speed_cur = t->speed_chain.graph ? speed : 1.0;
+    t->speed_keep_pitch_cur = keep_pitch;
+    av_channel_layout_uninit(&layout);
+    return 0;
+}
+
+// Pass everything the convert graph has produced on to the speed and user graphs
+static int drain_convert(TrackState *t, AVFrame *conv, AVFrame *spd, AVFrame *tmp, const int serial) {
     int ret;
     while ((ret = av_buffersink_get_frame_flags(t->convert.sink, conv, 0)) >= 0) {
         const AVRational tb = av_buffersink_get_time_base(t->convert.sink);
-        if ((ret = feed_user(t, conv, tmp, tb, serial)) < 0)
+        if ((ret = feed_speed(t, conv, spd, tmp, tb, serial)) < 0)
             return ret;
         if (packet_queue_serial(&t->audio_queue) != serial)
             return 0;
@@ -753,13 +846,14 @@ static int audio_thread(void *arg) {
     TrackState *t = arg;
     AVFrame *frame = av_frame_alloc();
     AVFrame *conv = av_frame_alloc();
+    AVFrame *spd = av_frame_alloc();
     AVFrame *tmp = av_frame_alloc();
     int last_serial = -1;
     int ended_serial = -1;     // serial whose audio has completely been queued
     bool user_built = false;
     int ret = 0;
 
-    if (!frame || !conv || !tmp)
+    if (!frame || !conv || !spd || !tmp)
         goto end;
 
     for (;;) {
@@ -775,8 +869,11 @@ static int audio_thread(void *arg) {
                 && ended_serial != serial) {
                 if (t->convert.graph && last_serial == serial) {
                     if (av_buffersrc_add_frame(t->convert.src, NULL) >= 0 &&
-                        drain_convert(t, conv, tmp, serial) == AVERROR_EXIT)
+                        drain_convert(t, conv, spd, tmp, serial) == AVERROR_EXIT)
                         break;
+                    if (close_speed_graph(t, spd, tmp, serial) == AVERROR_EXIT)
+                        break;
+                    t->speed_gen_seen = -1; // rebuilt if playback continues after a seek
                     if (feed_user(t, NULL, tmp, (AVRational){1, t->convert_rate}, serial) == AVERROR_EXIT)
                         break;
                 }
@@ -815,7 +912,10 @@ static int audio_thread(void *arg) {
                 }
                 break;
             }
-            // The user graph restarts with the conversion (seek, device change): stale state is dropped
+            // The speed and user graphs restart with the conversion (seek, device change): stale state is dropped
+            free_filter_chain(&t->speed_chain);
+            t->speed_seg_open = false;
+            t->speed_gen_seen = -1;
             SDL_AtomicSet(&t->user_filters_changed, 1);
         }
 
@@ -829,12 +929,14 @@ static int audio_thread(void *arg) {
         }
 
         run_filter_commands(t);
+        if (apply_speed(t, spd, tmp, serial) == AVERROR_EXIT)
+            break;
 
         if (av_buffersrc_add_frame(t->convert.src, frame) < 0) {
             av_frame_unref(frame);
             continue;
         }
-        ret = drain_convert(t, conv, tmp, serial);
+        ret = drain_convert(t, conv, spd, tmp, serial);
         if (ret == AVERROR_EXIT)
             break;
         if (ret == AVERROR_EOF) {
@@ -845,9 +947,11 @@ static int audio_thread(void *arg) {
 
 end:
     free_filter_chain(&t->convert);
+    free_filter_chain(&t->speed_chain);
     free_filter_chain(&t->user);
     av_frame_free(&frame);
     av_frame_free(&conv);
+    av_frame_free(&spd);
     av_frame_free(&tmp);
     return ret;
 }
@@ -901,6 +1005,7 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
             }
             t->cur = f;
             t->cur_offset = 0;
+            t->play_speed = f->speed > 0 ? f->speed : 1.0;
         }
 
         const int available = t->cur->frame->nb_samples - t->cur_offset;
@@ -910,7 +1015,7 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
                (size_t)n * channels * sizeof(float));
         written += n;
         t->cur_offset += n;
-        t->position += (double)n / rate;
+        t->position += (double)n / rate * t->cur->speed;
 
         if (t->cur_offset >= t->cur->frame->nb_samples) {
             frame_queue_next(&t->sampq);
