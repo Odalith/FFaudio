@@ -67,23 +67,25 @@ int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
     return ret;
 }
 
-int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const bool force_output_format) {
-    if (!ap || !is || !ap->audio_target || ap->audio_target->fmt == -1) return -1;
+void free_audio_filters(TrackState *is) {
+    // Freeing the graph frees every filter in it, including the source and sink
+    avfilter_graph_free(&is->agraph);
+    is->in_audio_filter = NULL;
+    is->out_audio_filter = NULL;
+}
 
-    const enum AVSampleFormat sample_fmts[] = { ap->audio_target->fmt, AV_SAMPLE_FMT_NONE };
-    int sample_rates[2] = { 0, -1 };
-    AVFilterContext *audio_source_filter = NULL, *audio_sink_filter = NULL;
+int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const bool force_output_format) {
+    if (!ap || !is || !ap->audio_target || ap->audio_target->fmt == AV_SAMPLE_FMT_NONE) return -1;
+
+    AVFilterContext *audio_source_filter = NULL, *audio_sink_filter = NULL, *format_filter = NULL;
     char aresample_swr_opts[512] = "";
     const AVDictionaryEntry *e = NULL;
     AVBPrint bp;
     char asrc_args[256];
-    const char* audio_filters = NULL;
+    char aformat_args[512];
 
-    if (is->filtergraph_str) {
-        audio_filters = av_strdup(is->filtergraph_str);
-    }
-
-    avfilter_graph_free(&is->agraph);
+    // Never leave in/out pointing into a graph that has been freed
+    free_audio_filters(is);
     if (!(is->agraph = avfilter_graph_alloc()))
         return AVERROR(ENOMEM);
     is->agraph->nb_threads = ap->filter_nbthreads;
@@ -120,29 +122,37 @@ int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const bool fo
                                        NULL, NULL, is->agraph);
     if (ret < 0) goto end;
 
-    if ((ret = av_opt_set_int_list(audio_sink_filter, "sample_fmts", sample_fmts,  AV_SAMPLE_FMT_NONE, AV_OPT_SEARCH_CHILDREN)) < 0) goto end;
-    if ((ret = av_opt_set_int(audio_sink_filter, "all_channel_counts", 1, AV_OPT_SEARCH_CHILDREN)) < 0) goto end;
-
+    // The output format is enforced with an `aformat` filter in front of the sink instead of
+    // abuffersink options: those options changed across FFmpeg versions and, since FFmpeg 8,
+    // can no longer be set after the sink has been initialized.
     if (force_output_format) {
         av_bprint_clear(&bp);
         av_channel_layout_describe_bprint(&ap->audio_target->ch_layout, &bp);
-        sample_rates[0] = ap->audio_target->freq;
-        if ((ret = av_opt_set_int(audio_sink_filter, "all_channel_counts", 0, AV_OPT_SEARCH_CHILDREN)) < 0) goto end;
-        if ((ret = av_opt_set(audio_sink_filter, "ch_layouts", bp.str, AV_OPT_SEARCH_CHILDREN)) < 0) goto end;
-        if ((ret = av_opt_set_int_list(audio_sink_filter, "sample_rates", sample_rates, -1, AV_OPT_SEARCH_CHILDREN)) < 0) goto end;
+        ret = snprintf(aformat_args, sizeof(aformat_args), "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
+                       av_get_sample_fmt_name(ap->audio_target->fmt), ap->audio_target->freq, bp.str);
     }
+    else {
+        ret = snprintf(aformat_args, sizeof(aformat_args), "sample_fmts=%s",
+                       av_get_sample_fmt_name(ap->audio_target->fmt));
+    }
+    if (ret < 0 || ret >= (int)sizeof(aformat_args)) { ret = AVERROR(EINVAL); goto end; }
 
-    if ((ret = configure_filtergraph(is->agraph, audio_filters, audio_source_filter, audio_sink_filter)) < 0) goto end;
+    ret = avfilter_graph_create_filter(&format_filter, avfilter_get_by_name("aformat"),
+                                       "ffaudio_output_format", aformat_args, NULL, is->agraph);
+    if (ret < 0) goto end;
+
+    if ((ret = avfilter_link(format_filter, 0, audio_sink_filter, 0)) < 0) goto end;
+
+    if ((ret = configure_filtergraph(is->agraph, is->filtergraph_str, audio_source_filter, format_filter)) < 0) goto end;
 
     is->in_audio_filter  = audio_source_filter;
     is->out_audio_filter = audio_sink_filter;
 
 end:
     if (ret < 0) {
-        avfilter_graph_free(&is->agraph);
+        free_audio_filters(is);
     }
     av_bprint_finalize(&bp, NULL);
-    av_free(audio_filters);
 
     return ret;
 }

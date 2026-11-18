@@ -1159,11 +1159,7 @@ static int audio_thread(void* arg) {
 
     } while (ret >= 0 || ret == AVERROR(EAGAIN) || ret == AVERROR_EOF);
  the_end:
-    avfilter_free(is->in_audio_filter);
-    avfilter_free(is->out_audio_filter);
-    avfilter_graph_free(&is->agraph);
-    is->in_audio_filter = NULL;
-    is->out_audio_filter = NULL;
+    free_audio_filters(is);
     av_frame_free(&frame);
     return ret;
 }

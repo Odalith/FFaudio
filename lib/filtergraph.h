@@ -29,4 +29,7 @@ int configure_filtergraph(AVFilterGraph *graph, const char *filtergraph,
 
 int configure_audio_filters(const AudioPlayer *ap, TrackState *is, const bool force_output_format);
 
+// Frees the track's filter graph and clears the in/out filter pointers
+void free_audio_filters(TrackState *is);
+
 #endif //FFAUDIO_FILTERGRAPH_H
