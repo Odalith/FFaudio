@@ -21,18 +21,46 @@
 #ifndef FFAUDIO_DELAGATES_H
 #define FFAUDIO_DELAGATES_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 enum AU_LOG_LEVEL {
- INFO = 0,
- WARNING = 1,
- ERROR = 2,
- FATAL = 3
+    AU_LOG_INFO = 0,
+    AU_LOG_WARNING = 1,
+    AU_LOG_ERROR = 2,
+    AU_LOG_FATAL = 3
 };
 
-typedef void (*NotifyOfLog)(const char* message, int64_t request, enum AU_LOG_LEVEL level);
-typedef void (*NotifyOfEndOfFile)(bool is_eof_from_skip, bool is_from_error, int32_t handle);
-typedef void (*NotifyOfRestart)(double position, bool is_from_looping, int32_t remaining_loop_count);
-typedef void (*NotifyOfDurationUpdate)(double new_duration);
-typedef void (*NotifyOfPrepareNext)();
-typedef void (*NotifyOfAudioDeviceUpdate)(int32_t channel_count, int32_t sample_rate, int32_t format);
+/*
+ * All callbacks run on ffaudio's control thread, one at a time, never on the audio thread.
+ * Calling any au_* function from inside a callback is allowed (except au_shutdown); those calls are
+ * queued and run right after the callback returns.
+ * `user_data` is InitializeConfig.user_data.
+ */
+
+// A message from the library. `request` is the number of API requests made when it was logged.
+typedef void (*NotifyOfLog)(const char *message, int64_t request, enum AU_LOG_LEVEL level, void *user_data);
+
+// Called exactly once for every handle returned by au_play_audio() / au_set_next(), when that track
+// leaves the player. is_eof_from_skip: it was replaced, skipped, cleared or stopped.
+// is_from_error: it could not be opened or decoding failed. Both false: it played to the end.
+typedef void (*NotifyOfEndOfFile)(bool is_eof_from_skip, bool is_from_error, int32_t handle, void *user_data);
+
+// The current track restarted from `position` (seconds): after a seek, or after a loop when is_from_looping.
+typedef void (*NotifyOfRestart)(int32_t handle, double position, bool is_from_looping, int32_t remaining_loop_count, void *user_data);
+
+// The duration (seconds) of a track became known or changed.
+typedef void (*NotifyOfDurationUpdate)(int32_t handle, double new_duration, void *user_data);
+
+// The current track is close to its end (see InitializeConfig.prepare_next_seconds) and nothing is queued:
+// a good moment to call au_set_next(). Also called when a queued track fails to open.
+typedef void (*NotifyOfPrepareNext)(int32_t current_handle, void *user_data);
+
+// A track became the current (audible) track: at the start of playback, after a gapless/crossfade
+// transition, or after a skip. au_get_audio_play_time()/au_get_audio_duration() now refer to it.
+typedef void (*NotifyOfTrackStarted)(int32_t handle, void *user_data);
+
+// The output device was opened or changed. Useful to rebuild channel-dependent filter strings.
+typedef void (*NotifyOfAudioDeviceUpdate)(int32_t channel_count, int32_t sample_rate, void *user_data);
 
 #endif //FFAUDIO_DELAGATES_H

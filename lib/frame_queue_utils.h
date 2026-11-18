@@ -25,24 +25,25 @@
 
 void frame_queue_unref_item(Frame *vp);
 
-int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size, int keep_last);
+int frame_queue_init(FrameQueue *f, PacketQueue *pktq, int max_size);
 
 void frame_queue_destroy(FrameQueue *f);
 
 void frame_queue_signal(FrameQueue *f);
 
+// Producer: wait for a free slot. NULL when the packet queue is aborted.
 Frame *frame_queue_peek_writable(FrameQueue *f);
-
-Frame *frame_queue_peek_readable(FrameQueue *f);
 
 void frame_queue_push(FrameQueue *f);
 
+// Consumer: the oldest frame or NULL if the queue is empty. Never blocks.
+Frame *frame_queue_peek_nb(FrameQueue *f);
+
 void frame_queue_next(FrameQueue *f);
 
-/* return the number of undisplayed frames in the queue */
 int frame_queue_nb_remaining(FrameQueue *f);
 
-/* return last shown position */
-int64_t frame_queue_last_pos(FrameQueue *f);
+// Limit the queue to roughly this many samples of audio (0 = no limit besides the frame count)
+void frame_queue_set_max_samples(FrameQueue *f, int64_t max_samples);
 
 #endif //FFAUDIO_FRAME_QUEUE_UTILS_H
