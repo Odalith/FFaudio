@@ -53,6 +53,7 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 set(FFAUDIO_PUBLIC_HEADERS
         lib/ffaudio.h
         lib/ffaudio_filters.h
+        lib/ffaudio_loudness.h
         lib/delegates.h)
 
 add_library(ffaudio
@@ -60,6 +61,7 @@ add_library(ffaudio
         lib/ffaudio.c
         lib/filters.c
         lib/metadata.c
+        lib/loudness.c
         lib/metadata.h
         lib/track.c
         lib/track.h
@@ -139,6 +141,9 @@ endfunction()
 if(FFAUDIO_BUILD_MANUAL_PLAYER AND NOT WIN32)
     ffaudio_test_exe(manual_player tests/manual_player.c)
 endif()
+if(FFAUDIO_BUILD_MANUAL_PLAYER)
+    ffaudio_test_exe(loudness_scan tests/loudness_scan.c)
+endif()
 
 if(FFAUDIO_BUILD_TESTS)
     enable_testing()
@@ -159,7 +164,7 @@ if(FFAUDIO_BUILD_TESTS)
                 COMMENT "Generating audio fixtures")
         add_custom_target(ffaudio_fixtures ALL DEPENDS ${FIXTURE_DIR}/.stamp)
 
-        foreach(t test_basic test_lifecycle test_stress test_output test_metadata)
+        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})

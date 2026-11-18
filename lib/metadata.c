@@ -218,7 +218,7 @@ AuMediaInfo *au_probe(const char *filename, int *out_error) {
 
 end:
     avformat_close_input(&ic);
-    if (out_error) *out_error = ret < 0 ? (ret == AVERROR(ENOMEM) ? AU_ERR_NO_MEMORY : AU_ERR_INVALID_ARGUMENT) : AU_OK;
+    if (out_error) *out_error = ret < 0 ? (ret == AVERROR(ENOMEM) ? AU_ERR_NO_MEMORY : AU_ERR_FILE) : AU_OK;
     return info;
 }
 
