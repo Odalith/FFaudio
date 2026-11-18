@@ -197,7 +197,7 @@ typedef struct TrackState {
     AVDictionary *swr_opts_n;          // default NULL
 
     bool reconfigure_target_filter;     // default false
-    char *filtergraph_override;         // default NULL
+    char *filtergraph_str;              // default NULL
     AVFilterContext *in_audio_filter;   // the first filter in the audio chain
     AVFilterContext *out_audio_filter;  // the last filter in the audio chain
     AVFilterGraph *agraph;              // the whole audio filter graph
@@ -229,10 +229,7 @@ typedef struct AudioPlayer {
     int32_t startup_volume;                // default 100
     int32_t sdl_volume;                    // default 0
     int32_t filter_nbthreads;              // default 0
-    int64_t audio_callback_time;       // default 0
-    char *track_filters;               // default NULL
-    char *anequalizer_filter;          // default NULL
-    int16_t anequalizer_values[EQ_BAND_COUNT]; //default [0, ...]
+    int64_t audio_callback_time;           // default 0
     const char* wanted_stream_spec[AVMEDIA_TYPE_NB]; // default [NULL]
     int32_t seek_by_bytes;                 // default -1
     int32_t loop;                          // default 0

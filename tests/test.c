@@ -122,9 +122,7 @@ static void play_next(void) {
     const PlayAudioConfig config = {
         .skip_seconds = 0.0,
         .play_duration = 0.0,
-        .crossfeed_setting = NULL,
-        .loudnorm_settings = NULL,
-        .av_filtergraph_override = NULL,
+        .av_filtergraph = "bs2b=profile=default",
     };
 
     au_play_audio(song, &config);
@@ -134,9 +132,7 @@ static void play_next(void) {
     const PlayAudioConfig config2 = {
         .skip_seconds = 0.0,
         .play_duration = 0.0,
-        .crossfeed_setting = NULL,
-        .loudnorm_settings = NULL,
-        .av_filtergraph_override = NULL,
+        .av_filtergraph = NULL,
     };
 
     //au_set_next(queue_files[++queue_pos], &config2);
@@ -207,7 +203,7 @@ int main(int argc, char **argv) {
     // Setup
     const InitializeConfig config = {
         .app_name = "Test App",
-        .initial_volume = 50,
+        .initial_volume = 55,
         .initial_loop_count = 0,
         .on_log = error_callback,
         .on_eof = eof_callback,
@@ -228,10 +224,22 @@ int main(int argc, char **argv) {
         }
     }
 
+    const AudioDeviceConfig AudConfig1 = {
+        .audio_device = "Navi 10 HDMI Audio Digital Stereo (HDMI 3)",
+        .audio_device_index = 3
+    };
+
+    const AudioDeviceConfig AudConfig2 = {
+        .audio_device = "Bose QC Ultra Headphones",
+        .audio_device_index = 2
+    };
+
+    //au_configure_audio_device(&AudConfig1);
+
     au_configure_audio_device(NULL);
 
     //Todo error when custom device and PC sleep?
-    const EqualizerConfig params = {
+    /*const EqualizerConfig params = {
         .one_31Hz = 2.0,
         .two_63Hz = 1.5,
         .three_125Hz = 1,
@@ -244,9 +252,24 @@ int main(int argc, char **argv) {
         .ten_16000Hz = 3
     };
 
-    au_set_equalizer(params);
+    au_set_equalizer(params);*/
 
     play_next();
+
+
+    /*int32_t counter = 0;
+    while (1) {
+        sleep(5);
+
+        counter++;
+        if (counter % 2 == 0) {
+            au_configure_audio_device(&AudConfig2);//Todo breaks when this device is removed, should default to default
+        }
+        else {
+            au_configure_audio_device(&AudConfig1);
+        }
+    }*/
+
 
 
     if (SKIP_AFTER_SECONDS > 0) {

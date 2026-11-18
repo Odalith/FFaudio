@@ -381,7 +381,7 @@ static void track_state_clear(TrackState *is)
     avfilter_graph_free(&is->agraph);*/
 
     av_free((void*)is->filename);
-    av_free((void*)is->filtergraph_override);
+    av_free((void*)is->filtergraph_str);
     SDL_DestroyCond(is->continue_read_thread);
 
     //All of these are NULL
@@ -450,7 +450,7 @@ static void abort_track(const int32_t index, const bool should_play_next) {
 //| Init Functions                                      |
 //+-----------------------------------------------------+
 
-static TrackState* track_state_init(const char *filename, char* filtergraph_override, const int64_t start_time, const int64_t play_duration, const int32_t handle) {
+static TrackState* track_state_init(const char *filename, char* filtergraph_str, const int64_t start_time, const int64_t play_duration, const int32_t handle) {
     TrackState *is = av_mallocz(sizeof(TrackState));
     if (!is)
         return NULL;//Todo send EOF here? If this ever fails, no EOF event is sent. But chances are if this could not be allocated then neither will the next
@@ -469,7 +469,7 @@ static TrackState* track_state_init(const char *filename, char* filtergraph_over
     is->format_opts_n = NULL;
     is->codec_opts_n = NULL;
     is->swr_opts_n = NULL;
-    is->filtergraph_override = filtergraph_override;
+    is->filtergraph_str = filtergraph_str;
 
     if (frame_queue_init(&is->sampq, &is->audio_queue, SAMPLE_QUEUE_SIZE, 1) < 0)
         goto fail;
@@ -524,24 +524,11 @@ fail:
 static TrackState* create_track_state(const char *filename, const PlayAudioConfig* config) {
     int64_t start_time = AV_NOPTS_VALUE;
     int64_t play_duration = AV_NOPTS_VALUE;
-    char *filtergraph_override = NULL;
+    char *filtergraph_str = NULL;
 
     if (config) {
-        if (config->av_filtergraph_override) {
-            filtergraph_override = av_strdup(config->av_filtergraph_override);
-        }
-        else  {
-            if (config->loudnorm_settings) {
-                const char *loudnorm_filter = av_asprintf("loudnorm=%s:linear=true", config->loudnorm_settings);
-                add_to_filter_chain_end(audio_player, loudnorm_filter);//Todo store filerchain string in TrackState
-                av_freep(&loudnorm_filter);
-            }
-
-            if (config->crossfeed_setting) {
-                const char *crossfeed_filter = av_asprintf("crossfeed=%s", config->crossfeed_setting);
-                add_to_filter_chain_end(audio_player, crossfeed_filter);
-                av_freep(&crossfeed_filter);
-            }
+        if (config->av_filtergraph) {
+            filtergraph_str = av_strdup(config->av_filtergraph);
         }
 
         if (config->play_duration > 0) {
@@ -553,7 +540,7 @@ static TrackState* create_track_state(const char *filename, const PlayAudioConfi
         }
     }
 
-    TrackState* is = track_state_init(filename, filtergraph_override, start_time, play_duration, ++audio_player->handle_count);
+    TrackState* is = track_state_init(filename, filtergraph_str, start_time, play_duration, ++audio_player->handle_count);
 
     if (!is) {
         send_log_event(FATAL, "Failed to initialize TrackState!");
@@ -574,8 +561,6 @@ static int app_state_init(AudioPlayer *s) {
     s->sdl_volume = 0;
     s->filter_nbthreads = 0;
     s->audio_callback_time = 0;
-    s->track_filters = NULL;
-    s->anequalizer_filter = NULL;
 
 
     s->seek_by_bytes = -1;
@@ -1119,7 +1104,7 @@ static int audio_thread(void* arg) {
         if (is->reconfigure_target_filter) {//Target filter changes are already assumed to be in audio_player
 
             is->reconfigure_target_filter = false;
-            if ((ret = configure_audio_filters(audio_player, is, audio_player->track_filters, true)) < 0) {
+            if ((ret = configure_audio_filters(audio_player, is, true)) < 0) {
                 goto the_end;
             }
         }
@@ -1141,7 +1126,7 @@ static int audio_thread(void* arg) {
             last_serial = is->audio_decoder.pkt_serial;
 
 
-            if ((ret = configure_audio_filters(audio_player, is, audio_player->track_filters, true)) < 0) {
+            if ((ret = configure_audio_filters(audio_player, is, true)) < 0) {
                 goto the_end;
             }
 
@@ -1856,8 +1841,6 @@ void au_play_audio(const char *filename, const PlayAudioConfig* config) {
 
     wait_for_audio_reconfigure();
 
-    clear_filter_chain(audio_player);
-
     abort_track(audio_player->track_index, false);
 
     //Always replace the current track
@@ -2134,25 +2117,6 @@ int au_get_audio_devices(int *out_total, char ***out_devices) {
     *out_total = count;
     *out_devices = devices;
     return 0;
-}
-
-bool au_set_equalizer(const EqualizerConfig params) {
-    if (!audio_player || !audio_player->is_audio_device_initialized) return false;
-
-    wait_for_audio_reconfigure();
-
-    update_anequalizer_array(audio_player, &params);
-
-    if (audio_player->anequalizer_filter) {
-        av_free(audio_player->anequalizer_filter);
-        audio_player->anequalizer_filter = NULL;
-        
-        //Todo update EQ during runtime
-    }
-
-    update_anequalizer_str(audio_player, audio_player->given_spec.channels);
-
-    return true;
 }
 
 void au_wait_loop() {
