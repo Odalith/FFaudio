@@ -4,6 +4,7 @@
  */
 #include "test_common.h"
 #include <math.h>
+#include "../lib/ffaudio_filters.h"
 #define FFA_MIN(a, b) ((a) < (b) ? (a) : (b))
 
 static char out_path[1024];
@@ -665,6 +666,52 @@ static void test_speed_change_while_playing(void) {
     free(c.samples);
 }
 
+/* ---------- builder filters in playback: limiter ceiling, a live command to a named filter ---------- */
+
+static float channel_window_peak_db(const Capture *c, const int channel, size_t first, double from_s, double to_s) {
+    float p = 0;
+    const size_t a = first + (size_t)(from_s * c->rate), b = first + (size_t)(to_s * c->rate);
+    for (size_t i = a; i < b && i < c->frames; i++) p = fmaxf(p, fabsf(c->samples[i * c->channels + channel]));
+    return p > 1e-9f ? 20.0f * log10f(p) : -999.0f;
+}
+
+static void test_limiter_and_named_command(void) {
+    // +15 dB into a -6 dB limiter: the sine (-18 dB) would peak at -3 dB without it
+    AuFilterBuilder *fb = au_fb_create();
+    au_fb_add_volume_db(fb, 15);
+    AuLimiter lim = au_limiter_defaults();
+    lim.ceiling_db = -6;
+    CHECK(au_fb_add_limiter(fb, &lim) == AU_OK);
+    const AuStereo st = au_stereo_defaults();
+    CHECK(au_fb_set_name(fb, "st") == AU_OK);
+    CHECK(au_fb_add_stereo(fb, &st) == AU_OK); // named, so it is there to be changed
+    printf("   filters: %s\n", au_fb_peek(fb));
+
+    start_capture("named_filters");
+    au_set_audio_volume(100);
+    CHECK(au_set_global_filtergraph(au_fb_peek(fb)) == AU_OK);
+    au_fb_free(fb);
+    au_play_audio(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(1500);
+    CHECK(au_send_filter_command(0, "stereotools@st", "balance_out", "1") == AU_OK); // right only
+    tc_sleep_ms(1500);
+    au_stop_audio();
+    wait_until_idle(1, 3000);
+    Capture c = stop_capture();
+
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const float l0 = channel_window_peak_db(&c, 0, first, 0.2, 1.0), r0 = channel_window_peak_db(&c, 1, first, 0.2, 1.0);
+    const float l1 = channel_window_peak_db(&c, 0, first, 2.2, 2.6), r1 = channel_window_peak_db(&c, 1, first, 2.2, 2.6);
+    const float all = fmaxf(channel_window_peak_db(&c, 0, first, 0, 3.5), channel_window_peak_db(&c, 1, first, 0, 3.5));
+    printf("   limited: L %.2f R %.2f dB (overall peak %.2f); after balance 1: L %.1f R %.2f dB\n", l0, r0, all, l1, r1);
+    CHECK(fabsf(l0 - -6.0f) < 0.3f && fabsf(r0 - -6.0f) < 0.3f);
+    CHECK(all < -5.8f);           // never over the ceiling, also at the start
+    CHECK(l1 < -60.0f);           // the command reached the playing track
+    CHECK(fabsf(r1 - -6.0f) < 0.3f);
+    free(c.samples);
+}
+
 static void test_bad_filter_fails_cleanly(void) {
     start_capture("badfilter");
     const PlayAudioConfig bad = { .av_filtergraph = "this_filter_does_not_exist=1" };
@@ -699,6 +746,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_speed_limits_and_position);
     RUN_TEST(test_speed_gapless_and_crossfade);
     RUN_TEST(test_speed_change_while_playing);
+    RUN_TEST(test_limiter_and_named_command);
     RUN_TEST(test_bad_filter_fails_cleanly);
     return tc_finish("test_output");
 }

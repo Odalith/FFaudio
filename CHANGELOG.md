@@ -36,8 +36,13 @@ incompatible ways; see "API changes".
   logarithmic, exponential, custom) and per-track overrides (`au_set_crossfade`, `PlayAudioConfig.fade_in`).
 - 32-bit float mixing at the device rate and layout, soxr resampling when available, TPDF dither for integer
   devices, ramped volume/mute/pause.
-- Filter-string builder (`ffaudio_filters.h`): equalizer, crossfeed, bs2b and plain gain. (Loudness
-  normalization is built in, see `au_set_replaygain()`.)
+- Filter-string builder (`ffaudio_filters.h`): graphic equalizer, parametric equalizer
+  (`au_fb_add_parametric_eq`, with `au_parametric_eq_parse()` for EqualizerAPO / AutoEq `ParametricEQ.txt`
+  headphone profiles), bass/treble (`au_fb_add_tone`), balance/width/mono/channel swap (`au_fb_add_stereo`),
+  compressor with gentle and night presets, look-ahead limiter, crossfeed, bs2b and plain gain. Instance names
+  (`au_fb_set_name`) make the filters addressable by `au_send_filter_command`; `au_filter_available()` and
+  `AU_ERR_UNSUPPORTED` for filters missing from the FFmpeg build. (Loudness normalization is built in, see
+  `au_set_replaygain()`.)
 - Global filters and live filter changes: `au_set_global_filtergraph`, `au_update_filtergraph`,
   `au_send_filter_command`, `au_validate_filtergraph`.
 - `on_track_started` and `on_audio_device_update` callbacks; `on_prepare_next` now fires
