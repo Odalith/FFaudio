@@ -66,7 +66,8 @@ fetch "$soxr_tarball" "$SOXR_SHA256" \
     "https://downloads.sourceforge.net/project/soxr/$soxr_tarball" \
     "https://deb.debian.org/debian/pool/main/libs/libsoxr/libsoxr_$SOXR_VERSION.orig.tar.xz"
 rm -rf "soxr-$SOXR_VERSION-Source" soxr-build
-tar xf "$soxr_tarball"
+# Without the one symlink (a test helper): MSYS2 can not create symlinks by default
+tar xf "$soxr_tarball" --exclude="soxr-$SOXR_VERSION-Source/inst-check-soxr-lsr"
 # CMAKE_POLICY_VERSION_MINIMUM: soxr asks for CMake 3.1, which CMake 4 no longer accepts
 cmake -S "soxr-$SOXR_VERSION-Source" -B soxr-build -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$prefix" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
@@ -104,6 +105,7 @@ for need in aformat aresample atempo anequalizer equalizer stereotools alimiter 
     case ",$filters," in *",$need,"*) ;; *) echo "error: filter $need missing from the list" >&2; exit 1 ;; esac
 done
 
+# configure looks for soxr with the compiler (not pkg-config), hence the -I/-L for the prefix below
 optional=(--enable-libsoxr)
 pkg-config --exists libbs2b && optional+=(--enable-libbs2b) || echo "note: libbs2b not found, building without it"
 
@@ -126,6 +128,7 @@ esac
     --enable-demuxers --enable-parsers --enable-bsfs \
     --enable-filter="$filters" \
     --enable-protocol=file,pipe \
+    --extra-cflags="-I$prefix/include" --extra-ldflags="-L$prefix/lib" \
     "${optional[@]}" ${EXTRA_CONFIGURE:-} \
     | tee "$work/configure.log"
 

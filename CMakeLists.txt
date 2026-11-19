@@ -163,6 +163,8 @@ function(ffaudio_test_exe name src)
         target_link_libraries(${name} PRIVATE m)
     endif()
     target_compile_options(${name} PRIVATE ${SAN_FLAGS})
+    # Plain main(): on Windows SDL.h would otherwise rename it and expect SDL2main to provide WinMain
+    target_compile_definitions(${name} PRIVATE SDL_MAIN_HANDLED)
     target_link_options(${name} PRIVATE ${SAN_FLAGS})
     set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 endfunction()
