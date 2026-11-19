@@ -33,7 +33,7 @@ esac
 cp -a "$stage/." "$root/"
 cp -a "$deps/include" "$deps/lib" "$deps/share" "$root/"
 [ -d "$deps/bin" ] && cp -a "$deps/bin" "$root/"
-rm -rf "$root/lib/cmake/soxr" 2>/dev/null || true
+rm -rf "$root/lib/cmake/soxr" "$root/share/ffmpeg" "$root/share/doc" 2>/dev/null || true
 
 # pkg-config files that work wherever the archive is unpacked
 for pc in "$root"/lib/pkgconfig/*.pc; do
@@ -105,28 +105,51 @@ if [ "$os" = linux ]; then
         done
     done
 else
-    # DLLs from the MSYS2 environment (not Windows' own) that the DLLs in bin/ import
-    msys_bin="${MINGW_PREFIX:-/ucrt64}/bin"
-    changed=1
-    while [ $changed = 1 ]; do
-        changed=0
-        for dll in "$root"/bin/*.dll; do
-            for need in $(objdump -p "$dll" | sed -n 's/^\s*DLL Name: \(.*\)$/\1/p' | tr -d '\r'); do
-                [ -e "$root/bin/$need" ] && continue
-                path="$msys_bin/$need"
-                [ -f "$path" ] || continue   # a Windows system DLL
-                cp "$path" "$root/bin/"
-                bundled+=("$need")
-                pkg=$(pacman -Qqo "$path" 2>/dev/null | head -1) || pkg=""
-                if [ -n "$pkg" ] && [ -d "${MINGW_PREFIX:-/ucrt64}/share/licenses/${pkg#mingw-w64-ucrt-x86_64-}" ]; then
-                    cp -r "${MINGW_PREFIX:-/ucrt64}/share/licenses/${pkg#mingw-w64-ucrt-x86_64-}" "$root/share/licenses/"
-                elif [ -n "$pkg" ]; then
-                    echo "warning: no license directory for $pkg ($need)" >&2
-                fi
-                changed=1
+    msys="${MINGW_PREFIX:-/ucrt64}"
+    msys_bin="$msys/bin"
+    # The license directory of the MSYS2 package that owns a file
+    msys_license() {
+        local pkg
+        pkg=$(pacman -Qqo "$1" 2>/dev/null | head -1) || pkg=""
+        if [ -n "$pkg" ] && [ -d "$msys/share/licenses/${pkg#mingw-w64-ucrt-x86_64-}" ]; then
+            cp -r "$msys/share/licenses/${pkg#mingw-w64-ucrt-x86_64-}" "$root/share/licenses/"
+        else
+            echo "warning: no license directory for ${pkg:-the owner of $1}" >&2
+        fi
+    }
+    bundle_dll() { # bundle_dll <name>: copy it from MSYS2 (with its license); false for Windows' own DLLs
+        local path="$msys_bin/$1"
+        [ -e "$root/bin/$1" ] && return 0
+        [ -f "$path" ] || return 1
+        cp "$path" "$root/bin/"
+        bundled+=("$1")
+        msys_license "$path"
+    }
+    # DLLs from the MSYS2 environment (not Windows' own) that the DLLs in bin/ import, recursively
+    bundle_imports() {
+        local changed=1 dll need
+        while [ $changed = 1 ]; do
+            changed=0
+            for dll in "$root"/bin/*.dll; do
+                for need in $(objdump -p "$dll" | sed -n 's/^\s*DLL Name: \(.*\)$/\1/p' | tr -d '\r'); do
+                    [ -e "$root/bin/$need" ] && continue
+                    bundle_dll "$need" && changed=1
+                done
             done
         done
-    done
+    }
+    bundle_imports
+    # Loaded at run time, so not in any import table: MSYS2's SDL2.dll is sdl2-compat, which runs on SDL3.dll
+    if [ -e "$root/bin/SDL2.dll" ] && strings -a "$root/bin/SDL2.dll" | grep -qx 'SDL3.dll'; then
+        bundle_dll SDL3.dll || { echo "error: SDL2.dll needs SDL3.dll, which is not installed" >&2; exit 1; }
+        bundle_imports
+    fi
+    # Libraries FFmpeg linked statically (MSYS2 has only a static libbs2b): their code is in the DLLs, so their
+    # licenses come along
+    if grep -q -- '--enable-libbs2b' "$root/share/licenses/ffmpeg/BUILD.txt" && [ ! -e "$root/bin/libbs2b-0.dll" ]; then
+        msys_license "$(pkg-config --variable=pcfiledir libbs2b)/libbs2b.pc"
+        bundled+=("bs2b (linked into avfilter)")
+    fi
     # Import libraries are not needed to run, but let applications link against the bundled DLLs
     rm -f "$root"/lib/*.def 2>/dev/null || true
 fi
@@ -148,7 +171,8 @@ fi
         echo "Needs SDL2 (2.24 or newer) from the system, e.g. libsdl2-2.0-0 on Debian/Ubuntu, sdl2 on Arch/Fedora."
         echo "Built on Ubuntu 24.04: needs glibc 2.39 or newer."
     else
-        echo "  bin/                libffaudio.dll and every DLL it needs (FFmpeg, soxr, SDL2, MinGW runtime)"
+        echo "  bin/                libffaudio.dll and every DLL it needs (FFmpeg, soxr, SDL2, MinGW runtime)."
+        echo "                      SDL2.dll is sdl2-compat, which runs on SDL3.dll: ship both"
         echo "  lib/                import libraries (.dll.a) for MinGW; pkg-config and CMake files as on Linux"
         echo
         echo "Built with MSYS2 UCRT64 (GCC). Ship the DLLs from bin/ next to your executable."

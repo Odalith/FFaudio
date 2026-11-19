@@ -8,7 +8,7 @@ on:
   push:
     tags: [ 'v*' ]
   pull_request:
-    paths: [ '.github/workflows/release.yml', 'scripts/**', 'CMakeLists.txt', 'ffaudio.pc.in' ]
+    paths: [ '.github/workflows/release.yml', 'scripts/**', 'CMakeLists.txt', 'ffaudio.pc.in', 'tests/release_smoke.c' ]
   workflow_dispatch:
 
 permissions:
@@ -77,6 +77,17 @@ jobs:
           mkdir -p sources
           cp deps/work/ffmpeg-*.tar.xz deps/work/soxr-*-Source.tar.xz sources/
           cp deps/prefix/share/licenses/ffmpeg/BUILD.txt sources/ffmpeg-build-linux-x86_64.txt
+
+      # Built against the unpacked archive only, run without any library path: catches anything not bundled
+      - name: Smoke test the archive
+        run: |
+          mkdir -p smoke
+          tar -xJf dist/ffaudio-*-linux-x86_64.tar.xz -C smoke
+          a="$(echo "$PWD"/smoke/ffaudio-*)"
+          cc -std=c11 -Wall tests/release_smoke.c -o smoke/run \
+            $(PKG_CONFIG_PATH="$a/lib/pkgconfig" pkg-config --cflags --libs ffaudio) -lm -Wl,-rpath,"$a/lib"
+          env -u LD_LIBRARY_PATH SDL_AUDIODRIVER=dummy smoke/run build/fixtures/s44_stereo.flac
+          ldd smoke/run | grep -E 'ffaudio|libav|soxr|bs2b'
 
       - uses: actions/upload-artifact@v4
         with:
@@ -148,6 +159,16 @@ jobs:
           cmake --install build
           scripts/package.sh "ffaudio-${{ needs.check.outputs.version }}-windows-x86_64" deps/prefix stage dist
           cp deps/prefix/share/licenses/ffmpeg/BUILD.txt dist/ffmpeg-build-windows-x86_64.txt
+
+      # Built against the unpacked zip only, run with nothing but its bin/ and Windows itself on the PATH: catches
+      # DLLs that are loaded at run time (like SDL3.dll for sdl2-compat) and were not bundled
+      - name: Smoke test the archive
+        run: |
+          mkdir -p smoke
+          unzip -q dist/ffaudio-*-windows-x86_64.zip -d smoke
+          a="$(echo "$PWD"/smoke/ffaudio-*)"
+          gcc -std=c11 -Wall tests/release_smoke.c -o smoke/run.exe -I"$a/include/ffaudio" -L"$a/lib" -lffaudio
+          SDL_AUDIODRIVER=dummy PATH="$a/bin:/c/Windows/System32:/c/Windows" smoke/run.exe build/fixtures/s44_stereo.flac
 
       - uses: actions/upload-artifact@v4
         with:
