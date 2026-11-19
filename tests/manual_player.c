@@ -21,13 +21,18 @@
  *
  *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels]
  *                 [-d full|norm|"filters"] [-r track|album] [-g] [-G cache-file]
+ *                 [-e preset|g1,...,g10] [-X] [-b default|chu|jan]
  *
  *   -g  use the ReplayGain cache (track mode unless -r is given); files it does not know are measured and
  *       stored, in the background for queued tracks. -G uses another cache file (implies -g)
+ *   -e  equalizer: bass, treble, v-shape, vocal, or 10 gains in dB for 31 Hz..16 kHz (e.g. 4,3,0,0,0,0,0,0,2,3)
+ *   -X  headphone crossfeed;  -b  bs2b with the default, Chu Moy or Jan Meier profile (both need stereo output)
  *
  * Plays the files under <music-dir> (shuffled with -s), queueing the next one from on_prepare_next.
  * Keys (no Enter needed in a terminal): n = next, p = pause/resume, s = stop, m = mute, + / - = volume,
- * > / < = seek +/-10 s, space = show position, h = help, q = quit
+ * > / < = seek +/-10 s, [ / ] = slower / faster, backslash = speed keeps / changes the pitch,
+ * e = next equalizer preset, x = crossfeed on/off, b = next bs2b profile, f = show the filters,
+ * space = show position, h = help, q = quit
  */
 
 #define _XOPEN_SOURCE 700
@@ -47,6 +52,7 @@
 
 #include "../lib/ffaudio.h"
 #include "../lib/ffaudio_loudness.h"
+#include "../lib/ffaudio_filters.h"
 
 static char **files = NULL;
 static size_t file_count = 0, file_cap = 0;
@@ -110,7 +116,7 @@ static void enable_key_mode(void) {
 
 static void print_help(void) {
     printf("keys: n=next  p=pause/resume  s=stop  m=mute  +/-=volume  >/<=seek 10s  [/]=speed  \\=pitch mode\n"
-           "      space=position  h=help  q=quit\n");
+           "      e=equalizer preset  x=crossfeed  b=bs2b profile  f=show filters  space=position  h=help  q=quit\n");
 }
 
 static int collect(const char *path, const struct stat *sb, int type, struct FTW *ftw) {
@@ -240,14 +246,134 @@ static void on_devices_changed(void *ud) {
     }
 }
 
+//+-----------------------------------------------------+
+//| Effects: equalizer, crossfeed, bs2b (global filters) |
+//+-----------------------------------------------------+
+
+typedef struct EqPreset {
+    const char *name;
+    double gain_db[AU_EQ_BANDS]; // 31, 62, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz
+} EqPreset;
+
+static EqPreset eq_presets[] = {
+    { "off",     { 0 } },
+    { "bass",    { 6, 5, 4, 2, 0, 0, 0, 0, 0, 0 } },
+    { "treble",  { 0, 0, 0, 0, 0, 0, 1, 3, 5, 6 } },
+    { "v-shape", { 5, 4, 2, 0, -1, -2, -1, 1, 3, 4 } },
+    { "vocal",   { -2, -2, -1, 0, 2, 3, 3, 2, 0, -1 } },
+    { "custom",  { 0 } },  // from -e g1,g2,...
+};
+#define EQ_PRESETS (int)(sizeof(eq_presets) / sizeof(eq_presets[0]))
+
+static const char *bs2b_names[] = { "default (700 Hz, 4.5 dB)", "Chu Moy (700 Hz, 6 dB)", "Jan Meier (650 Hz, 9.5 dB)" };
+
+// Changed by the key loop, read when the output device changes (control thread)
+static pthread_mutex_t fx_lock = PTHREAD_MUTEX_INITIALIZER;
+static int eq_index = 0;          // into eq_presets
+static bool have_custom_eq = false;
+static bool crossfeed_on = false;
+static int bs2b_mode = -1;        // -1 off, else AU_BS2B_PROFILE
+static char last_filters[4096] = "";
+
+// Rebuild the global filter string from the effect settings and the output channel count
+static void apply_effects(void) {
+    pthread_mutex_lock(&fx_lock);
+    int rate = 0, channels = 0;
+    if (au_get_output_spec(&rate, &channels) != AU_OK || channels <= 0) channels = 2;
+
+    AuFilterBuilder *fb = au_fb_create();
+    if (!fb) { pthread_mutex_unlock(&fx_lock); return; }
+    char desc[256] = "";
+    if (eq_index > 0) {
+        AuEqualizer eq = au_equalizer_defaults();
+        double max_gain = 0;
+        for (int i = 0; i < AU_EQ_BANDS; i++) {
+            eq.gain_db[i] = eq_presets[eq_index].gain_db[i];
+            if (eq.gain_db[i] > max_gain) max_gain = eq.gain_db[i];
+        }
+        eq.preamp_db = -max_gain; // headroom for the boosts
+        if (au_fb_add_equalizer(fb, channels, &eq) != AU_OK)
+            printf("  equalizer: %s\n", au_fb_last_error(fb));
+        snprintf(desc + strlen(desc), sizeof(desc) - strlen(desc), " eq=%s", eq_presets[eq_index].name);
+    }
+    const bool headphone_fx = crossfeed_on || bs2b_mode >= 0;
+    if (headphone_fx && channels != 2) {
+        printf("  crossfeed/bs2b need a stereo output (it has %d channels; try -c 2): not applied\n", channels);
+    }
+    else {
+        if (crossfeed_on) {
+            if (au_fb_add_crossfeed(fb, NULL) != AU_OK) printf("  crossfeed: %s\n", au_fb_last_error(fb));
+            snprintf(desc + strlen(desc), sizeof(desc) - strlen(desc), " crossfeed");
+        }
+        if (bs2b_mode >= 0) {
+            if (au_fb_add_bs2b_profile(fb, (AU_BS2B_PROFILE)bs2b_mode) != AU_OK)
+                printf("  bs2b: %s\n", au_fb_last_error(fb));
+            snprintf(desc + strlen(desc), sizeof(desc) - strlen(desc), " bs2b=%s", bs2b_names[bs2b_mode]);
+        }
+    }
+
+    const char *filters = au_fb_peek(fb);
+    if (au_set_global_filtergraph(filters[0] ? filters : NULL) != AU_OK) {
+        printf("  effects rejected by FFmpeg: \"%s\"\n", filters);
+    }
+    else {
+        snprintf(last_filters, sizeof(last_filters), "%s", filters);
+        printf("  effects:%s\n", desc[0] ? desc : " none");
+    }
+    au_fb_free(fb);
+    pthread_mutex_unlock(&fx_lock);
+}
+
+// The settings and the filter string ffaudio got (for copying into -f or an application)
+static void print_effects(void) {
+    pthread_mutex_lock(&fx_lock);
+    printf("  eq=%s crossfeed=%s bs2b=%s\n  global filters: %s\n", eq_presets[eq_index].name,
+           crossfeed_on ? "on" : "off", bs2b_mode >= 0 ? bs2b_names[bs2b_mode] : "off",
+           last_filters[0] ? last_filters : "(none)");
+    if (filter) printf("  track filters (-f): %s\n", filter);
+    pthread_mutex_unlock(&fx_lock);
+}
+
+// -e: a preset name or 10 comma-separated gains in dB
+static bool parse_eq(const char *arg) {
+    for (int i = 0; i < EQ_PRESETS - 1; i++)
+        if (!strcmp(arg, eq_presets[i].name)) { eq_index = i; return true; }
+    double g[AU_EQ_BANDS];
+    const char *p = arg;
+    for (int i = 0; i < AU_EQ_BANDS; i++) {
+        char *end;
+        g[i] = strtod(p, &end);
+        if (end == p || g[i] < -30 || g[i] > 30) return false;
+        p = end;
+        if (i < AU_EQ_BANDS - 1) {
+            if (*p != ',') return false;
+            p++;
+        }
+    }
+    if (*p) return false;
+    memcpy(eq_presets[EQ_PRESETS - 1].gain_db, g, sizeof(g));
+    have_custom_eq = true;
+    eq_index = EQ_PRESETS - 1;
+    return true;
+}
+
+static bool parse_bs2b(const char *arg) {
+    if (!strcmp(arg, "default")) bs2b_mode = AU_BS2B_DEFAULT;
+    else if (!strcmp(arg, "chu")) bs2b_mode = AU_BS2B_CHU_MOY;
+    else if (!strcmp(arg, "jan")) bs2b_mode = AU_BS2B_JAN_MEIER;
+    else return false;
+    return true;
+}
+
 static void on_device(int32_t channels, int32_t rate, void *ud) {
     (void)ud;
     printf("  output: %d Hz, %d channels\n", rate, channels);
+    apply_effects(); // the equalizer is built for the channel count, and crossfeed/bs2b need stereo
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file]\n", argv[0]);
+        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan]\n", argv[0]);
         return 1;
     }
     double crossfade = 0;
@@ -266,6 +392,16 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-r") && i + 1 < argc) replaygain = argv[++i];
         else if (!strcmp(argv[i], "-g")) use_cache = true;
         else if (!strcmp(argv[i], "-G") && i + 1 < argc) { cache_file = argv[++i]; use_cache = true; }
+        else if (!strcmp(argv[i], "-e") && i + 1 < argc) {
+            if (!parse_eq(argv[++i])) {
+                fprintf(stderr, "-e: bass, treble, v-shape, vocal or 10 gains (-30..30) like 4,3,0,0,0,0,0,0,2,3\n");
+                return 1;
+            }
+        }
+        else if (!strcmp(argv[i], "-X")) crossfeed_on = true;
+        else if (!strcmp(argv[i], "-b") && i + 1 < argc) {
+            if (!parse_bs2b(argv[++i])) { fprintf(stderr, "-b: default, chu or jan\n"); return 1; }
+        }
     }
     if (use_cache && !replaygain) replaygain = "track"; // the cache only matters with ReplayGain on
 
@@ -427,6 +563,28 @@ int main(int argc, char **argv) {
                 keep_pitch = !keep_pitch;
                 au_set_playback_speed(au_get_playback_speed(), keep_pitch);
                 printf("  %s\n", keep_pitch ? "speed keeps the pitch" : "speed changes the pitch (tape)");
+                break;
+            case 'e':
+                pthread_mutex_lock(&fx_lock);
+                eq_index = (eq_index + 1) % EQ_PRESETS;
+                if (eq_index == EQ_PRESETS - 1 && !have_custom_eq) eq_index = 0; // no -e gains given
+                pthread_mutex_unlock(&fx_lock);
+                apply_effects();
+                break;
+            case 'x':
+                pthread_mutex_lock(&fx_lock);
+                crossfeed_on = !crossfeed_on;
+                pthread_mutex_unlock(&fx_lock);
+                apply_effects();
+                break;
+            case 'b':
+                pthread_mutex_lock(&fx_lock);
+                bs2b_mode = bs2b_mode >= AU_BS2B_JAN_MEIER ? -1 : bs2b_mode + 1;
+                pthread_mutex_unlock(&fx_lock);
+                apply_effects();
+                break;
+            case 'f':
+                print_effects();
                 break;
             case 'h':
             case '?':

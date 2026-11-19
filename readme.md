@@ -346,7 +346,7 @@ au_shutdown();   // not from inside a callback; au_initialize() may be called ag
   fades, volume ramps and live filter changes
 
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
-`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file]`
+`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan]`
 plays a folder on real hardware for listening tests.
 
 ## Roadmap
