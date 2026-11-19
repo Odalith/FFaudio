@@ -176,6 +176,10 @@ if(FFAUDIO_BUILD_TESTS)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})
+            if(t STREQUAL "test_metadata")
+                # Watches FFmpeg's own log messages (av_log_set_callback)
+                target_link_libraries(${t} PRIVATE PkgConfig::FFMPEG)
+            endif()
             set_tests_properties(${t} PROPERTIES
                     TIMEOUT 180
                     ENVIRONMENT "SDL_AUDIODRIVER=dummy;XDG_DATA_HOME=${CMAKE_BINARY_DIR}/xdg-data;ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")

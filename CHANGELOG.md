@@ -24,6 +24,11 @@ incompatible ways; see "API changes".
 - Position reporting used a hardware buffer size of 0; global per-file state (byte seeking, infinite buffering,
   loop counts, resampler settings) leaked from one track into the next.
 - The library installed SDL signal handlers, taking over the host's Ctrl-C / SIGTERM.
+- Files that are not audio (e.g. encrypted cache files that FFmpeg mistakes for a raw VVC or JPEG stream) made
+  FFmpeg's video decoders print errors while probing. Files whose container has no audio stream now fail before
+  any decoder is opened, in playback, `au_probe()` and loudness analysis.
+- The measurement queue re-read files that can not be measured on every request; they are now remembered
+  (until they change or `au_gain_scan_stop()`), and the player no longer waits for them to be measured.
 
 ### Added
 - Sample-accurate gapless handover inside the audio callback, with resampler and filter tails flushed at EOF.

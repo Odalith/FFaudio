@@ -137,6 +137,9 @@ extern "C" {
     DLL_EXPORT int au_gain_scan_configure(const AuGainScanConfig *config);
 
     // Measure these files (track values). Returns the number of paths queued (skipped ones not counted).
+    // Skipped: paths already cached, already queued, and files that could not be measured before (not audio,
+    // unreadable) and have not changed since (same size and modification time). Those failures are remembered
+    // until au_gain_scan_stop(), so a playlist can be requested again and again without re-reading bad files.
     DLL_EXPORT int au_gain_cache_request(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
 
     // Measure these files as one album: each gets its track values and the album values. Skipped only when

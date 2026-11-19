@@ -19,6 +19,7 @@
 #include <math.h>
 #include <ctype.h>
 #include "metadata.h"
+#include "probe.h"
 
 // R128 gains are relative to -23 LUFS, ReplayGain 2.0 to -18 LUFS
 #define R128_TO_REPLAYGAIN_DB 5.0
@@ -208,6 +209,7 @@ AuMediaInfo *au_probe(const char *filename, int *out_error) {
         return NULL;
     }
     if ((ret = avformat_open_input(&ic, filename, NULL, NULL)) < 0) goto end;
+    if (ff_input_lacks_audio(ic)) { ret = AVERROR_STREAM_NOT_FOUND; goto end; }
     if ((ret = avformat_find_stream_info(ic, NULL)) < 0) goto end;
 
     const int st = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);

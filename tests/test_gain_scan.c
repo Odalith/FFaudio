@@ -152,6 +152,45 @@ static void test_errors(void) {
     CHECK(done_count() == 2);
     CHECK(done_result[0] == AU_ERR_FILE && done_result[1] == AU_ERR_FILE);
     CHECK(!au_gain_cache_get(bad[0], NULL) && !au_gain_cache_get(bad[1], NULL));
+
+    // They are remembered: asking again queues nothing (playlists used to re-read them on every track change)
+    reset_done();
+    CHECK(au_gain_cache_request(bad, 2, AU_SCAN_PREFETCH) == 0);
+    CHECK(wait_idle(1000));
+    CHECK(done_count() == 0);
+}
+
+static void write_text(const char *path, const char *text) {
+    FILE *f = fopen(path, "wb");
+    REQUIRE(f);
+    fputs(text, f);
+    fclose(f);
+}
+
+static void test_changed_failure_is_measured_again(void) {
+    char path[1100];
+    snprintf(path, sizeof(path), "%s/scan_changing.bin", tc_fixture_dir);
+    write_text(path, "not audio yet");
+    const char *p[1] = { path };
+
+    reset_done();
+    CHECK(au_gain_cache_request(p, 1, AU_SCAN_URGENT) == 1);
+    CHECK(wait_idle(5000));
+    CHECK(done_count() == 1 && done_result[0] == AU_ERR_FILE);
+    CHECK(au_gain_cache_request(p, 1, AU_SCAN_URGENT) == 0); // unchanged: skipped
+
+    // The file changes (here: its size), so it is tried again
+    write_text(path, "still not audio, but longer now");
+    reset_done();
+    CHECK(au_gain_cache_request(p, 1, AU_SCAN_URGENT) == 1);
+    CHECK(wait_idle(5000));
+    CHECK(done_count() == 1 && done_result[0] == AU_ERR_FILE);
+
+    // au_gain_scan_stop() forgets the failures
+    au_gain_scan_stop();
+    CHECK(au_gain_cache_request(p, 1, AU_SCAN_URGENT) == 1);
+    CHECK(wait_idle(5000));
+    remove(path);
 }
 
 static void test_configure_and_stop(void) {
@@ -267,6 +306,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_cancel);
     RUN_TEST(test_album);
     RUN_TEST(test_errors);
+    RUN_TEST(test_changed_failure_is_measured_again);
     RUN_TEST(test_configure_and_stop);
     RUN_TEST(test_player_measures_missing);
 

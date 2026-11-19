@@ -3,7 +3,9 @@
  * and au_get_track_info() for a playing track.
  */
 #include "test_common.h"
+#include "../lib/ffaudio_loudness.h"
 #include <math.h>
+#include <libavutil/log.h>
 
 #define CHECK_TAG(info, key, expected) do { \
     const char *v_ = au_media_tag((info), (key)); \
@@ -138,6 +140,45 @@ static void test_track_info_while_playing(void) {
     au_shutdown();
 }
 
+/* ---------- non-audio data must fail without running video decoders ---------- */
+
+// Messages of FFmpeg decoders (warning and worse), from any thread
+static SDL_atomic_t decoder_messages;
+
+static void watch_ffmpeg_log(void *ptr, int level, const char *fmt, va_list vl) {
+    if (ptr && level <= AV_LOG_WARNING) {
+        const AVClass *avc = *(const AVClass **)ptr;
+        const AVClassCategory cat = avc && avc->get_category ? avc->get_category(ptr) : avc ? avc->category : 0;
+        if (cat == AV_CLASS_CATEGORY_DECODER) SDL_AtomicIncRef(&decoder_messages);
+    }
+    av_log_default_callback(ptr, level, fmt, vl);
+}
+
+static void test_non_audio_opens_no_decoder(void) {
+    // not_audio.bin is damaged JPEG data, detected as a raw video stream like encrypted cache files often are.
+    // Probing it used to open the video decoder, which printed warnings ("[vvc] SPS id 9 not available", ...).
+    SDL_AtomicSet(&decoder_messages, 0);
+    av_log_set_callback(watch_ffmpeg_log);
+    av_log_set_level(AV_LOG_WARNING);
+
+    int err = 0;
+    CHECK(au_probe(fx("not_audio.bin"), &err) == NULL && err == AU_ERR_FILE);
+    AuLoudness l;
+    CHECK(au_loudness_analyze(fx("not_audio.bin"), NULL, &l) == AU_ERR_FILE);
+
+    REQUIRE(tc_init_player(0) == 0);
+    av_log_set_level(AV_LOG_WARNING); // au_initialize() sets AV_LOG_ERROR
+    au_play_audio(fx("not_audio.bin"), NULL);
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    CHECK(tc_snapshot().eof_error == 1);
+    au_shutdown();
+
+    printf("   decoder messages: %d\n", SDL_AtomicGet(&decoder_messages));
+    CHECK(SDL_AtomicGet(&decoder_messages) == 0);
+    av_log_set_callback(av_log_default_callback);
+    av_log_set_level(AV_LOG_ERROR);
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
     RUN_TEST(test_probe_flac);
@@ -145,5 +186,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_probe_r128);
     RUN_TEST(test_probe_untagged_and_bad);
     RUN_TEST(test_track_info_while_playing);
+    RUN_TEST(test_non_audio_opens_no_decoder);
     return tc_finish("test_metadata");
 }
