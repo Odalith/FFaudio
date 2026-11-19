@@ -340,7 +340,9 @@ static int stream_component_open(TrackState *t, const int stream_index) {
     }
     avctx->codec_id = codec->id;
 
-    av_dict_set(&opts, "threads", "auto", 0);
+    // One thread: audio decodes hundreds of times faster than real time, and "auto" gave e.g. the FLAC decoder a
+    // frame thread per core (13 threads per track on 12 cores) for nothing
+    av_dict_set(&opts, "threads", "1", 0);
     av_dict_set(&opts, "flags", "+copy_opaque", AV_DICT_MULTIKEY);
 
     if ((ret = avcodec_open2(avctx, codec, &opts)) < 0)

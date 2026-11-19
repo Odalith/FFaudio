@@ -1023,6 +1023,9 @@ int au_initialize(const InitializeConfig* config) {
     }
 
     ap->use_soxr = filtergraph_soxr_available();
+    // Filter graphs run audio in small chunks; FFmpeg's default (a thread pool per graph, one thread per core) gave
+    // every track up to 3 x 12 idle threads
+    ap->filter_nbthreads = 1;
     avformat_network_init();
 
     SDL_mutex *lock = lifecycle_mutex();

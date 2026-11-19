@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.1 (unreleased)
+
+### Changed
+- Far fewer threads: every track ran its decoder with a frame thread per CPU core and three filter graphs with a
+  thread pool each (up to ~37 threads per track, 48-96 for the player on 12 cores). Playback now decodes and
+  filters on the track's own threads; loudness analysis uses at most 4 decoder threads (as fast as one per core
+  for hi-res FLAC). Found with the new soak test (`tests/soak.c`).
+
 ## 2.0.0 (2026-11-19)
 
 The first release since 1.0.4: a rework of the playback core for stability, gapless playback and crossfading.
