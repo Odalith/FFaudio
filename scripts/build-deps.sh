@@ -21,6 +21,10 @@ FFMPEG_VERSION=9.0.2
 FFMPEG_SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
 SOXR_VERSION=0.1.3
 SOXR_SHA256=b111c15fdc8c029989330ff559184198c161100a59312f5dc19ddeb9b5a15889
+# bs2b comes from the system (MIT license); its upstream source only provides the license text, because
+# systems do not always install it (MSYS2's static libbs2b has none)
+BS2B_VERSION=3.1.0
+BS2B_SHA256=6aaafd81aae3898ee40148dd1349aab348db9bfae9767d0e66e0b07ddd4b2528
 
 prefix="${1:?usage: build-deps.sh <install-prefix> [work-dir]}"
 work="${2:-$PWD/deps-build}"
@@ -111,7 +115,22 @@ done
 
 # configure looks for soxr with the compiler (not pkg-config), hence the -I/-L for the prefix below
 optional=(--enable-libsoxr)
-pkg-config --exists libbs2b && optional+=(--enable-libbs2b) || echo "note: libbs2b not found, building without it"
+if pkg-config --exists libbs2b; then
+    optional+=(--enable-libbs2b)
+    (
+        cd "$work"
+        bs2b_tarball="libbs2b-$BS2B_VERSION.tar.gz"
+        fetch "$bs2b_tarball" "$BS2B_SHA256" "https://downloads.sourceforge.net/project/bs2b/libbs2b/$BS2B_VERSION/$bs2b_tarball"
+        mkdir -p "$prefix/share/licenses/bs2b"
+        for f in COPYING AUTHORS; do
+            tar -xzOf "$bs2b_tarball" "libbs2b-$BS2B_VERSION/$f" > "$prefix/share/licenses/bs2b/$f"
+        done
+        echo "bs2b $(pkg-config --modversion libbs2b) from the system (MIT); license from $bs2b_tarball" \
+            > "$prefix/share/licenses/bs2b/BUILD.txt"
+    )
+else
+    echo "note: libbs2b not found, building without it"
+fi
 
 case "$(uname -s)" in
     MINGW*|MSYS*) platform=(--enable-w32threads) ;;

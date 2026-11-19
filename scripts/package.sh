@@ -147,8 +147,9 @@ else
     # Libraries FFmpeg linked statically (MSYS2 has only a static libbs2b): their code is in the DLLs, so their
     # licenses come along
     if grep -q -- '--enable-libbs2b' "$root/share/licenses/ffmpeg/BUILD.txt" && [ ! -e "$root/bin/libbs2b-0.dll" ]; then
-        msys_license "$(pkg-config --variable=pcfiledir libbs2b)/libbs2b.pc"
-        bundled+=("bs2b (linked into avfilter)")
+        # build-deps.sh installs bs2b's license (MSYS2's package has none)
+        [ -f "$root/share/licenses/bs2b/COPYING" ] || { echo "error: bs2b is linked in but its license is missing" >&2; exit 1; }
+        bundled+=("bs2b (linked into avfilter-*.dll) - MIT, see share/licenses/bs2b")
     fi
     # Import libraries are not needed to run, but let applications link against the bundled DLLs
     rm -f "$root"/lib/*.def 2>/dev/null || true
