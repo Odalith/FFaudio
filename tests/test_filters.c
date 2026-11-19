@@ -71,9 +71,19 @@ static void test_headphones(void) {
     bad.slope = 0;
     CHECK(au_fb_add_crossfeed(fb, &bad) == AU_ERR_INVALID_ARGUMENT);
 
+    CHECK(au_fb_add_bs2b(fb, 100, 45) == AU_ERR_INVALID_ARGUMENT); // range checks come first
+    if (!au_filter_available("bs2b")) {
+        // FFmpeg built without libbs2b (e.g. MSYS2's): the helpers say so and add nothing
+        printf("   (no bs2b in this FFmpeg build)\n");
+        CHECK(au_fb_add_bs2b_profile(fb, AU_BS2B_JAN_MEIER) == AU_ERR_UNSUPPORTED);
+        CHECK(au_fb_add_bs2b(fb, 700, 45) == AU_ERR_UNSUPPORTED);
+        CHECK(strstr(au_fb_last_error(fb), "bs2b") != NULL);
+        CHECK_STR(au_fb_peek(fb), "crossfeed=strength=0.2:range=0.5:slope=0.5:level_in=0.9:level_out=1");
+        au_fb_free(fb);
+        return;
+    }
     CHECK(au_fb_add_bs2b_profile(fb, AU_BS2B_JAN_MEIER) == AU_OK);
     CHECK(au_fb_add_bs2b(fb, 700, 45) == AU_OK);
-    CHECK(au_fb_add_bs2b(fb, 100, 45) == AU_ERR_INVALID_ARGUMENT);
     CHECK_STR(au_fb_peek(fb), "crossfeed=strength=0.2:range=0.5:slope=0.5:level_in=0.9:level_out=1,"
                               "bs2b=profile=jmeier,bs2b=fcut=700:feed=45");
     CHECK(au_validate_filtergraph(au_fb_peek(fb)) == AU_OK);

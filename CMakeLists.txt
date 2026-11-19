@@ -10,6 +10,7 @@ option(BUILD_SHARED_LIBS "Build ffaudio as a shared library" ON)
 option(FFAUDIO_BUILD_TESTS "Build the headless test suite" ON)
 option(FFAUDIO_BUILD_MANUAL_PLAYER "Build the interactive manual test player (POSIX only)" ON)
 option(FFAUDIO_INSTALL "Generate install rules" ON)
+option(FFAUDIO_RELOCATABLE "Linux/macOS: look for dependencies next to libffaudio first (RUNPATH $ORIGIN), for archives that bundle them" OFF)
 set(FFAUDIO_SANITIZER "" CACHE STRING "Sanitizer to build with: address, thread, undefined, none or empty")
 
 # Debug builds default to AddressSanitizer
@@ -102,6 +103,14 @@ endif()
 target_compile_options(ffaudio PRIVATE ${FFAUDIO_WARNINGS} ${SAN_FLAGS})
 target_link_options(ffaudio PRIVATE ${SAN_FLAGS})
 
+if(FFAUDIO_RELOCATABLE AND NOT WIN32)
+    if(APPLE)
+        set_target_properties(ffaudio PROPERTIES INSTALL_RPATH "@loader_path")
+    else()
+        set_target_properties(ffaudio PROPERTIES INSTALL_RPATH "$ORIGIN")
+    endif()
+endif()
+
 set_target_properties(ffaudio PROPERTIES
         C_VISIBILITY_PRESET hidden
         VERSION ${PROJECT_VERSION}
@@ -113,10 +122,13 @@ set_target_properties(ffaudio PROPERTIES
 #+-----------------------------------------------------+
 
 if(FFAUDIO_INSTALL)
+    # A shared libffaudio brings its dependencies along; only static linking needs them listed
     if(BUILD_SHARED_LIBS)
         set(FFAUDIO_PC_CFLAGS "")
+        set(FFAUDIO_PC_REQUIRES_PRIVATE "")
     else()
         set(FFAUDIO_PC_CFLAGS "-DFFAUDIO_STATIC")
+        set(FFAUDIO_PC_REQUIRES_PRIVATE "Requires.private: sdl2 libavformat libavcodec libavfilter libswresample libavutil")
     endif()
     configure_file(ffaudio.pc.in ${CMAKE_CURRENT_BINARY_DIR}/ffaudio.pc @ONLY)
 
@@ -128,6 +140,15 @@ if(FFAUDIO_INSTALL)
             PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ffaudio)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ffaudio.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
     install(EXPORT ffaudioTargets NAMESPACE ffaudio:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ffaudio)
+
+    # find_package(ffaudio) -> ffaudio::ffaudio
+    include(CMakePackageConfigHelpers)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfig.cmake
+         "include(\"\${CMAKE_CURRENT_LIST_DIR}/ffaudioTargets.cmake\")\n")
+    write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfigVersion.cmake
+                                     COMPATIBILITY SameMinorVersion)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfigVersion.cmake
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ffaudio)
 endif()
 
 #+-----------------------------------------------------+
@@ -142,6 +163,8 @@ function(ffaudio_test_exe name src)
         target_link_libraries(${name} PRIVATE m)
     endif()
     target_compile_options(${name} PRIVATE ${SAN_FLAGS})
+    # Plain main(): on Windows SDL.h would otherwise rename it and expect SDL2main to provide WinMain
+    target_compile_definitions(${name} PRIVATE SDL_MAIN_HANDLED)
     target_link_options(${name} PRIVATE ${SAN_FLAGS})
     set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 endfunction()
@@ -172,6 +195,12 @@ if(FFAUDIO_BUILD_TESTS)
                 COMMENT "Generating audio fixtures")
         add_custom_target(ffaudio_fixtures ALL DEPENDS ${FIXTURE_DIR}/.stamp)
 
+        # The ReplayGain cache's default location, inside the build tree: XDG_DATA_HOME on Linux, LOCALAPPDATA on
+        # Windows (the tests never touch the user's real one)
+        set(FFAUDIO_TEST_DATA_ENV "XDG_DATA_HOME=${CMAKE_BINARY_DIR}/xdg-data")
+        if(WIN32)
+            string(APPEND FFAUDIO_TEST_DATA_ENV ";LOCALAPPDATA=${CMAKE_BINARY_DIR}/localappdata")
+        endif()
         foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
@@ -182,7 +211,7 @@ if(FFAUDIO_BUILD_TESTS)
             endif()
             set_tests_properties(${t} PROPERTIES
                     TIMEOUT 180
-                    ENVIRONMENT "SDL_AUDIODRIVER=dummy;XDG_DATA_HOME=${CMAKE_BINARY_DIR}/xdg-data;ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
+                    ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
     endif()
 endif()

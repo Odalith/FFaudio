@@ -21,6 +21,7 @@ static void start_capture(const char *name) {
     remove(out_path);
 #ifdef _WIN32
     char env[1100];
+    _putenv("SDL_AUDIODRIVER=disk");
     snprintf(env, sizeof(env), "SDL_DISKAUDIOFILE=%s", out_path);
     _putenv(env);
     snprintf(env, sizeof(env), "SDL_AUDIO_DISK_OUTPUT_FILE=%s", out_path);
