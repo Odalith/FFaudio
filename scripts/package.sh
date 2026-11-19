@@ -3,7 +3,7 @@
 # third-party libraries they need that a plain system does not have, and every license.
 #
 # Usage: scripts/package.sh <archive-name> <deps-prefix> <ffaudio-install-dir> <out-dir>
-#   e.g. scripts/package.sh ffaudio-0.2.0-linux-x86_64 deps/prefix stage dist
+#   e.g. scripts/package.sh ffaudio-2.0.0-linux-x86_64 deps/prefix stage dist
 #
 # Linux: libraries go to lib/; ffaudio, FFmpeg and soxr are linked with RUNPATH $ORIGIN (FFAUDIO_RELOCATABLE,
 #        build-deps.sh), copied system libraries get it with patchelf when they need other bundled libraries.

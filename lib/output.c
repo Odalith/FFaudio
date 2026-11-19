@@ -206,10 +206,9 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 //| Mixing                                              |
 //+-----------------------------------------------------+
 
-// The track's ReplayGain gain: jumps to the target before the first sample, ramps on later changes
 #define LATE_GAIN_RAMP_SECONDS 2.0
 
-// The track's ReplayGain gain: set before the first sample, then a linear ramp for every change (10 ms, or
+// The track's ReplayGain gain: taken as it is with the first samples, then a linear ramp for every change (10 ms, or
 // 2 s when the value arrived after the track started, e.g. a measurement that missed measure_wait_ms)
 static float track_gain_step(Mixer *m, TrackState *t, float *target_out) {
     const float target = powf(10.0f, (float)SDL_AtomicGet(&t->gain_mb) / 2000.0f);
@@ -231,6 +230,9 @@ static float track_gain_step(Mixer *m, TrackState *t, float *target_out) {
 
 static void add_voice(Mixer *m, TrackState *t, float *dst, const float *src, const int frames, const int channels,
                       const FadeState *fade, const bool fading_out) {
+    // A track that has produced nothing yet (its file may not even be open) must not fix its starting gain:
+    // that is read with its first samples, when the read thread has set it
+    if (frames <= 0) return;
     const bool constant = !fade->active;
     float target;
     const float step = track_gain_step(m, t, &target);
@@ -247,7 +249,7 @@ static void add_voice(Mixer *m, TrackState *t, float *dst, const float *src, con
         for (int c = 0; c < channels; c++)
             d[c] += s[c] * g;
     }
-    if (frames > 0) t->gain_cur = gain;
+    t->gain_cur = gain;
 }
 
 static void render_outgoing(AudioPlayer *ap, const int frames) {
