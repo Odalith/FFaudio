@@ -41,10 +41,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # As in ci.yml: the Ubuntu mirror can take 10+ minutes for these packages, so the .deb files are cached.
+      # A first run starts from CI's cache, which already has the big ones (ffmpeg, SDL2).
+      - name: Cache key
+        id: apt-key
+        run: echo "month=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-cache
+          key: apt-release-ubuntu-24.04-${{ steps.apt-key.outputs.month }}-${{ hashFiles('.github/workflows/release.yml') }}
+          restore-keys: |
+            apt-release-ubuntu-24.04-${{ steps.apt-key.outputs.month }}-
+            apt-release-ubuntu-24.04-
+            apt-ubuntu-24.04-${{ steps.apt-key.outputs.month }}-
+            apt-ubuntu-24.04-
+
       - name: Install build tools
         run: |
+          mkdir -p ~/apt-cache/partial
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ninja-build nasm patchelf libsdl2-dev libbs2b-dev ffmpeg
+          sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-cache" \
+            ninja-build nasm patchelf libsdl2-dev libbs2b-dev ffmpeg
+          # apt leaves root-owned files behind; the cache action needs to read them
+          sudo rm -f ~/apt-cache/lock
+          sudo chown -R "$USER" ~/apt-cache
 
       # FFmpeg and soxr only change with scripts/build-deps.sh
       - name: Cache dependency builds
