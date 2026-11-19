@@ -22,11 +22,14 @@
  * Workers start on demand and keep running until au_gain_scan_stop().
  */
 
+#include <sys/stat.h>
+
 #include "gain_cache.h"
 #include "once.h"
 #include "ffaudio_loudness.h"
 
 #define MAX_WORKERS 16
+#define MAX_FAILED 1024          // files remembered as not measurable (the oldest are forgotten first)
 
 typedef struct Job {
     char **paths;
@@ -52,6 +55,15 @@ static AuGainScanConfig config;
 static int pending = 0;          // paths queued or being measured
 static bool stopping = false;
 
+// Files that could not be measured (not media, no audio stream, unreadable), with their size and modification
+// time: requests skip them until the file changes, instead of reading and failing again on every request.
+typedef struct Failed {
+    char *path;
+    int64_t size, mtime;         // -1 when stat() failed (e.g. a missing file)
+} Failed;
+static Failed failed[MAX_FAILED];
+static int n_failed = 0, failed_oldest = 0;
+
 static int default_threads(void) {
     return SDL_GetCPUCount() > 1 ? 2 : 1;
 }
@@ -66,6 +78,75 @@ static void init(void) {
 static bool ready(void) {
     ff_once(&init_once, init);
     return lock && wake;
+}
+
+//+-----------------------------------------------------+
+//| Files that could not be measured (lock held)        |
+//+-----------------------------------------------------+
+
+static void file_stamp(const char *path, int64_t *size, int64_t *mtime) {
+    struct stat st;
+    if (stat(path, &st) == 0) {
+        *size = (int64_t)st.st_size;
+        *mtime = (int64_t)st.st_mtime;
+    }
+    else {
+        *size = *mtime = -1;
+    }
+}
+
+static int find_failed(const char *path) {
+    for (int i = 0; i < n_failed; i++)
+        if (!strcmp(failed[i].path, path)) return i;
+    return -1;
+}
+
+static void forget_failed_at(const int i) {
+    av_free(failed[i].path);
+    failed[i] = failed[--n_failed];
+    if (failed_oldest >= n_failed) failed_oldest = 0;
+}
+
+// true when `path` failed before and has not changed since (a changed file is forgotten and measured again)
+static bool known_failure(const char *path) {
+    const int i = find_failed(path);
+    if (i < 0) return false;
+    int64_t size, mtime;
+    file_stamp(path, &size, &mtime);
+    if (size == failed[i].size && mtime == failed[i].mtime) return true;
+    forget_failed_at(i);
+    return false;
+}
+
+static void remember_failure(const char *path) {
+    int i = find_failed(path);
+    if (i < 0) {
+        char *copy = av_strdup(path);
+        if (!copy) return;
+        if (n_failed < MAX_FAILED) {
+            i = n_failed++;
+        }
+        else {
+            i = failed_oldest;
+            failed_oldest = (failed_oldest + 1) % MAX_FAILED;
+            av_free(failed[i].path);
+        }
+        failed[i].path = copy;
+    }
+    file_stamp(path, &failed[i].size, &failed[i].mtime);
+}
+
+static void forget_all_failures(void) {
+    for (int i = 0; i < n_failed; i++) av_free(failed[i].path);
+    n_failed = failed_oldest = 0;
+}
+
+// For workers (lock not held)
+static void note_result(const char *path, const int result) {
+    if (result != AU_ERR_FILE) return; // not cancellations or memory errors: those say nothing about the file
+    SDL_LockMutex(lock);
+    remember_failure(path);
+    SDL_UnlockMutex(lock);
 }
 
 //+-----------------------------------------------------+
@@ -179,6 +260,7 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
                 notify(cfg, path, AU_OK, &rg);
             }
             else {
+                note_result(path, ret);
                 notify(cfg, path, ret, NULL);
                 if (ret == AU_ERR_CANCELLED) return;
             }
@@ -205,6 +287,7 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
     const bool have_album = au_loudness_album(scanner, &album) == AU_OK;
     for (int i = 0; i < job->n; i++) {
         if (results[i] != AU_OK) {
+            note_result(job->paths[i], results[i]);
             notify(cfg, job->paths[i], results[i], NULL);
             continue;
         }
@@ -285,7 +368,7 @@ static int request(const char *const *paths, const int count, const bool urgent,
         const char *path = paths[i];
         if (!path || !path[0] || job_has(job, path)) continue;
         if (!album) {
-            if (au_gain_cache_get(path, NULL) || being_measured(path)) continue;
+            if (au_gain_cache_get(path, NULL) || being_measured(path) || known_failure(path)) continue;
             Job *prev = NULL;
             Job *queued = find_queued(path, &prev);
             if (queued) {
@@ -315,9 +398,15 @@ static int request(const char *const *paths, const int count, const bool urgent,
     return queued_paths;
 }
 
-void gain_scan_request_for_player(const char *path) {
+bool gain_scan_request_for_player(const char *path) {
+    if (!path || !ready()) return false;
+    SDL_LockMutex(lock);
+    const bool bad = known_failure(path);
+    SDL_UnlockMutex(lock);
+    if (bad) return false;
     const char *paths[1] = { path };
     request(paths, 1, true, false, true);
+    return true;
 }
 
 int au_gain_cache_request(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
@@ -405,5 +494,6 @@ void au_gain_scan_stop(void) {
 
     SDL_LockMutex(lock);
     stopping = false;
+    forget_all_failures();
     SDL_UnlockMutex(lock);
 }

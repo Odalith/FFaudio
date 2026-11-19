@@ -31,7 +31,8 @@ bool gain_cache_wait(const char *path, int timeout_ms, SDL_atomic_t *abort);
 void ff_gain_cache_changed(const char *path);
 
 // Implemented by the scan queue: measure `path` as soon as possible for a track that is starting
-// (not affected by au_gain_cache_cancel_requests())
-void gain_scan_request_for_player(const char *path);
+// (not affected by au_gain_cache_cancel_requests()). false when the file could not be measured before and has
+// not changed since: nothing is queued, so there is nothing to wait for.
+bool gain_scan_request_for_player(const char *path);
 
 #endif //FFAUDIO_GAIN_CACHE_H

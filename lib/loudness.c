@@ -36,6 +36,7 @@
 #include "libswresample/swresample.h"
 
 #include "ffaudio_loudness.h"
+#include "probe.h"
 
 #define ABSOLUTE_GATE_LUFS (-70.0)
 #define RELATIVE_GATE_LU (-10.0)
@@ -387,6 +388,7 @@ static int measure_file(const AuLoudnessConfig *cfg, const char *filename, Meter
 
     memset(m, 0, sizeof(*m));
     if (avformat_open_input(&ic, filename, NULL, NULL) < 0) goto end;
+    if (ff_input_lacks_audio(ic)) goto end;
     if (avformat_find_stream_info(ic, NULL) < 0) goto end;
     const int st_index = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (st_index < 0) goto end;

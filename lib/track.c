@@ -26,6 +26,7 @@
 
 #include "track.h"
 #include "metadata.h"
+#include "probe.h"
 #include "gain_cache.h"
 #include <math.h>
 #include "decoder_utils.h"
@@ -260,7 +261,7 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
     if (tags.has_track_gain || tags.has_album_gain) return;
     if (gain_cache_lookup(t->filename, NULL)) return;
 
-    gain_scan_request_for_player(t->filename);
+    if (!gain_scan_request_for_player(t->filename)) return; // could not be measured before
     const int wait_ms = cfg.measure_wait_ms == 0 ? DEFAULT_MEASURE_WAIT_MS : cfg.measure_wait_ms;
     if (wait_ms > 0 && !gain_cache_wait(t->filename, wait_ms, &t->abort_request) &&
         !SDL_AtomicGet(&t->abort_request))
@@ -450,6 +451,12 @@ static int read_thread(void *arg) {
     }
     av_dict_set(&t->format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
     t->ic = ic;
+
+    if (ff_input_lacks_audio(ic)) {
+        if (!SDL_AtomicGet(&t->abort_request))
+            ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
+        goto fail;
+    }
 
     if (ap->find_stream_info) {
         ret = avformat_find_stream_info(ic, NULL);
