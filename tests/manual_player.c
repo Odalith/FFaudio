@@ -21,17 +21,21 @@
  *
  *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels]
  *                 [-d full|norm|"filters"] [-r track|album] [-g] [-G cache-file]
- *                 [-e preset|g1,...,g10] [-X] [-b default|chu|jan]
+ *                 [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]
  *
  *   -g  use the ReplayGain cache (track mode unless -r is given); files it does not know are measured and
  *       stored, in the background for queued tracks. -G uses another cache file (implies -g)
  *   -e  equalizer: bass, treble, v-shape, vocal, or 10 gains in dB for 31 Hz..16 kHz (e.g. 4,3,0,0,0,0,0,0,2,3)
  *   -X  headphone crossfeed;  -b  bs2b with the default, Chu Moy or Jan Meier profile (both need stereo output)
+ *   -P  parametric EQ from an EqualizerAPO / AutoEq ParametricEQ.txt file (headphone correction)
+ *   -L  limiter at -1 dBFS;  -C  compressor: gentle (levelling) or night (low-volume listening)
  *
  * Plays the files under <music-dir> (shuffled with -s), queueing the next one from on_prepare_next.
  * Keys (no Enter needed in a terminal): n = next, p = pause/resume, s = stop, m = mute, + / - = volume,
  * > / < = seek +/-10 s, [ / ] = slower / faster, backslash = speed keeps / changes the pitch,
- * e = next equalizer preset, x = crossfeed on/off, b = next bs2b profile, f = show the filters,
+ * e = next equalizer preset, a = parametric EQ (-P) on/off, 1 / 2 = bass -/+, 3 / 4 = treble -/+,
+ * l / r = balance left / right, w = width, o = mono, c = swap channels, x = crossfeed on/off,
+ * b = next bs2b profile, C = compressor off/gentle/night, L = limiter on/off, f = show the filters,
  * space = show position, h = help, q = quit
  */
 
@@ -49,6 +53,7 @@
 #include <pthread.h>
 #include <termios.h>
 #include <sys/stat.h>
+#include <math.h>
 
 #include "../lib/ffaudio.h"
 #include "../lib/ffaudio_loudness.h"
@@ -116,7 +121,9 @@ static void enable_key_mode(void) {
 
 static void print_help(void) {
     printf("keys: n=next  p=pause/resume  s=stop  m=mute  +/-=volume  >/<=seek 10s  [/]=speed  \\=pitch mode\n"
-           "      e=equalizer preset  x=crossfeed  b=bs2b profile  f=show filters  space=position  h=help  q=quit\n");
+           "      e=equalizer preset  a=parametric EQ  1/2=bass -/+  3/4=treble -/+  l/r=balance  w=width  o=mono\n"
+           "      c=swap channels  x=crossfeed  b=bs2b profile  C=compressor  L=limiter  f=show filters\n"
+           "      space=position  h=help  q=quit\n");
 }
 
 static int collect(const char *path, const struct stat *sb, int type, struct FTW *ftw) {
@@ -273,17 +280,33 @@ static int eq_index = 0;          // into eq_presets
 static bool have_custom_eq = false;
 static bool crossfeed_on = false;
 static int bs2b_mode = -1;        // -1 off, else AU_BS2B_PROFILE
-static char last_filters[4096] = "";
+static AuParametricEq peq;        // -P file
+static bool have_peq = false, peq_on = false;
+static double bass_db = 0, treble_db = 0;
+static double balance = 0, width = 1;
+static bool mono = false, swap_lr = false;
+static bool limiter_on = false;
+static int compressor_mode = 0;   // 0 off, 1 gentle, 2 night
+static const char *compressor_names[] = { "off", "gentle", "night" };
+static char last_filters[8192] = "";
 
-// Rebuild the global filter string from the effect settings and the output channel count
+#define ADD_DESC(...) snprintf(desc + strlen(desc), sizeof(desc) - strlen(desc), __VA_ARGS__)
+
+// Rebuild the global filter string from the effect settings and the output channel count.
+// Order: parametric EQ, graphic EQ, tone, stereo image, crossfeed/bs2b, compressor, limiter (last: the safety net).
 static void apply_effects(void) {
     pthread_mutex_lock(&fx_lock);
     int rate = 0, channels = 0;
     if (au_get_output_spec(&rate, &channels) != AU_OK || channels <= 0) channels = 2;
+    const bool stereo = channels == 2;
 
     AuFilterBuilder *fb = au_fb_create();
     if (!fb) { pthread_mutex_unlock(&fx_lock); return; }
-    char desc[256] = "";
+    char desc[512] = "";
+    if (peq_on) {
+        if (au_fb_add_parametric_eq(fb, &peq) != AU_OK) printf("  parametric eq: %s\n", au_fb_last_error(fb));
+        ADD_DESC(" peq(%d bands)", peq.band_count);
+    }
     if (eq_index > 0) {
         AuEqualizer eq = au_equalizer_defaults();
         double max_gain = 0;
@@ -294,22 +317,45 @@ static void apply_effects(void) {
         eq.preamp_db = -max_gain; // headroom for the boosts
         if (au_fb_add_equalizer(fb, channels, &eq) != AU_OK)
             printf("  equalizer: %s\n", au_fb_last_error(fb));
-        snprintf(desc + strlen(desc), sizeof(desc) - strlen(desc), " eq=%s", eq_presets[eq_index].name);
+        ADD_DESC(" eq=%s", eq_presets[eq_index].name);
     }
-    const bool headphone_fx = crossfeed_on || bs2b_mode >= 0;
-    if (headphone_fx && channels != 2) {
-        printf("  crossfeed/bs2b need a stereo output (it has %d channels; try -c 2): not applied\n", channels);
+    if (bass_db != 0 || treble_db != 0) {
+        if (au_fb_add_tone(fb, bass_db, treble_db) != AU_OK) printf("  tone: %s\n", au_fb_last_error(fb));
+        ADD_DESC(" bass=%+.0fdB treble=%+.0fdB", bass_db, treble_db);
+    }
+
+    const bool stereo_fx = crossfeed_on || bs2b_mode >= 0 || balance != 0 || width != 1 || mono || swap_lr;
+    if (!stereo) {
+        if (stereo_fx)
+            printf("  balance/width/mono/swap/crossfeed/bs2b need a stereo output (it has %d channels; try -c 2)\n", channels);
     }
     else {
+        // Always there and named, so the balance keys can change it instantly with a command
+        const AuStereo st = { .balance = balance, .width = mono ? 0 : width, .swap = swap_lr };
+        au_fb_set_name(fb, "st");
+        if (au_fb_add_stereo(fb, &st) != AU_OK) printf("  stereo: %s\n", au_fb_last_error(fb));
+        if (balance != 0) ADD_DESC(" balance=%+.1f", balance);
+        if (mono) ADD_DESC(" mono");
+        else if (width != 1) ADD_DESC(" width=%.2g", width);
+        if (swap_lr && !mono) ADD_DESC(" swapped");
         if (crossfeed_on) {
             if (au_fb_add_crossfeed(fb, NULL) != AU_OK) printf("  crossfeed: %s\n", au_fb_last_error(fb));
-            snprintf(desc + strlen(desc), sizeof(desc) - strlen(desc), " crossfeed");
+            ADD_DESC(" crossfeed");
         }
         if (bs2b_mode >= 0) {
             if (au_fb_add_bs2b_profile(fb, (AU_BS2B_PROFILE)bs2b_mode) != AU_OK)
                 printf("  bs2b: %s\n", au_fb_last_error(fb));
-            snprintf(desc + strlen(desc), sizeof(desc) - strlen(desc), " bs2b=%s", bs2b_names[bs2b_mode]);
+            ADD_DESC(" bs2b=%s", bs2b_names[bs2b_mode]);
         }
+    }
+    if (compressor_mode) {
+        const AuCompressor c = compressor_mode == 2 ? au_compressor_night() : au_compressor_defaults();
+        if (au_fb_add_compressor(fb, &c) != AU_OK) printf("  compressor: %s\n", au_fb_last_error(fb));
+        ADD_DESC(" compressor=%s", compressor_names[compressor_mode]);
+    }
+    if (limiter_on) {
+        if (au_fb_add_limiter(fb, NULL) != AU_OK) printf("  limiter: %s\n", au_fb_last_error(fb));
+        ADD_DESC(" limiter(-1 dB)");
     }
 
     const char *filters = au_fb_peek(fb);
@@ -324,14 +370,52 @@ static void apply_effects(void) {
     pthread_mutex_unlock(&fx_lock);
 }
 
+// Balance changes right away through a command to the named stereotools filter; the rebuilt string (a moment
+// later) keeps the value for the tracks that start afterwards
+static void change_balance(const double delta) {
+    pthread_mutex_lock(&fx_lock);
+    balance += delta;
+    if (balance > 1) balance = 1;
+    if (balance < -1) balance = -1;
+    if (fabs(balance) < 1e-9) balance = 0;
+    char arg[32];
+    snprintf(arg, sizeof(arg), "%.2f", balance);
+    for (char *c = arg; *c; c++) if (*c == ',') *c = '.'; // the command value must not depend on the locale
+    const int r = au_send_filter_command(0, "stereotools@st", "balance_out", arg);
+    pthread_mutex_unlock(&fx_lock);
+    if (r != AU_OK) printf("  (balance command failed: %d)\n", r);
+    apply_effects();
+}
+
 // The settings and the filter string ffaudio got (for copying into -f or an application)
 static void print_effects(void) {
     pthread_mutex_lock(&fx_lock);
-    printf("  eq=%s crossfeed=%s bs2b=%s\n  global filters: %s\n", eq_presets[eq_index].name,
-           crossfeed_on ? "on" : "off", bs2b_mode >= 0 ? bs2b_names[bs2b_mode] : "off",
-           last_filters[0] ? last_filters : "(none)");
+    printf("  peq=%s eq=%s bass=%+.0f treble=%+.0f balance=%+.1f width=%.2g%s%s crossfeed=%s bs2b=%s "
+           "compressor=%s limiter=%s\n",
+           peq_on ? "on" : (have_peq ? "off" : "none"), eq_presets[eq_index].name, bass_db, treble_db, balance, width,
+           mono ? " mono" : "", swap_lr ? " swapped" : "", crossfeed_on ? "on" : "off",
+           bs2b_mode >= 0 ? bs2b_names[bs2b_mode] : "off", compressor_names[compressor_mode], limiter_on ? "on" : "off");
+    printf("  global filters: %s\n", last_filters[0] ? last_filters : "(none)");
     if (filter) printf("  track filters (-f): %s\n", filter);
     pthread_mutex_unlock(&fx_lock);
+}
+
+// -P: an EqualizerAPO / AutoEq ParametricEQ.txt file
+static bool load_peq(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { fprintf(stderr, "-P: can not open %s\n", path); return false; }
+    char text[65536];
+    const size_t n = fread(text, 1, sizeof(text) - 1, f);
+    fclose(f);
+    text[n] = '\0';
+    char err[160];
+    if (au_parametric_eq_parse(text, &peq, err, sizeof(err)) != AU_OK) {
+        fprintf(stderr, "-P %s: %s\n", path, err);
+        return false;
+    }
+    printf("parametric EQ: %d bands, preamp %+.1f dB from %s\n", peq.band_count, peq.preamp_db, path);
+    have_peq = peq_on = true;
+    return true;
 }
 
 // -e: a preset name or 10 comma-separated gains in dB
@@ -373,7 +457,7 @@ static void on_device(int32_t channels, int32_t rate, void *ud) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan]\n", argv[0]);
+        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]\n", argv[0]);
         return 1;
     }
     double crossfade = 0;
@@ -399,6 +483,13 @@ int main(int argc, char **argv) {
             }
         }
         else if (!strcmp(argv[i], "-X")) crossfeed_on = true;
+        else if (!strcmp(argv[i], "-P") && i + 1 < argc) { if (!load_peq(argv[++i])) return 1; }
+        else if (!strcmp(argv[i], "-L")) limiter_on = true;
+        else if (!strcmp(argv[i], "-C") && i + 1 < argc) {
+            const char *m = argv[++i];
+            compressor_mode = !strcmp(m, "gentle") ? 1 : !strcmp(m, "night") ? 2 : -1;
+            if (compressor_mode < 0) { fprintf(stderr, "-C: gentle or night\n"); return 1; }
+        }
         else if (!strcmp(argv[i], "-b") && i + 1 < argc) {
             if (!parse_bs2b(argv[++i])) { fprintf(stderr, "-b: default, chu or jan\n"); return 1; }
         }
@@ -585,6 +676,65 @@ int main(int argc, char **argv) {
                 break;
             case 'f':
                 print_effects();
+                break;
+            case 'a':
+                pthread_mutex_lock(&fx_lock);
+                if (have_peq) peq_on = !peq_on;
+                pthread_mutex_unlock(&fx_lock);
+                if (have_peq) apply_effects();
+                else printf("  (no parametric EQ: start with -P ParametricEQ.txt)\n");
+                break;
+            case '1':
+            case '2':
+            case '3':
+            case '4': {
+                pthread_mutex_lock(&fx_lock);
+                double *v = c <= '2' ? &bass_db : &treble_db;
+                *v += (c == '2' || c == '4') ? 2 : -2;
+                if (*v > 12) *v = 12;
+                if (*v < -12) *v = -12;
+                pthread_mutex_unlock(&fx_lock);
+                apply_effects();
+                break;
+            }
+            case 'l':
+            case 'r':
+                change_balance(c == 'l' ? -0.1 : 0.1);
+                break;
+            case 'w': {
+                static const double widths[] = { 1, 1.5, 2, 0.5 };
+                pthread_mutex_lock(&fx_lock);
+                int i = 0;
+                while (i < 4 && widths[i] != width) i++;
+                width = widths[(i + 1) % 4];
+                mono = false;
+                pthread_mutex_unlock(&fx_lock);
+                apply_effects();
+                break;
+            }
+            case 'o':
+                pthread_mutex_lock(&fx_lock);
+                mono = !mono;
+                pthread_mutex_unlock(&fx_lock);
+                apply_effects();
+                break;
+            case 'c':
+                pthread_mutex_lock(&fx_lock);
+                swap_lr = !swap_lr;
+                pthread_mutex_unlock(&fx_lock);
+                apply_effects();
+                break;
+            case 'C':
+                pthread_mutex_lock(&fx_lock);
+                compressor_mode = (compressor_mode + 1) % 3;
+                pthread_mutex_unlock(&fx_lock);
+                apply_effects();
+                break;
+            case 'L':
+                pthread_mutex_lock(&fx_lock);
+                limiter_on = !limiter_on;
+                pthread_mutex_unlock(&fx_lock);
+                apply_effects();
                 break;
             case 'h':
             case '?':

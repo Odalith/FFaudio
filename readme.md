@@ -21,8 +21,9 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
   ffaudio never modifies your files
 - **Metadata**: tags (normalized names across formats), track/disc numbers and format details, for playing
   tracks or by probing a file without playing it
-- **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers that
-  build equalizer, crossfeed and bs2b strings
+- **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers for
+  graphic and parametric EQ (AutoEq / EqualizerAPO profiles), bass/treble, balance, width, mono, channel swap,
+  crossfeed, bs2b, compressor and limiter
 - Volume with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
 - Playback speed 0.25x to 4x, keeping the pitch or tape-style, changeable while playing without gaps
 - Callbacks for track start/end, prepare-next, restarts (seek/loop), duration, device changes and logs
@@ -151,6 +152,30 @@ au_send_filter_command(0, "volume", "volume", "0.5");
 ```
 Any [FFmpeg filter](https://ffmpeg.org/ffmpeg-filters.html) string works; `au_validate_filtergraph()` checks one.
 Changes take effect within about half a second (the audio that is already decoded plays out first).
+
+Headphone correction, the stereo image and dynamics:
+```c
+AuParametricEq peq;
+char err[128];
+if (au_parametric_eq_parse(autoeq_text, &peq, err, sizeof(err)) == AU_OK)  // AutoEq ParametricEQ.txt
+    au_fb_add_parametric_eq(fb, &peq);
+au_fb_add_tone(fb, 3.0, -1.0);                    // bass and treble in dB
+
+AuStereo st = au_stereo_defaults();               // stereo outputs only
+st.balance = -0.2;                                // or .width = 0 for mono, .swap = true
+au_fb_set_name(fb, "st");                         // instance name: "stereotools@st"
+au_fb_add_stereo(fb, &st);
+
+const AuCompressor night = au_compressor_night(); // or au_compressor_defaults() for gentle levelling
+au_fb_add_compressor(fb, &night);
+au_fb_add_limiter(fb, NULL);                      // -1 dBFS ceiling, last in the chain
+
+// later, instantly and without rebuilding:
+au_send_filter_command(0, "stereotools@st", "balance_out", "0.3");
+```
+Named filters can be changed with commands; a command reaches the tracks that are playing, so also set the updated
+string for tracks that start later. `au_filter_available()` tells whether this FFmpeg build has a filter (bs2b
+needs libbs2b); the helpers return `AU_ERR_UNSUPPORTED` when it does not.
 
 ### 5. ReplayGain and metadata
 ```c
@@ -346,7 +371,7 @@ au_shutdown();   // not from inside a callback; au_initialize() may be called ag
   fades, volume ramps and live filter changes
 
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
-`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan]`
+`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]`
 plays a folder on real hardware for listening tests.
 
 ## Roadmap

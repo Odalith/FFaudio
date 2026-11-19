@@ -59,6 +59,7 @@ extern "C" {
         AU_ERR_NOTHING_TO_DO = -8,
         AU_ERR_FILE = -9,              // a file could not be opened or decoded
         AU_ERR_CANCELLED = -10,
+        AU_ERR_UNSUPPORTED = -11,       // not available in this build (e.g. an FFmpeg filter that was not compiled in)
     } AU_RESULT;
 
     //+-----------------------------------------------------+
