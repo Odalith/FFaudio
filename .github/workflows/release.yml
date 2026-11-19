@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a tag like v0.2.0 builds the release archives (ffaudio with an LGPL FFmpeg built by
+# Pushing a tag like v2.0.0 builds the release archives (ffaudio with an LGPL FFmpeg built by
 # scripts/build-deps.sh), tests them and attaches them to a draft GitHub release, together with the FFmpeg
 # and soxr sources. Pull requests that change the packaging, and manual runs (workflow_dispatch), build and test
 # the archives as workflow artifacts only.
@@ -28,6 +28,8 @@ jobs:
           version=$(sed -n 's/^project(ffAudio VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "ffaudio $version"
+          header=$(for p in MAJOR MINOR PATCH; do sed -n "s/^#define FFAUDIO_VERSION_$p \([0-9]*\).*/\1/p" lib/ffaudio.h; done | paste -sd.)
+          [ "$header" = "$version" ] || { echo "::error::lib/ffaudio.h says $header, CMakeLists.txt says $version"; exit 1; }
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match CMakeLists.txt version $version"; exit 1; }
             heading=$(grep -m1 "^## $version" CHANGELOG.md) || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }

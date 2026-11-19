@@ -1,9 +1,9 @@
 # Changelog
 
-## 0.2.0 (2026-11-19)
+## 2.0.0 (2026-11-19)
 
-A rework of the playback core for stability, gapless playback and crossfading. The API changed in
-incompatible ways; see "API changes".
+The first release since 1.0.4: a rework of the playback core for stability, gapless playback and crossfading.
+The API changed in incompatible ways; see "API changes".
 
 ### Fixed
 - Surround files mixed down to stereo were ~7.7 dB quieter than in mpv (#19): with integer output formats
