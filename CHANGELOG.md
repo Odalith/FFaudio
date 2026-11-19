@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (2026-11-19)
 
 A rework of the playback core for stability, gapless playback and crossfading. The API changed in
 incompatible ways; see "API changes".
