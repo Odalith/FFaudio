@@ -4,6 +4,9 @@
  */
 #include "test_common.h"
 #include <math.h>
+#ifndef _WIN32
+#include <sys/stat.h> // mkfifo
+#endif
 #include "../lib/ffaudio_filters.h"
 #define FFA_MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -525,6 +528,61 @@ static void test_replaygain_levels(void) {
     CHECK_LEVEL(replaygain_level("rg_tagged.flac", &track, &mine), SINE_DB - 10, 0.1f);   // override wins
 }
 
+#ifndef _WIN32
+// Opening a FIFO blocks until a writer appears: the track is the mixer's current one, but its file is not open
+// and its gain is not known yet, for as long as the test wants
+static char fifo_path[1100];
+static int feed_fifo(void *arg) {
+    SDL_Delay(300);
+    FILE *in = fopen((const char *)arg, "rb");
+    FILE *out = fopen(fifo_path, "wb");
+    if (in && out) {
+        char buf[16384];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), in)) > 0) fwrite(buf, 1, n, out);
+    }
+    if (in) fclose(in);
+    if (out) fclose(out);
+    return 0;
+}
+#endif
+
+static void test_replaygain_from_first_sample(void) {
+    // The mixer runs for a track before its file is open (here: a FIFO nobody writes to for 300 ms). The gain
+    // it starts with must still be the track's real one: it used to be taken as 0 dB at that point and then
+    // ramped to the real gain over 10 ms, so ReplayGain-reduced tracks started too loud. Windows CI caught it
+    // with ordinary files, whose opening is sometimes slower than the first audio callback.
+#ifdef _WIN32
+    printf("   (needs a FIFO, skipped on Windows)\n");
+#else
+    snprintf(fifo_path, sizeof(fifo_path), "%s/rg_fifo.flac", tc_fixture_dir);
+    remove(fifo_path);
+    REQUIRE(mkfifo(fifo_path, 0600) == 0);
+    char src[1100];
+    snprintf(src, sizeof(src), "%s", fx("rg_tagged.flac")); // track gain -6 dB
+
+    start_capture("replaygain_first_sample");
+    au_set_audio_volume(100);
+    const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK };
+    CHECK(au_set_replaygain(&cfg) == AU_OK);
+    SDL_Thread *writer = SDL_CreateThread(feed_fifo, "fifo", src);
+    au_play_audio(fifo_path, NULL);
+    wait_until_idle(1, 6000);
+    SDL_WaitThread(writer, NULL);
+    Capture c = stop_capture();
+    remove(fifo_path);
+
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const float start_db = 20 * log10f(window_peak(&c, first, 0.0, 0.02));
+    const float steady_db = 20 * log10f(window_peak(&c, first, 0.3, 0.7));
+    printf("   first 20 ms peak %.2f dB, steady %.2f dB (expected %.2f)\n", start_db, steady_db, SINE_DB - 6);
+    CHECK(fabsf(steady_db - (SINE_DB - 6)) < 0.1f);
+    CHECK(fabsf(start_db - steady_db) < 0.05f);   // right from the first sample
+    free(c.samples);
+#endif
+}
+
 static void test_replaygain_live_change(void) {
     // Switching ReplayGain on while playing ramps the level down instead of jumping
     start_capture("replaygain_live");
@@ -742,6 +800,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_bad_custom_downmix_rejected);
     RUN_TEST(test_multichannel_routing);
     RUN_TEST(test_replaygain_levels);
+    RUN_TEST(test_replaygain_from_first_sample);
     RUN_TEST(test_replaygain_live_change);
     RUN_TEST(test_speed);
     RUN_TEST(test_speed_limits_and_position);
