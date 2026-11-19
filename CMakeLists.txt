@@ -171,6 +171,9 @@ endfunction()
 
 if(FFAUDIO_BUILD_MANUAL_PLAYER AND NOT WIN32)
     ffaudio_test_exe(manual_player tests/manual_player.c)
+    # Long-running soak test with memory sampling (Linux /proc); not part of CTest
+    ffaudio_test_exe(soak tests/soak.c)
+    target_link_libraries(soak PRIVATE Threads::Threads)
 endif()
 if(FFAUDIO_BUILD_MANUAL_PLAYER)
     ffaudio_test_exe(loudness_scan tests/loudness_scan.c)
