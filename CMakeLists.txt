@@ -195,6 +195,12 @@ if(FFAUDIO_BUILD_TESTS)
                 COMMENT "Generating audio fixtures")
         add_custom_target(ffaudio_fixtures ALL DEPENDS ${FIXTURE_DIR}/.stamp)
 
+        # The ReplayGain cache's default location, inside the build tree: XDG_DATA_HOME on Linux, LOCALAPPDATA on
+        # Windows (the tests never touch the user's real one)
+        set(FFAUDIO_TEST_DATA_ENV "XDG_DATA_HOME=${CMAKE_BINARY_DIR}/xdg-data")
+        if(WIN32)
+            string(APPEND FFAUDIO_TEST_DATA_ENV ";LOCALAPPDATA=${CMAKE_BINARY_DIR}/localappdata")
+        endif()
         foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
@@ -205,7 +211,7 @@ if(FFAUDIO_BUILD_TESTS)
             endif()
             set_tests_properties(${t} PROPERTIES
                     TIMEOUT 180
-                    ENVIRONMENT "SDL_AUDIODRIVER=dummy;XDG_DATA_HOME=${CMAKE_BINARY_DIR}/xdg-data;ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
+                    ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
     endif()
 endif()

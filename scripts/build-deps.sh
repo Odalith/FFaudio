@@ -98,6 +98,10 @@ decoders=$(awk '/^\/\* audio codecs \*\//{f=1} /^\/\* subtitles \*\//{f=0} f' li
 # Audio filters, sources and sinks, matched like configure does (abuffer/abuffersink are always built)
 filters=$(grep -o '^extern const FFFilter ff_\(af\|asrc\|asink\)_[a-z0-9_]*' libavfilter/allfilters.c \
           | sed 's/^extern const FFFilter ff_[a-z]*_//' | sort -u | paste -sd, -)
+# amovie (an "avsrc"): reads audio from a file inside a filter graph, e.g. an impulse response for afir. It also
+# makes libavfilter link libavformat, which ametadata needs but does not declare (FFmpeg 9: shared Windows builds
+# fail with undefined avio_* references without it)
+filters="$filters,amovie"
 for need in flac alac mp3 mp3float aac vorbis opus wavpack ape pcm_s16le dsd_lsbf; do
     case ",$decoders," in *",$need,"*) ;; *) echo "error: decoder $need missing from the list" >&2; exit 1 ;; esac
 done

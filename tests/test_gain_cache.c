@@ -421,13 +421,18 @@ static void test_memory_only_and_default_location(void) {
     CHECK(au_gain_cache_set_file(NULL) == AU_OK);
     CHECK(au_gain_cache_get_file(path, sizeof(path)) > 0);
     printf("   default location: %s\n", path);
+#ifdef _WIN32
+    const char *suffix = "ffaudio\\replaygain.cache";
+    const char *base = getenv("LOCALAPPDATA"), *test_dir = "localappdata";
+#else
     const char *suffix = "ffaudio/replaygain.cache";
+    const char *base = getenv("XDG_DATA_HOME"), *test_dir = "xdg-data";
+#endif
     CHECK(strlen(path) > strlen(suffix) && strcmp(path + strlen(path) - strlen(suffix), suffix) == 0);
 
     // Only write to the default location when CTest pointed it into the build tree
-    const char *xdg = getenv("XDG_DATA_HOME");
-    if (xdg && strstr(xdg, "xdg-data")) {
-        CHECK(strncmp(path, xdg, strlen(xdg)) == 0);
+    if (base && strstr(base, test_dir)) {
+        CHECK(strncmp(path, base, strlen(base)) == 0);
         remove(path);
         CHECK(au_gain_cache_set("/m/default.flac", &rg) == AU_OK);
         CHECK(count_lines(path) == 2);              // directory created on the first write

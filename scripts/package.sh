@@ -88,17 +88,21 @@ if [ "$os" = linux ]; then
             patchelf --set-rpath '$ORIGIN' "$root/lib/$need"
         fi
     done
-    # Check: with no library path set, everything resolves inside the archive or to a system library
+    # Check, for the direct dependencies of every library in lib/ (with no library path set): bundled ones load
+    # from the archive, the rest are system libraries. What system libraries need in turn (e.g. SDL2's ALSA and
+    # PulseAudio) is the system's business.
     for so in "$root"/lib/*.so*; do
         [ -L "$so" ] && continue
-        while read -r dep _ path _; do
-            [ -n "$dep" ] || continue
+        resolved=$(env -u LD_LIBRARY_PATH ldd "$so")
+        for dep in $(readelf -d "$so" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+            path=$(awk -v n="$dep" '$1 == n && $2 == "=>" { print $3 }' <<< "$resolved")
             if [ -e "$root/lib/$dep" ]; then
-                case "$path" in "$root"/lib/*) ;; *) echo "error: $so loads $dep from $path, not from the archive" >&2; exit 1 ;; esac
+                case "$path" in "$root"/lib/*) ;; *) echo "error: $so loads $dep from '$path', not from the archive" >&2; exit 1 ;; esac
             elif ! system_lib "$dep"; then
-                case "$path" in "$root"/lib/*) ;; *) echo "error: $so needs $dep, which is neither bundled nor a system library" >&2; exit 1 ;; esac
+                echo "error: $so needs $dep, which is neither bundled nor a system library" >&2
+                exit 1
             fi
-        done < <(env -u LD_LIBRARY_PATH ldd "$so" | awk '$2 == "=>" { print $1, $2, $3, $4 }')
+        done
     done
 else
     # DLLs from the MSYS2 environment (not Windows' own) that the DLLs in bin/ import
