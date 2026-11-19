@@ -15,6 +15,8 @@
  *     -r minutes   shut down and re-initialize the player this often (default 30, 0 = never)
  *     -j percent   share of picks that are non-audio files from the folders (default 3)
  *     -c file      ReplayGain cache file (default soak-replaygain.cache; never the user's own cache)
+ *     -m           call malloc_trim(0) after every sample (glibc), to see how much of the growth is memory that
+ *                  malloc has freed but kept
  *     -v           print every ffaudio log message
  *
  * Ctrl-C stops it cleanly (a second Ctrl-C aborts), so sanitizer builds still print their leak report.
@@ -116,7 +118,7 @@ static atomic_int stop_requested;
 static atomic_long heartbeat;          // seconds since start, written by the main loop
 static atomic_long last_started_at;    // when a track last started
 static const char *_Atomic last_action = "start";
-static bool verbose;
+static bool verbose, trim;
 
 static double now_s(void) {
     struct timespec ts;
@@ -559,7 +561,7 @@ int main(int argc, char **argv) {
     const char *csv_path = "soak.csv";
     base_seed = (uint64_t)time(NULL);
     int opt;
-    while ((opt = getopt(argc, argv, "t:x:s:o:i:r:j:c:v")) != -1) {
+    while ((opt = getopt(argc, argv, "t:x:s:o:i:r:j:c:mv")) != -1) {
         switch (opt) {
             case 't': hours = atof(optarg); break;
             case 'x': scale = atof(optarg); break;
@@ -570,6 +572,7 @@ int main(int argc, char **argv) {
             case 'j': junk_percent = atoi(optarg); break;
             case 'c': cache_file = optarg; break;
             case 'v': verbose = true; break;
+            case 'm': trim = true; break;
             default:
                 fprintf(stderr, "usage: %s [-t hours] [-x scale] [-s seed] [-o csv] [-i s] [-r min] [-j %%] [-c cache] [-v] <dir>...\n", argv[0]);
                 return 2;
@@ -628,6 +631,9 @@ int main(int argc, char **argv) {
             next_reinit += reinit_minutes * 60.0;
         }
         if (t >= next_sample) {
+#ifdef __GLIBC__
+            if (trim) malloc_trim(0);
+#endif
             record();
             next_sample = t + interval;
         }
