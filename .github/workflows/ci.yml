@@ -62,7 +62,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   windows:
-    name: Windows (MSYS2 UCRT64, build only)
+    name: Windows (MSYS2 UCRT64)
     runs-on: windows-latest
     defaults:
       run:
@@ -82,8 +82,12 @@ jobs:
             mingw-w64-ucrt-x86_64-SDL2
             mingw-w64-ucrt-x86_64-ffmpeg
 
+      # The test fixtures are generated with MSYS2's ffmpeg.exe (bash comes with MSYS2)
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFFAUDIO_SANITIZER=none -DFFAUDIO_BUILD_TESTS=OFF
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=none
 
       - name: Build
         run: cmake --build build
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

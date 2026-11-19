@@ -24,6 +24,8 @@ incompatible ways; see "API changes".
 - Position reporting used a hardware buffer size of 0; global per-file state (byte seeking, infinite buffering,
   loop counts, resampler settings) leaked from one track into the next.
 - The library installed SDL signal handlers, taking over the host's Ctrl-C / SIGTERM.
+- `ffaudio.pc` listed FFmpeg and SDL2 in `Requires.private` for shared builds, so pkg-config failed without their
+  development files although they are only needed for static linking.
 - Files that are not audio (e.g. encrypted cache files that FFmpeg mistakes for a raw VVC or JPEG stream) made
   FFmpeg's video decoders print errors while probing. Files whose container has no audio stream now fail before
   any decoder is opened, in playback, `au_probe()` and loudness analysis.
@@ -76,7 +78,12 @@ incompatible ways; see "API changes".
 - `au_set_downmix()`: full level (default, like mpv), normalized (never clips) or custom filters on the original
   channels (e.g. `sofalizer` for headphones). `InitializeConfig.output_channels` / `output_sample_rate` override
   the device's format.
-- Headless test suite (CTest) with output capture, sanitizer builds, CI, install rules and a pkg-config file.
+- Headless test suite (CTest) with output capture, sanitizer builds, CI on Linux and Windows (MSYS2), install
+  rules, a pkg-config file and a CMake package (`find_package(ffaudio)`, target `ffaudio::ffaudio`).
+- Release archives for Linux x86_64 and Windows x86_64, built by `.github/workflows/release.yml` from a version tag:
+  ffaudio with an LGPL FFmpeg 9.0.2 trimmed for audio playback, soxr and bs2b (`scripts/build-deps.sh`,
+  `scripts/package.sh`), tested before packaging. `FFAUDIO_RELOCATABLE` makes libffaudio look for its libraries
+  next to itself. Tested with FFmpeg 8.1 and 9.0.
 
 ### API changes
 - Log levels are `AU_LOG_INFO`, `AU_LOG_WARNING`, `AU_LOG_ERROR`, `AU_LOG_FATAL` (`ERROR` clashed with `<windows.h>`).

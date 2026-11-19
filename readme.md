@@ -35,6 +35,13 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - Linux tested; Windows builds with MSYS2 (see CI); macOS, Android and iOS untested
 - LGPL-2.1
 
+## Downloads
+[Releases](https://github.com/Odalith/ffAudio/releases) have ready-built archives for Linux x86_64 and Windows
+x86_64 (MinGW/UCRT). Each contains ffaudio, an LGPL build of FFmpeg trimmed for audio playback (every audio decoder,
+demuxer and audio filter; no encoders, video or network code), soxr and bs2b, with headers, pkg-config and CMake
+files (`find_package(ffaudio)`). The Windows archive also has SDL2; on Linux SDL2 comes from the system. The FFmpeg
+and soxr sources are attached to each release, and `scripts/build-deps.sh` rebuilds them.
+
 ## Building
 Requires CMake ≥ 3.20, a C99 compiler, SDL2 ≥ 2.24 and FFmpeg ≥ 6.0 (libavcodec, libavformat, libavfilter,
 libswresample, libavutil) with pkg-config.
@@ -47,7 +54,8 @@ cmake --install build                        # installs headers, the library, ff
 ```
 
 Options: `-DBUILD_SHARED_LIBS=OFF` for a static library, `-DFFAUDIO_SANITIZER=address|thread|undefined`,
-`-DFFAUDIO_BUILD_TESTS=OFF`, `-DFFAUDIO_BUILD_MANUAL_PLAYER=OFF`.
+`-DFFAUDIO_BUILD_TESTS=OFF`, `-DFFAUDIO_BUILD_MANUAL_PLAYER=OFF`, `-DFFAUDIO_RELOCATABLE=ON` (Linux/macOS: find bundled
+libraries next to libffaudio, for archives like the release ones).
 
 Consumers: `pkg-config --cflags --libs ffaudio`, or `find_package` the installed `ffaudio::ffaudio` target.
 

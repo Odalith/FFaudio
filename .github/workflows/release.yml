@@ -1,0 +1,191 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds the release archives (ffaudio with an LGPL FFmpeg built by
+# scripts/build-deps.sh), tests them and attaches them to a draft GitHub release, together with the FFmpeg
+# and soxr sources. Pull requests that change the packaging, and manual runs (workflow_dispatch), build and test
+# the archives as workflow artifacts only.
+on:
+  push:
+    tags: [ 'v*' ]
+  pull_request:
+    paths: [ '.github/workflows/release.yml', 'scripts/**', 'CMakeLists.txt', 'ffaudio.pc.in' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Version, tag and changelog agree
+        run: |
+          version=$(sed -n 's/^project(ffAudio VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "ffaudio $version"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "::error::tag $GITHUB_REF_NAME does not match CMakeLists.txt version $version"; exit 1; }
+            heading=$(grep -m1 "^## $version" CHANGELOG.md) || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+            case "$heading" in *nreleased*) echo "::error::CHANGELOG.md still says '$heading'"; exit 1 ;; esac
+          fi
+
+  linux:
+    name: Linux x86_64
+    needs: check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build nasm patchelf libsdl2-dev libbs2b-dev ffmpeg
+
+      # FFmpeg and soxr only change with scripts/build-deps.sh
+      - name: Cache dependency builds
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-linux-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
+
+      - name: Build FFmpeg and soxr
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          scripts/build-deps.sh deps/prefix deps/work
+          find deps/work -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +   # keep only the source tarballs
+
+      - name: Build ffaudio
+        run: |
+          export PKG_CONFIG_PATH="$PWD/deps/prefix/lib/pkgconfig"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFFAUDIO_SANITIZER=none \
+            -DFFAUDIO_RELOCATABLE=ON -DFFAUDIO_BUILD_MANUAL_PLAYER=OFF -DCMAKE_INSTALL_PREFIX="$PWD/stage"
+          cmake --build build
+
+      - name: Test with the bundled FFmpeg
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          cmake --install build
+          scripts/package.sh "ffaudio-${{ needs.check.outputs.version }}-linux-x86_64" deps/prefix stage dist
+          mkdir -p sources
+          cp deps/work/ffmpeg-*.tar.xz deps/work/soxr-*-Source.tar.xz sources/
+          cp deps/prefix/share/licenses/ffmpeg/BUILD.txt sources/ffmpeg-build-linux-x86_64.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: |
+            dist/*.tar.xz
+            dist/*.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sources
+          path: sources/*
+
+  windows:
+    name: Windows x86_64 (MSYS2 UCRT64)
+    needs: check
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            zip
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-SDL2
+            mingw-w64-ucrt-x86_64-libbs2b
+            mingw-w64-ucrt-x86_64-ffmpeg
+
+      - name: Cache dependency builds
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-windows-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
+
+      - name: Build FFmpeg and soxr
+        if: steps.deps.outputs.cache-hit != 'true'
+        env:
+          CMAKE_GENERATOR: Ninja
+        run: |
+          scripts/build-deps.sh deps/prefix deps/work
+          find deps/work -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+
+      - name: Build ffaudio
+        run: |
+          export PKG_CONFIG_PATH="$PWD/deps/prefix/lib/pkgconfig"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFFAUDIO_SANITIZER=none \
+            -DCMAKE_INSTALL_PREFIX="$PWD/stage"
+          cmake --build build
+
+      # The bundled DLLs first; the test fixtures are made with MSYS2's ffmpeg.exe, which finds its own DLLs
+      - name: Test with the bundled FFmpeg
+        run: PATH="$PWD/deps/prefix/bin:$PATH" ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          cmake --install build
+          scripts/package.sh "ffaudio-${{ needs.check.outputs.version }}-windows-x86_64" deps/prefix stage dist
+          cp deps/prefix/share/licenses/ffmpeg/BUILD.txt dist/ffmpeg-build-windows-x86_64.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+            dist/ffmpeg-build-windows-x86_64.txt
+
+  release:
+    name: Draft release
+    needs: [ check, linux, windows ]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: upload
+          merge-multiple: true
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${{ needs.check.outputs.version }}"
+          awk -v v="$version" 'index($0, "## " v) == 1 { f = 1; next } /^## / { if (f) exit } f' CHANGELOG.md > notes.md
+          {
+            echo
+            echo "### Downloads"
+            echo "The archives contain ffaudio with an LGPL build of FFmpeg $(sed -n 's/^FFMPEG_VERSION=//p' scripts/build-deps.sh) and soxr made by"
+            echo "\`scripts/build-deps.sh\`; their source tarballs are attached. Each archive's README.txt lists what is inside."
+          } >> notes.md
+
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "ffaudio ${{ needs.check.outputs.version }}" --notes-file notes.md upload/*

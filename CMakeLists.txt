@@ -10,6 +10,7 @@ option(BUILD_SHARED_LIBS "Build ffaudio as a shared library" ON)
 option(FFAUDIO_BUILD_TESTS "Build the headless test suite" ON)
 option(FFAUDIO_BUILD_MANUAL_PLAYER "Build the interactive manual test player (POSIX only)" ON)
 option(FFAUDIO_INSTALL "Generate install rules" ON)
+option(FFAUDIO_RELOCATABLE "Linux/macOS: look for dependencies next to libffaudio first (RUNPATH $ORIGIN), for archives that bundle them" OFF)
 set(FFAUDIO_SANITIZER "" CACHE STRING "Sanitizer to build with: address, thread, undefined, none or empty")
 
 # Debug builds default to AddressSanitizer
@@ -102,6 +103,14 @@ endif()
 target_compile_options(ffaudio PRIVATE ${FFAUDIO_WARNINGS} ${SAN_FLAGS})
 target_link_options(ffaudio PRIVATE ${SAN_FLAGS})
 
+if(FFAUDIO_RELOCATABLE AND NOT WIN32)
+    if(APPLE)
+        set_target_properties(ffaudio PROPERTIES INSTALL_RPATH "@loader_path")
+    else()
+        set_target_properties(ffaudio PROPERTIES INSTALL_RPATH "$ORIGIN")
+    endif()
+endif()
+
 set_target_properties(ffaudio PROPERTIES
         C_VISIBILITY_PRESET hidden
         VERSION ${PROJECT_VERSION}
@@ -113,10 +122,13 @@ set_target_properties(ffaudio PROPERTIES
 #+-----------------------------------------------------+
 
 if(FFAUDIO_INSTALL)
+    # A shared libffaudio brings its dependencies along; only static linking needs them listed
     if(BUILD_SHARED_LIBS)
         set(FFAUDIO_PC_CFLAGS "")
+        set(FFAUDIO_PC_REQUIRES_PRIVATE "")
     else()
         set(FFAUDIO_PC_CFLAGS "-DFFAUDIO_STATIC")
+        set(FFAUDIO_PC_REQUIRES_PRIVATE "Requires.private: sdl2 libavformat libavcodec libavfilter libswresample libavutil")
     endif()
     configure_file(ffaudio.pc.in ${CMAKE_CURRENT_BINARY_DIR}/ffaudio.pc @ONLY)
 
@@ -128,6 +140,15 @@ if(FFAUDIO_INSTALL)
             PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ffaudio)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ffaudio.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
     install(EXPORT ffaudioTargets NAMESPACE ffaudio:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ffaudio)
+
+    # find_package(ffaudio) -> ffaudio::ffaudio
+    include(CMakePackageConfigHelpers)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfig.cmake
+         "include(\"\${CMAKE_CURRENT_LIST_DIR}/ffaudioTargets.cmake\")\n")
+    write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfigVersion.cmake
+                                     COMPATIBILITY SameMinorVersion)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfigVersion.cmake
+            DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ffaudio)
 endif()
 
 #+-----------------------------------------------------+
