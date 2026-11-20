@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.1 (unreleased)
+## 2.0.1 (2026-11-19)
 
 ### Changed
 - Far fewer threads: every track ran its decoder with a frame thread per CPU core and three filter graphs with a
