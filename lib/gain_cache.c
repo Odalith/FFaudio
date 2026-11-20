@@ -20,9 +20,10 @@
  * Persistent ReplayGain cache: path -> AuReplayGainInfo.
  *
  * In memory it is a hash table behind one mutex. On disk it is an append-only text file in the platform's
- * per-user data directory: every change appends one line, so a change is a single small write, a crash can
- * not lose earlier entries, and several processes can append to the same file. The file is read on first
- * use and rewritten (compacted) when superseded lines pile up.
+ * per-user data directory: every change appends one line, so a change is a single small write and a crash can
+ * not lose earlier entries. The file is read on first use and rewritten (compacted) when superseded lines pile
+ * up. There is no locking: a compaction (or a clear) can lose what another process appends at the same time,
+ * so one process at a time should write to a file.
  *
  *   ffaudio-replaygain-cache 1
  *   S <tab> track_gain <tab> track_peak <tab> album_gain <tab> album_peak <tab> flags <tab> path     (set)

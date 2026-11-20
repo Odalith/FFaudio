@@ -42,6 +42,10 @@
   included that start, while seeks and the duration count from 0: `au_get_audio_play_time()` was too large, end
   crossfades and `on_prepare_next` came that much early, and a device change jumped ahead by it.
 
+### Documentation
+- The ReplayGain cache file is not safe to write from several programs at the same time, as the readme said:
+  compacting replaces the file and can lose another writer's changes. One writer at a time.
+
 ## 2.1.0 (unreleased)
 
 ### Added
