@@ -76,7 +76,9 @@ extern "C" {
     } AU_FADE_CURVE;
 
     // t goes 0 -> 1 over the fade; return the gain (0..1) of the track fading IN.
-    // The track fading out uses curve(1 - t). Called on the audio thread: it must be fast and must not block.
+    // The track fading out uses curve(1 - t). Called on ffaudio's control thread while the fade is set up
+    // (au_set_crossfade(), or the track with PlayAudioConfig.fade_in being queued): the curve is sampled at 257
+    // points, which are used from then on, so custom_user only has to live until that call has been processed.
     typedef float (*AuFadeCurveFn)(float t, void *custom_user);
 
     // How a fade happens. seconds <= 0 means no fade (cut, or gapless at a natural track end).

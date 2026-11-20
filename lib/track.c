@@ -29,6 +29,7 @@
 #include "probe.h"
 #include "network.h"
 #include "gain_cache.h"
+#include "output.h"
 #include <math.h>
 #include "decoder_utils.h"
 #include "filtergraph.h"
@@ -289,6 +290,7 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
             t->start_time = SecondsToMicroseconds(config->skip_seconds);
         if (config->fade_in) {
             t->fade_in_override = *config->fade_in;
+            fade_curve_build(&t->fade_in_curve, config->fade_in); // control thread: a custom curve is called here
             t->has_fade_in_override = true;
         }
         if (config->replaygain) {

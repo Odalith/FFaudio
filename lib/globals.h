@@ -149,6 +149,13 @@ typedef struct FilterCmd {
     struct FilterCmd *next;
 } FilterCmd;
 
+// A fade curve sampled at FADE_CURVE_STEPS + 1 points (t = 0..1, linear in between), made on the control thread when
+// the fade is configured: the mixer never computes a curve, nor calls an application's custom one
+#define FADE_CURVE_STEPS 256
+typedef struct FadeCurve {
+    float g[FADE_CURVE_STEPS + 1];
+} FadeCurve;
+
 // TrackState.gain_mb holds the ReplayGain gain in 0.01 dB and whether a change to it ramps slowly (over 2 s instead of
 // 10 ms: a value that arrived after the track started). One atomic for both, so the flag can not outlive its value.
 static inline int gain_pack(const int centi_db, const bool slow) { return centi_db * 2 + (slow ? 1 : 0); }
@@ -163,6 +170,7 @@ typedef struct TrackState {
     int64_t start_time;                 // AV_TIME_BASE units, AV_NOPTS_VALUE = from the start
     int64_t play_duration;              // AV_TIME_BASE units, AV_NOPTS_VALUE = to the end
     AuFade fade_in_override;            // only used when has_fade_in_override
+    FadeCurve fade_in_curve;            // its curve, sampled when the track is created
     bool has_fade_in_override;
     AuReplayGainInfo replaygain_override;   // only used when has_replaygain_override
     bool has_replaygain_override;
@@ -174,6 +182,8 @@ typedef struct TrackState {
     bool gain_started;                  // SDL callback only
     float gain_seen;                    // SDL callback only: target the current ramp heads for
     float gain_step;                    // SDL callback only: per-sample change of the current ramp
+    int32_t gain_packed;                // SDL callback only: gain_mb the target below was computed for
+    float gain_target;                  // SDL callback only: linear gain of gain_packed (powf only on a change)
 
     // ---- threads ----
     SDL_Thread *read_tid;
@@ -288,7 +298,7 @@ typedef struct FadeState {
     bool active;
     int64_t pos;                // frames into the fade
     int64_t len;                // total frames
-    AuFade fade;
+    FadeCurve curve;
 } FadeState;
 
 typedef struct Mixer {
@@ -317,7 +327,9 @@ typedef struct Mixer {
 
     // Crossfade at a natural track end
     AuFade end_fade;
+    FadeCurve end_curve;
     double min_track_seconds;
+    FadeCurve linear_curve;         // for the short ramps of pause and resume without a configured fade
 
     // Scratch buffers, interleaved float, allocated with the device
     float *mix_buf;
@@ -417,6 +429,7 @@ typedef struct AudioPlayer {
     int32_t output_channels;            // 0 = device preference
     int32_t output_sample_rate;         // 0 = device preference
     CrossfadeConfig crossfade;          // control thread only
+    FadeCurve play_curve, skip_curve, stop_curve, pause_curve; // control thread: its curves, sampled when set
     bool use_soxr;
     int32_t filter_nbthreads;
     int32_t find_stream_info;

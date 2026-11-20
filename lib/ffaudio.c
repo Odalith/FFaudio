@@ -309,9 +309,15 @@ static void set_current_slot(AudioPlayer *ap, TrackState *t) {
     }
 }
 
-static const AuFade *fade_for(const TrackState *incoming, const AuFade *fallback) {
-    if (incoming && incoming->has_fade_in_override) return &incoming->fade_in_override;
-    return fallback;
+// Seconds and sampled curve of the fade into `incoming`: its own (PlayAudioConfig.fade_in) or the configured one
+static double fade_for(const TrackState *incoming, const AuFade *fallback, const FadeCurve *fallback_curve,
+                       const FadeCurve **curve) {
+    if (incoming && incoming->has_fade_in_override) {
+        *curve = &incoming->fade_in_curve;
+        return incoming->fade_in_override.seconds;
+    }
+    *curve = fallback_curve;
+    return fallback->seconds;
 }
 
 static void publish_idle_status(AudioPlayer *ap) {
@@ -356,8 +362,9 @@ static void cmd_play(AudioPlayer *ap, const Msg *msg) {
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
     TrackState *old = m->current;
-    const AuFade *fade = fade_for(t, &ap->crossfade.on_play);
-    const bool faded = old && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, old, t, fade);
+    const FadeCurve *curve;
+    const double seconds = fade_for(t, &ap->crossfade.on_play, &ap->play_curve, &curve);
+    const bool faded = old && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, old, t, seconds, curve);
     if (faded) old->fade_reason = END_SKIPPED;
     else {
         if (old) remove_from_mixer(ap, old);
@@ -393,8 +400,9 @@ static void cmd_skip(AudioPlayer *ap) {
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
     TrackState *cur = m->current, *next = m->next;
-    const AuFade *fade = fade_for(next, &ap->crossfade.on_skip);
-    const bool faded = cur && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, cur, next, fade);
+    const FadeCurve *curve;
+    const double seconds = fade_for(next, &ap->crossfade.on_skip, &ap->skip_curve, &curve);
+    const bool faded = cur && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, cur, next, seconds, curve);
     if (faded) cur->fade_reason = END_SKIPPED;
     else {
         if (cur) remove_from_mixer(ap, cur);
@@ -428,12 +436,12 @@ static void cmd_stop(AudioPlayer *ap) {
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
     TrackState *cur = m->current, *next = m->next;
-    const AuFade *fade = &ap->crossfade.on_stop;
     if (next) {
         remove_from_mixer(ap, next);
         removed[n_removed++] = next;
     }
-    if (cur && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, cur, NULL, fade)) {
+    if (cur && !SDL_AtomicGet(&ap->paused) &&
+        mixer_start_transition(ap, cur, NULL, ap->crossfade.on_stop.seconds, &ap->stop_curve)) {
         // Fading out; a track that was already fading out is cut and reported through a mixer event
         cur->fade_reason = END_SKIPPED;
     }
@@ -458,7 +466,7 @@ static void cmd_pause(AudioPlayer *ap, const bool value) {
     if ((SDL_AtomicGet(&ap->paused) != 0) == value) return;
     SDL_AtomicSet(&ap->paused, value);
     lock_mixer(ap);
-    mixer_set_pause(ap, value, &ap->crossfade.on_pause);
+    mixer_set_pause(ap, value, ap->crossfade.on_pause.seconds, &ap->pause_curve);
     unlock_mixer(ap);
     update_device_running(ap);
 }
@@ -492,10 +500,18 @@ static void cmd_set_loop(AudioPlayer *ap, const int loop_count) {
     unlock_mixer(ap);
 }
 
+// The curves are sampled here, on the control thread: a custom curve is called now and never by the mixer
 static void apply_crossfade_config(AudioPlayer *ap, const CrossfadeConfig *cfg) {
     ap->crossfade = *cfg;
+    fade_curve_build(&ap->play_curve, &cfg->on_play);
+    fade_curve_build(&ap->skip_curve, &cfg->on_skip);
+    fade_curve_build(&ap->stop_curve, &cfg->on_stop);
+    fade_curve_build(&ap->pause_curve, &cfg->on_pause);
+    FadeCurve end_curve;
+    fade_curve_build(&end_curve, &cfg->on_track_end);
     lock_mixer(ap);
     ap->mixer.end_fade = cfg->on_track_end;
+    ap->mixer.end_curve = end_curve;
     ap->mixer.min_track_seconds = cfg->min_track_seconds;
     unlock_mixer(ap);
 }
@@ -1035,6 +1051,9 @@ int au_initialize(const InitializeConfig* config) {
     ap->mixer.pause_gain = 1.0f;
     ap->mixer.pause_to = 1.0f;
     ap->mixer.vol_gain = (float)SDL_AtomicGet(&ap->volume) / 100.0f;
+    fade_curve_build(&ap->mixer.linear_curve, NULL);
+    const CrossfadeConfig no_fades = {0};
+    apply_crossfade_config(ap, &no_fades); // no device yet: lock_mixer() does nothing
 
     ap->msg_mutex = SDL_CreateMutex();
     ap->msg_cond = SDL_CreateCond();

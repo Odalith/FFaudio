@@ -104,6 +104,10 @@ if(NOT BUILD_SHARED_LIBS)
     target_compile_definitions(ffaudio PUBLIC FFAUDIO_STATIC)
 endif()
 target_compile_options(ffaudio PRIVATE ${FFAUDIO_WARNINGS} ${SAN_FLAGS})
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    # Nothing reads errno after a math call; this lets the compiler inline lrintf() and friends in the mixer
+    target_compile_options(ffaudio PRIVATE -fno-math-errno)
+endif()
 target_link_options(ffaudio PRIVATE ${SAN_FLAGS})
 
 if(FFAUDIO_RELOCATABLE AND NOT WIN32)

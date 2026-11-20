@@ -26,6 +26,14 @@
   long-running player grow (240 MB after 2 hours in the soak test, still rising); fixed malloc thresholds
   (`GLIBC_TUNABLES` or `mallopt()`) kept it flat at about 80 MB.
 
+### Changed
+- The audio callback no longer takes locks, frees memory or wakes other threads: decoded audio reaches the mixer
+  through a lock-free ring per track, and the mixer computes gains per 64-frame block. Seeking a paused or queued
+  track no longer leaves it to start with a gap.
+- Custom fade curves (`AuFade.custom`) are sampled at 257 points when the fade is set up (`au_set_crossfade()`, or
+  queueing a track with `PlayAudioConfig.fade_in`), on ffaudio's control thread, instead of being called on the
+  audio thread throughout the fade; `custom_user` only has to live until that call has been processed.
+
 ### Fixed
 - A track replaced with a fade too short for one sample, or before `au_configure_audio_device()` (two
   `au_play_audio()` calls were enough), was never ended: its threads and file stayed open until shutdown and its
