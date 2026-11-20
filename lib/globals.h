@@ -23,8 +23,10 @@
  *
  * Threading model (see ARCHITECTURE in readme.md):
  *  - control thread : owns every TrackState (creation, slot changes, destruction) and runs user callbacks
- *  - read thread    : one per track, demuxes packets into audio_queue
- *  - audio thread   : one per track, decodes + filters into its SampleRing (float32 at the output rate/layout)
+ *  - worker thread  : one per track: opens it, reads it (local files), decodes and filters into its SampleRing
+ *                     (float32 at the output rate/layout)
+ *  - reader thread  : network tracks only: reads ahead into audio_queue, so a stalled connection does not stop the
+ *                     worker from decoding what is queued
  *  - SDL callback   : mixer, takes from the rings without locks, never allocates, frees or signals
  * Mixer slots (Mixer.current/next/outgoing) are only changed while holding the SDL audio device lock.
  */
@@ -94,19 +96,22 @@ typedef struct AudioParams {
     enum AVSampleFormat fmt;
 } AudioParams;
 
+// Where the decoder gets its packets: 1 with a packet (an empty one = the end, drain), -1 when aborted
+typedef int (*DecoderGetPacket)(void *ctx, AVPacket *pkt, int *serial);
+
 typedef struct Decoder {
     AVPacket *pkt;
-    PacketQueue *queue;
+    PacketQueue *queue;                 // its serial and abort state (local tracks put no packets in it)
+    DecoderGetPacket get_packet;
+    void *get_ctx;
     AVCodecContext *avctx;
     int32_t pkt_serial;
     int32_t finished;
     int32_t packet_pending;
-    SDL_cond *empty_queue_cond;
     int64_t start_pts;
     AVRational start_pts_tb;
     int64_t next_pts;
     AVRational next_pts_tb;
-    SDL_Thread *decoder_tid;
 } Decoder;
 
 //+-----------------------------------------------------+
@@ -186,10 +191,15 @@ typedef struct TrackState {
     float gain_target;                  // SDL callback only: linear gain of gain_packed (powf only on a change)
 
     // ---- threads ----
-    SDL_Thread *read_tid;
+    // The worker opens the input and decodes; for a local file it also reads it. A network stream also gets a
+    // reader thread that reads ahead into audio_queue (a stalled connection must not stop decoding what is queued).
+    SDL_Thread *worker_tid;
+    SDL_Thread *reader_tid;
     SDL_atomic_t abort_request;
-    SDL_cond *continue_read_thread;
+    SDL_atomic_t seek_pending;          // 1 = a seek request waits (set under seek_mutex, cleared when it is done)
+    SDL_cond *continue_read_thread;     // wakes whoever reads (worker or reader): seeks and aborts
     SDL_mutex *wait_mutex;
+    int32_t read_errors;                // worker: read errors in a row (local files)
 
     // ---- seek requests (control thread -> read thread), guarded by seek_mutex ----
     SDL_mutex *seek_mutex;              // also guards filtergraph_str, filter_cmds and end_pos_us
@@ -231,6 +241,7 @@ typedef struct TrackState {
                                         // taken off frame timestamps so positions count from 0
     SDL_atomic_t buffering;             // 1 = waiting for data: the mixer takes nothing, the position holds
     SDL_atomic_t buffered_ms;           // read thread: audio queued, for on_buffering
+    SDL_atomic_t read_ended;            // 1 = the reader is at the end (demux_eof, for the worker to see)
     bool stalled;                       // SDL callback only: ran dry while playing; fades back in when data returns
     int resume_fade, resume_fade_len;   // SDL callback only: frames left of that fade-in, and its length
     int buffering_reported;             // control thread: last state sent to on_buffering (-1 = none yet)

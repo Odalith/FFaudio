@@ -431,7 +431,7 @@ macOS allocators return memory to the system more readily.
 
 ## Architecture
 ```
- app ──au_*()──▶ control thread ──creates/destroys──▶ tracks (one read thread + one decode thread each)
+ app ──au_*()──▶ control thread ──creates/destroys──▶ tracks (one thread each; streams also a reader)
                   │  ▲ events                            │ demux → decode → convert graph → user graph
                   ▼  │                                   ▼
             mixer slots (current / next / outgoing) ◀── lock-free ring of float frames (~0.5 s per track)
@@ -440,12 +440,14 @@ macOS allocators return memory to the system more readily.
             SDL audio callback: gapless handover, crossfades, gain ramps, dither → device
 ```
 - `lib/ffaudio.c`: public API and the control thread; the only place tracks are created, moved and freed.
-- `lib/track.c`: per-track read and decode threads, filter graphs, and the non-blocking `track_pull()`.
+- `lib/track.c`: the per-track worker (and a reader thread for network streams), filter graphs, and the
+  non-blocking `track_pull()`.
 - `lib/output.c`: device handling and the mixer (SDL callback). It never blocks, allocates, frees or signals.
 - `lib/sample_ring.c`: the lock-free ring between a track's decoder and the mixer.
 - `lib/filtergraph.c`: the convert graph (decoder format → output format) and the user graph (filters).
 - `lib/filters.c`: the filter-string builder (`ffaudio_filters.h`).
-- `lib/packet_queue_utils.c`, `lib/decoder_utils.c`: the packet queue and the decoder loop, from FFplay.
+- `lib/packet_queue_utils.c`, `lib/decoder_utils.c`: the packet queue (network streams) and the decoder loop, from
+  FFplay.
 
 ## Testing
 `ctest` runs headless suites with SDL's dummy and disk drivers:

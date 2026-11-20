@@ -25,14 +25,15 @@ void decoder_destroy(Decoder *d) {
     avcodec_free_context(&d->avctx);
 }
 
-int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, SDL_cond *empty_queue_cond) {
+int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, DecoderGetPacket get_packet, void *ctx) {
     memset(d, 0, sizeof(Decoder));
     d->pkt = av_packet_alloc();
     if (!d->pkt)
         return AVERROR(ENOMEM);
     d->avctx = avctx;
     d->queue = queue;
-    d->empty_queue_cond = empty_queue_cond;
+    d->get_packet = get_packet;
+    d->get_ctx = ctx;
     d->start_pts = AV_NOPTS_VALUE;
     d->pkt_serial = -1;
     return 0;
@@ -71,13 +72,11 @@ int decoder_decode_frame(Decoder *d, AVFrame *frame) {
         }
 
         do {
-            // Wake the read thread so it can top up the queue (it re-checks the queue level itself)
-            SDL_CondSignal(d->empty_queue_cond);
             if (d->packet_pending) {
                 d->packet_pending = 0;
             } else {
                 int old_serial = d->pkt_serial;
-                if (packet_queue_get(d->queue, d->pkt, 1, &d->pkt_serial) < 0)
+                if (d->get_packet(d->get_ctx, d->pkt, &d->pkt_serial) < 0)
                     return -1;
                 if (old_serial != d->pkt_serial) {
                     avcodec_flush_buffers(d->avctx);
@@ -98,28 +97,4 @@ int decoder_decode_frame(Decoder *d, AVFrame *frame) {
             av_packet_unref(d->pkt);
         }
     }
-}
-
-
-
-void decoder_abort(Decoder *d, SDL_mutex *wake_mutex, SDL_cond *wake_cond)
-{
-    packet_queue_abort(d->queue);
-    SDL_LockMutex(wake_mutex);
-    SDL_CondSignal(wake_cond);
-    SDL_UnlockMutex(wake_mutex);
-    SDL_WaitThread(d->decoder_tid, NULL);
-    d->decoder_tid = NULL;
-    packet_queue_flush(d->queue);
-}
-
-int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name, void* arg)
-{
-    packet_queue_start(d->queue);
-    d->decoder_tid = SDL_CreateThread(fn, thread_name, arg);
-    if (!d->decoder_tid) {
-        av_log(NULL, AV_LOG_ERROR, "SDL_CreateThread(): %s\n", SDL_GetError());
-        return AVERROR(ENOMEM);
-    }
-    return 0;
 }

@@ -30,6 +30,10 @@
 - The audio callback no longer takes locks, frees memory or wakes other threads: decoded audio reaches the mixer
   through a lock-free ring per track, and the mixer computes gains per 64-frame block. Seeking a paused or queued
   track no longer leaves it to start with a gap.
+- One thread per local track instead of two (network streams keep their reader thread): it reads, decodes and
+  filters, waits for events instead of polling every 10 ms, and stops at the end of a file instead of reading it again
+  100 times a second until the track is removed. Playing one track: 4 threads instead of 5, about a third fewer
+  context switches.
 - Custom fade curves (`AuFade.custom`) are sampled at 257 points when the fade is set up (`au_set_crossfade()`, or
   queueing a track with `PlayAudioConfig.fade_in`), on ffaudio's control thread, instead of being called on the
   audio thread throughout the fade; `custom_user` only has to live until that call has been processed.
