@@ -86,11 +86,12 @@ static void push_event(Mixer *m, const MixerEventType type, TrackState *t, const
 //| Transitions                                         |
 //+-----------------------------------------------------+
 
-void mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *incoming, const AuFade *fade) {
+bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *incoming, const AuFade *fade) {
     Mixer *m = &ap->mixer;
     const int64_t len = (fade && fade->seconds > 0 && m->rate > 0) ? (int64_t)(fade->seconds * m->rate) : 0;
+    if (len <= 0) return false; // shorter than a frame, or no device yet: the caller cuts
 
-    if (outgoing && len > 0) {
+    if (outgoing) {
         if (m->outgoing && m->outgoing != outgoing) {
             // Only one track can fade out at a time: the older one is cut
             m->outgoing->role = ROLE_NONE;
@@ -117,13 +118,12 @@ void mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *i
     m->in_fade.active = false;
     if (incoming) {
         incoming->role = ROLE_CURRENT;
-        if (len > 0) {
-            m->in_fade.active = true;
-            m->in_fade.pos = 0;
-            m->in_fade.len = len;
-            m->in_fade.fade = *fade;
-        }
+        m->in_fade.active = true;
+        m->in_fade.pos = 0;
+        m->in_fade.len = len;
+        m->in_fade.fade = *fade;
     }
+    return true;
 }
 
 void mixer_set_pause(AudioPlayer *ap, const bool paused, const AuFade *fade) {
@@ -198,8 +198,9 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 
     AuFade f = *fade;
     f.seconds = remaining; // end exactly when the current track does
-    m->current->fade_reason = END_NATURAL;
-    mixer_start_transition(ap, m->current, m->next, &f);
+    TrackState *cur = m->current;
+    if (mixer_start_transition(ap, cur, m->next, &f))
+        cur->fade_reason = END_NATURAL;
 }
 
 //+-----------------------------------------------------+

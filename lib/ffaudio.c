@@ -360,12 +360,8 @@ static void cmd_play(AudioPlayer *ap, const Msg *msg) {
     Mixer *m = &ap->mixer;
     TrackState *old = m->current;
     const AuFade *fade = fade_for(t, &ap->crossfade.on_play);
-    bool faded = false;
-    if (old && fade->seconds > 0 && !SDL_AtomicGet(&ap->paused)) {
-        old->fade_reason = END_SKIPPED;
-        mixer_start_transition(ap, old, t, fade);
-        faded = true;
-    }
+    const bool faded = old && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, old, t, fade);
+    if (faded) old->fade_reason = END_SKIPPED;
     else {
         if (old) remove_from_mixer(ap, old);
         set_current_slot(ap, t);
@@ -401,12 +397,8 @@ static void cmd_skip(AudioPlayer *ap) {
     Mixer *m = &ap->mixer;
     TrackState *cur = m->current, *next = m->next;
     const AuFade *fade = fade_for(next, &ap->crossfade.on_skip);
-    bool faded = false;
-    if (cur && fade->seconds > 0 && !SDL_AtomicGet(&ap->paused)) {
-        cur->fade_reason = END_SKIPPED;
-        mixer_start_transition(ap, cur, next, fade);
-        faded = true;
-    }
+    const bool faded = cur && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, cur, next, fade);
+    if (faded) cur->fade_reason = END_SKIPPED;
     else {
         if (cur) remove_from_mixer(ap, cur);
         if (next) set_current_slot(ap, next);
@@ -439,10 +431,9 @@ static void cmd_stop(AudioPlayer *ap) {
         remove_from_mixer(ap, next);
         removed[n_removed++] = next;
     }
-    if (cur && fade->seconds > 0 && !SDL_AtomicGet(&ap->paused)) {
-        // Fade out; a track that was already fading out is cut and reported through a mixer event
+    if (cur && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, cur, NULL, fade)) {
+        // Fading out; a track that was already fading out is cut and reported through a mixer event
         cur->fade_reason = END_SKIPPED;
-        mixer_start_transition(ap, cur, NULL, fade);
     }
     else {
         if (cur) {

@@ -34,8 +34,9 @@ void output_set_running(AudioPlayer *ap, bool running);
 float fade_curve_gain(const AuFade *fade, float t);
 
 // Control thread, device lock held: start a fade-out of `outgoing` and a fade-in of `incoming`.
-// Either may be NULL. seconds <= 0 cuts.
-void mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *incoming, const AuFade *fade);
+// Either may be NULL. Returns false, changing nothing, when the fade is shorter than one frame (or no device is open
+// yet); the caller then cuts.
+bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *incoming, const AuFade *fade);
 
 // Control thread, device lock held: fade the master gain for pause (to 0) or resume (to 1)
 void mixer_set_pause(AudioPlayer *ap, bool paused, const AuFade *fade);
