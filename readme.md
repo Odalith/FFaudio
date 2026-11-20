@@ -1,4 +1,6 @@
-⚠️ This project is in alpha. The API may still change between versions.
+<img width="1815" height="150" alt="banner" src="https://github.com/user-attachments/assets/46466334-645f-4585-a24c-55f315cc892c" />
+
+⚠️ This project is in beta since 2.0.0. The API may still change between versions.
 
 ### FFaudio is a music playback library for C99, built on FFmpeg & SDL2.
 It started as a heavily modified FFplay, so credit for the original design goes to the FFmpeg team and contributors.
