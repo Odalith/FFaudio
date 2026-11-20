@@ -57,7 +57,7 @@ typedef struct TsServer {
     char last_path[512];
     char last_user_agent[256];
     char paths[64][128];            // the first 64 request paths, in order
-    char dropped[16][128];          // paths whose ?drop has been done
+    char dropped[256][128];         // URLs whose ?drop has been done
     int n_dropped;
 } TsServer;
 
@@ -87,8 +87,10 @@ static void ts_parse_options(TsServer *s, char *path, TsOptions *o) {
         SDL_LockMutex(s->lock);
         bool done = false;
         for (int i = 0; i < s->n_dropped; i++) done = done || !strcmp(s->dropped[i], key);
-        if (done) o->drop = 0;
-        else if (s->n_dropped < 16) snprintf(s->dropped[s->n_dropped++], sizeof(s->dropped[0]), "%s", key);
+        // Once the table is full no more drops: dropping a URL on every request would make each reconnect fetch
+        // just a few bytes before the next drop
+        if (done || s->n_dropped >= (int)(sizeof(s->dropped) / sizeof(s->dropped[0]))) o->drop = 0;
+        else snprintf(s->dropped[s->n_dropped++], sizeof(s->dropped[0]), "%s", key);
         SDL_UnlockMutex(s->lock);
     }
 }
