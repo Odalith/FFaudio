@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.1 (unreleased)
+
+### Fixed
+- A track replaced with a fade too short for one sample, or before `au_configure_audio_device()` (two
+  `au_play_audio()` calls were enough), was never ended: its threads and file stayed open until shutdown and its
+  `on_eof` never came. Such fades are now cuts.
+- ffaudio emptied SDL's event queue, so applications that also use SDL lost their keyboard, mouse and window
+  events. It now only watches for audio device events and leaves the queue alone; it pumps the queue only when
+  SDL video is not initialized (with video, the application's event loop does it).
+
 ## 2.1.0 (unreleased)
 
 ### Added

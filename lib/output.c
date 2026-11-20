@@ -484,6 +484,7 @@ void output_set_running(AudioPlayer *ap, const bool running) {
 
 void output_close(AudioPlayer *ap) {
     if (ap->device_id) {
+        SDL_AtomicSet(&ap->open_device, 0);
         SDL_CloseAudioDevice(ap->device_id); // waits for a running callback
         ap->device_id = 0;
     }
@@ -585,6 +586,7 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
     }
 
     ap->device_id = id;
+    SDL_AtomicSet(&ap->open_device, (int)id);
     ap->obtained_spec = obtained;
     ap->device_running = false;
     ap->is_audio_device_initialized = true;

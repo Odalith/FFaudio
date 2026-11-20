@@ -775,6 +775,20 @@ static void check_device_list(AudioPlayer *ap) {
     }
 }
 
+// SDL calls this for every event added to its queue, on the thread that adds it. It only looks: the events stay in
+// the queue for the application (taking them used to swallow the keyboard, mouse and window events of applications
+// that also use SDL).
+static int SDLCALL device_event_watch(void *userdata, SDL_Event *e) {
+    AudioPlayer *ap = userdata;
+    if ((e->type == SDL_AUDIODEVICEADDED || e->type == SDL_AUDIODEVICEREMOVED) && !e->adevice.iscapture) {
+        SDL_AtomicSet(&ap->device_events, 1);
+        const int open = SDL_AtomicGet(&ap->open_device);
+        if (e->type == SDL_AUDIODEVICEREMOVED && open && e->adevice.which == (Uint32)open)
+            SDL_AtomicSet(&ap->open_device_lost, 1);
+    }
+    return 1;
+}
+
 static void housekeeping(AudioPlayer *ap) {
     lock_mixer(ap);
     TrackState *cur = ap->mixer.current;
@@ -825,20 +839,17 @@ static void housekeeping(AudioPlayer *ap) {
         }
     }
 
-    // Devices coming and going
-    bool check_devices = false;
-    SDL_Event e;
-    while (SDL_PollEvent(&e)) {
-        if ((e.type == SDL_AUDIODEVICEADDED || e.type == SDL_AUDIODEVICEREMOVED) && !e.adevice.iscapture)
-            check_devices = true;
-        if (e.type == SDL_AUDIODEVICEREMOVED && !e.adevice.iscapture && ap->device_id &&
-            e.adevice.which == ap->device_id) {
-            ff_log(AU_LOG_WARNING, "Audio device removed, switching to the default device");
-            ap->use_default_device = true;
-            av_freep(&ap->audio_device_name);
-            ap->audio_device_index = -1;
-            reopen_output(ap, true, NULL, -1);
-        }
+    // Devices coming and going, as seen by device_event_watch. SDL3 (under sdl2-compat) only delivers device events
+    // while the queue is pumped: an application with SDL video does that itself, on the thread SDL requires for
+    // video, so it is only done here without video.
+    if (!SDL_WasInit(SDL_INIT_VIDEO)) SDL_PumpEvents();
+    const bool check_devices = SDL_AtomicSet(&ap->device_events, 0) != 0;
+    if (SDL_AtomicSet(&ap->open_device_lost, 0) && ap->device_id) {
+        ff_log(AU_LOG_WARNING, "Audio device removed, switching to the default device");
+        ap->use_default_device = true;
+        av_freep(&ap->audio_device_name);
+        ap->audio_device_index = -1;
+        reopen_output(ap, true, NULL, -1);
     }
     // SDL2 only reports the removal of the open device, so the list is also compared every few seconds
     if (check_devices || SDL_GetTicks() - ap->devices_checked_at >= DEVICE_POLL_MS)
@@ -1052,6 +1063,7 @@ int au_initialize(const InitializeConfig* config) {
         if (config->on_log) config->on_log(SDL_GetError(), 0, AU_LOG_FATAL, config->user_data);
         goto fail_sync;
     }
+    SDL_AddEventWatch(device_event_watch, ap);
 
     ap->use_soxr = filtergraph_soxr_available();
     // Filter graphs run audio in small chunks; FFmpeg's default (a thread pool per graph, one thread per core) gave
@@ -1076,6 +1088,7 @@ int au_initialize(const InitializeConfig* config) {
             msg_free(m);
         }
         avformat_network_deinit();
+        SDL_DelEventWatch(device_event_watch, ap);
         SDL_QuitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS);
         goto fail_sync;
     }
@@ -1115,6 +1128,7 @@ void au_shutdown(void) {
     }
     SDL_DestroySemaphore(done);
     SDL_WaitThread(ap->control_thread, NULL);
+    SDL_DelEventWatch(device_event_watch, ap); // returns once a watch call in progress has finished
 
     SDL_mutex *lock = lifecycle_mutex();
     SDL_LockMutex(lock);

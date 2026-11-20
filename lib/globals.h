@@ -500,6 +500,10 @@ typedef struct AudioPlayer {
     int32_t n_known_devices;
     bool devices_checked_once;          // control thread: the first comparison only records the list
     uint32_t devices_checked_at;        // control thread: SDL_GetTicks() of the last comparison
+    // Set by an SDL event watch (on whichever thread adds events to SDL's queue), taken by the control thread
+    SDL_atomic_t device_events;         // 1 = an output device was added or removed
+    SDL_atomic_t open_device;           // device_id, for the watch
+    SDL_atomic_t open_device_lost;      // 1 = the open device was removed
 
     // ---- mixer (SDL callback; others under SDL_LockAudioDevice) ----
     Mixer mixer;

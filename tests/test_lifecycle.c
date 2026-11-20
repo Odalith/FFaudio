@@ -110,6 +110,21 @@ static void test_fade_without_frames_cuts(void) {
     au_shutdown();
 }
 
+// ffaudio watches SDL's event queue for device changes but takes nothing from it: the application's events stay
+static void test_sdl_events_left_alone(void) {
+    REQUIRE(tc_init_player(0) == 0);
+    const Uint32 type = SDL_RegisterEvents(1);
+    REQUIRE(type != (Uint32)-1);
+    SDL_Event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = type;
+    REQUIRE(SDL_PushEvent(&ev) == 1);
+    au_play_audio(fx("s44_stereo.flac"), NULL);
+    tc_sleep_ms(300);   // dozens of control thread iterations
+    CHECK(SDL_PeepEvents(&ev, 1, SDL_GETEVENT, type, type) == 1);
+    au_shutdown();
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
     RUN_TEST(test_calls_before_init);
@@ -118,5 +133,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_reinit);
     RUN_TEST(test_device_name_and_no_spurious_changes);
     RUN_TEST(test_fade_without_frames_cuts);
+    RUN_TEST(test_sdl_events_left_alone);
     return tc_finish("test_lifecycle");
 }
