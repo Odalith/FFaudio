@@ -1179,6 +1179,12 @@ int au_get_audio_devices(int *out_total, char ***out_devices) {
     return AU_OK;
 }
 
+void au_free_audio_devices(char **devices, const int total) {
+    if (!devices) return;
+    for (int i = 0; i < total; i++) free(devices[i]);
+    free(devices);
+}
+
 int au_get_audio_device_name(char *buf, const size_t size) {
     AudioPlayer *ap = audio_player;
     if (!buf || !size) return AU_ERR_INVALID_ARGUMENT;

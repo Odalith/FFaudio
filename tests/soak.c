@@ -178,10 +178,7 @@ static void on_devices_changed(void *ud) {
     (void)ud;
     int n = 0;
     char **devs = NULL;
-    if (au_get_audio_devices(&n, &devs) == AU_OK) {
-        for (int i = 0; i < n; i++) free(devs[i]);
-        free(devs);
-    }
+    if (au_get_audio_devices(&n, &devs) == AU_OK) au_free_audio_devices(devs, n);
 }
 
 //+-----------------------------------------------------+

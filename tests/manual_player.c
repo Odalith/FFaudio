@@ -248,8 +248,8 @@ static void on_devices_changed(void *ud) {
     char **devs = NULL;
     printf("  output devices changed:\n");
     if (au_get_audio_devices(&n, &devs) == AU_OK) {
-        for (int i = 0; i < n; i++) { printf("    %d: %s\n", i, devs[i]); free(devs[i]); }
-        free(devs);
+        for (int i = 0; i < n; i++) printf("    %d: %s\n", i, devs[i]);
+        au_free_audio_devices(devs, n);
     }
 }
 
@@ -526,8 +526,8 @@ int main(int argc, char **argv) {
     int n = 0;
     char **devs = NULL;
     if (au_get_audio_devices(&n, &devs) == AU_OK) {
-        for (int i = 0; i < n; i++) { printf("device %d: %s\n", i, devs[i]); free(devs[i]); }
-        free(devs);
+        for (int i = 0; i < n; i++) printf("device %d: %s\n", i, devs[i]);
+        au_free_audio_devices(devs, n);
     }
     au_configure_audio_device(NULL);
 

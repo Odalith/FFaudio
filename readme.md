@@ -106,7 +106,8 @@ Playback functions never block: they are queued and run in order on ffaudio's co
 At other speeds, positions and durations stay in file time, while crossfade lengths and `prepare_next_seconds` stay
 in wall clock time; a speed change is heard within about half a second and never leaves a gap.
 
-Devices: `au_get_audio_devices()` lists the outputs, `au_get_audio_device_name()` names the one in use, and
+Devices: `au_get_audio_devices()` lists the outputs (free the list with `au_free_audio_devices()`),
+`au_get_audio_device_name()` names the one in use, and
 `on_audio_devices_changed` fires when outputs are plugged in or removed. With `au_configure_audio_device(NULL)`
 playback follows the system default device; a chosen device that disappears falls back to the default.
 
@@ -346,6 +347,33 @@ au_shutdown();   // not from inside a callback; au_initialize() may be called ag
   the callback returns.
 - `on_eof` is called exactly once for every handle returned by `au_play_audio()`/`au_set_next()`.
 - Custom fade curves (`AuFadeCurveFn`) are the exception: they run on the audio thread and must be fast.
+
+## Memory use
+Free what ffaudio returns with ffaudio's functions (`au_media_info_free()`, `au_free_audio_devices()`,
+`au_fb_free()`, `au_free()`, ...), never with your own `free()`: on Windows a program and a DLL can use different C
+runtimes, and freeing across them corrupts the heap.
+
+On Linux, a process using ffaudio can appear to grow for a while and then level off. That growth is not a leak.
+glibc's `malloc` keeps memory that has been freed, so it can be reused, instead of returning it to the system, and
+it keeps a separate pool ("arena") for each thread that allocates. Every pool holds on to its own peak: decoded
+audio, packets and filter buffers that were freed long ago still count as resident memory until they are reused.
+Once each pool has seen its peak, the total stops growing.
+
+`tests/soak.c` measures this: it plays a music library for hours at 10x speed while changing tracks, seeking,
+switching filters, speed and ReplayGain settings, measuring loudness in the background and restarting the player.
+In an 8-hour run, the memory ffaudio actually uses stayed at a few MB, while the process' RSS rose to about
+145 MB in the first hour and then stayed there. A plain player, with one track and no background measurement,
+needs less. AddressSanitizer runs of the same test found no leaks.
+
+If the resident size matters (a small device, a player that runs for weeks), the application can:
+- limit glibc to a few pools: `MALLOC_ARENA_MAX=2` in the environment, or `mallopt(M_ARENA_MAX, 2)` at start-up
+  before any threads are created. In the soak test this cut RSS to about 94 MB;
+- call `malloc_trim(0)` now and then, e.g. after a track change, to return free pages to the system (a smaller
+  effect: about 130 MB);
+- use another allocator (jemalloc, mimalloc, tcmalloc) by linking it or with `LD_PRELOAD`.
+
+All of these change the whole process, which is why ffaudio leaves the choice to the application. Windows and
+macOS allocators return memory to the system more readily.
 
 ## Architecture
 ```

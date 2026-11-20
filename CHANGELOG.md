@@ -7,6 +7,13 @@
   thread pool each (up to ~37 threads per track, 48-96 for the player on 12 cores). Playback now decodes and
   filters on the track's own threads; loudness analysis uses at most 4 decoder threads (as fast as one per core
   for hi-res FLAC). Found with the new soak test (`tests/soak.c`).
+- `au_free()` is declared in `ffaudio.h` (it was in `ffaudio_filters.h`), as the general way to free memory
+  ffaudio returns.
+- The readme explains memory use on Linux (glibc keeping freed memory per thread) and what applications can do.
+
+### Added
+- `au_free_audio_devices()` frees the list from `au_get_audio_devices()`. Freeing it with the application's own
+  `free()` breaks on Windows when the application and ffaudio use different C runtimes.
 
 ## 2.0.0 (2026-11-19)
 
