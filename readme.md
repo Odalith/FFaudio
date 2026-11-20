@@ -361,9 +361,11 @@ Once each pool has seen its peak, the total stops growing.
 
 `tests/soak.c` measures this: it plays a music library for hours at 10x speed while changing tracks, seeking,
 switching filters, speed and ReplayGain settings, measuring loudness in the background and restarting the player.
-In an 8-hour run, the memory ffaudio actually uses stayed at a few MB, while the process' RSS rose to about
-145 MB in the first hour and then stayed there. A plain player, with one track and no background measurement,
-needs less. AddressSanitizer runs of the same test found no leaks.
+In an 8-hour run (8,900 tracks, 35,000 random actions, 9,400 loudness analyses), the memory ffaudio actually uses
+stayed at a few MB, while the process' RSS rose to about 145 MB in the first hour and then moved between 110 and
+170 MB, without growing, for the remaining seven (2.0.0, with a thread pool per decoder and filter graph, levelled
+off at 300-350 MB). A plain player, with one track and no background measurement, needs less.
+AddressSanitizer runs of the same test found no leaks.
 
 If the resident size matters (a small device, a player that runs for weeks), the application can:
 - limit glibc to a few pools: `MALLOC_ARENA_MAX=2` in the environment, or `mallopt(M_ARENA_MAX, 2)` at start-up
