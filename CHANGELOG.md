@@ -11,6 +11,10 @@
   SDL video is not initialized (with video, the application's event loop does it).
 - A callback that caused many notifications at once (e.g. changing the device from `on_eof`) could make ffaudio free
   memory it had already freed.
+- Rare races: the last frames of a track could be cut when they arrived just as the mixer found the queue empty, and
+  `au_set_loop_count(0)` at the moment a loop started could turn into looping forever.
+- Tracks are destroyed without waiting up to 100 ms for a decoder that waits for an output device, and
+  `au_seek_percent()` on a track still opening is picked up at once.
 
 ## 2.1.0 (unreleased)
 

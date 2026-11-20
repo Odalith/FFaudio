@@ -230,6 +230,12 @@ static void wait_ms(TrackState *t, int ms) {
     SDL_UnlockMutex(t->wait_mutex);
 }
 
+static void wake_read_thread(TrackState *t) {
+    SDL_LockMutex(t->wait_mutex);
+    SDL_CondSignal(t->continue_read_thread);
+    SDL_UnlockMutex(t->wait_mutex);
+}
+
 double track_start_position(const TrackState *t) {
     return t->start_time != AV_NOPTS_VALUE ? t->start_time / AV_TIME_BASE_DOUBLE : 0.0;
 }
@@ -337,11 +343,11 @@ void track_destroy(TrackState *t) {
         SDL_AtomicSet(&t->abort_request, 1);
         packet_queue_abort(&t->audio_queue);
         if (t->sampq.mutex) frame_queue_signal(&t->sampq);
-        if (t->wait_mutex && t->continue_read_thread) {
-            SDL_LockMutex(t->wait_mutex);
-            SDL_CondSignal(t->continue_read_thread);
-            SDL_UnlockMutex(t->wait_mutex);
-        }
+        if (t->wait_mutex && t->continue_read_thread) wake_read_thread(t);
+        // A decoder waiting for an output device (ensure_convert_graph) sees the abort now instead of after 100 ms
+        SDL_LockMutex(t->ap->format_mutex);
+        SDL_CondBroadcast(t->ap->format_cond);
+        SDL_UnlockMutex(t->ap->format_mutex);
         // The read thread stops the decoder thread and closes the input before it returns
         SDL_WaitThread(t->read_tid, NULL);
         t->read_tid = NULL;
@@ -379,10 +385,7 @@ void track_request_seek(TrackState *t, int64_t pos_us) {
     t->seek_req = true;
     t->pending_seek_percent = -1;
     SDL_UnlockMutex(t->seek_mutex);
-
-    SDL_LockMutex(t->wait_mutex);
-    SDL_CondSignal(t->continue_read_thread);
-    SDL_UnlockMutex(t->wait_mutex);
+    wake_read_thread(t);
 }
 
 void track_request_seek_percent(TrackState *t, const double percent) {
@@ -390,6 +393,7 @@ void track_request_seek_percent(TrackState *t, const double percent) {
     SDL_LockMutex(t->seek_mutex);
     t->pending_seek_percent = percent;
     SDL_UnlockMutex(t->seek_mutex);
+    wake_read_thread(t);
 }
 
 void track_update_gain(TrackState *t) {
@@ -564,12 +568,19 @@ static int seek_file(TrackState *t, int64_t pos_us) {
     return avformat_seek_file(ic, -1, INT64_MIN, target, INT64_MAX, 0);
 }
 
+// One more loop to play? Takes it from the count in one step: au_set_loop_count() can store a new count at any time,
+// and a separate read and decrement could turn its 0 into -1 (loop forever)
+static bool take_loop(TrackState *t) {
+    for (;;) {
+        const int loops = SDL_AtomicGet(&t->loops_remaining);
+        if (loops <= 0) return loops < 0;
+        if (SDL_AtomicCAS(&t->loops_remaining, loops, loops - 1)) return true;
+    }
+}
+
 // Demuxer reached the end of what should be played. Returns true when the track keeps going (looping).
 static bool handle_demux_end(TrackState *t, AVPacket *pkt) {
-    int loops = SDL_AtomicGet(&t->loops_remaining);
-    if (loops != 0 && !SDL_AtomicGet(&t->had_error)) {
-        if (loops > 0)
-            SDL_AtomicAdd(&t->loops_remaining, -1);
+    if (!SDL_AtomicGet(&t->had_error) && take_loop(t)) {
         // Seek back without flushing the queues so the loop is gapless; the mixer reports the restart when it
         // is heard (it only reports backward jumps of the timestamps that match a counted loop)
         if (seek_file(t, t->start_time != AV_NOPTS_VALUE ? t->start_time : 0) >= 0) {
@@ -1237,9 +1248,12 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
 
     while (written < frames) {
         if (!t->cur) {
+            // The end marker is read before the queue: the decoder sets it after pushing its last frames, so an empty
+            // queue after a set marker really is the end (read the other way round, those frames could be cut)
+            const bool ended = SDL_AtomicGet(&t->eos_serial) == serial;
             Frame *f = frame_queue_peek_nb(&t->sampq);
             if (!f) {
-                if (SDL_AtomicGet(&t->eos_serial) == serial)
+                if (ended)
                     *eos = true;
                 else if (t->network && t->started) {
                     // The network fell behind: wait for buffer_seconds of data instead of stuttering
