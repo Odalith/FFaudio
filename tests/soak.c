@@ -20,7 +20,8 @@
  *     -m           call malloc_trim(0) after every sample (glibc), to see how much of the growth is memory that
  *                  malloc has freed but kept
  *     -B seconds   network read-ahead (AuNetworkConfig.max_buffer_seconds; default: ffaudio's)
- *     -w percent   play this share of picks over HTTP from a local server (tests/http_server.h): files with range
+ *     -w percent   play this share of picks over HTTP from a local server (tests/http_server.h, in a child process
+ *                  so its threads and memory are not measured): files with range
  *                  requests, and MP3s also as endless live streams with "now playing" titles, sometimes throttled
  *                  below real time (stalls) or with dropped connections (reconnects). Default 0
  *     -v           print every ffaudio log message
@@ -38,6 +39,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -111,14 +113,46 @@ static int junk_percent = 3;
 
 static int web_percent;
 static double max_buffer_seconds;   // -B, 0 = ffaudio's default
-static TsServer server;
+static int server_port;
+static pid_t server_pid;
+
+// The HTTP server runs in its own process (forked before any thread exists), so the soak measures ffaudio alone
+static bool start_server_process(void) {
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    const pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        close(fds[0]);
+        TsServer srv;
+        int port = 0;
+        if (SDL_Init(0) == 0 && ts_start(&srv, "")) port = srv.port;
+        if (write(fds[1], &port, sizeof(port)) != (ssize_t)sizeof(port)) _exit(1);
+        close(fds[1]);
+        if (!port) _exit(1);
+        signal(SIGINT, SIG_IGN);    // Ctrl-C is for the soak; the soak ends this process when it is done
+        for (;;) pause();
+    }
+    close(fds[1]);
+    const bool ok = read(fds[0], &server_port, sizeof(server_port)) == (ssize_t)sizeof(server_port) && server_port > 0;
+    close(fds[0]);
+    server_pid = pid;
+    return ok;
+}
+
+static void stop_server_process(void) {
+    if (server_pid <= 0) return;
+    kill(server_pid, SIGTERM);
+    waitpid(server_pid, NULL, 0);
+    server_pid = 0;
+}
 
 // http://127.0.0.1:<port>/<kind>/<absolute path, percent-encoded><query>, from a per-thread ring of buffers
 static const char *web_url(const char *kind, const char *path, const char *query) {
     static __thread char bufs[8][4096];
     static __thread int next;
     char *b = bufs[next++ % 8];
-    int n = snprintf(b, sizeof(bufs[0]), "http://127.0.0.1:%d/%s/", server.port, kind);
+    int n = snprintf(b, sizeof(bufs[0]), "http://127.0.0.1:%d/%s/", server_port, kind);
     for (const unsigned char *p = (const unsigned char *)path; *p && n < (int)sizeof(bufs[0]) - 8; p++) {
         if (isalnum(*p) || strchr("-._~/", *p)) b[n++] = (char)*p;
         else n += snprintf(b + n, 4, "%%%02X", *p);
@@ -663,8 +697,8 @@ int main(int argc, char **argv) {
         printf("network read-ahead: %.1f s\n", max_buffer_seconds);
     }
     if (web_percent > 0) {
-        if (!ts_start(&server, "")) { fprintf(stderr, "could not start the HTTP server\n"); return 1; }
-        printf("HTTP server on port %d serves %d%% of the picks\n", server.port, web_percent);
+        if (!start_server_process()) { fprintf(stderr, "could not start the HTTP server\n"); return 1; }
+        printf("HTTP server (process %d) on port %d serves %d%% of the picks\n", (int)server_pid, server_port, web_percent);
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -737,7 +771,7 @@ int main(int argc, char **argv) {
     pthread_join(watchdog, NULL);
     summary();
     printf("   network: %ld buffering waits, %ld stream titles\n", atomic_load(&n_buffering), atomic_load(&n_titles));
-    if (web_percent > 0) ts_stop(&server);
+    stop_server_process();
     fclose(csv);
     for (size_t i = 0; i < audio.n; i++) free(audio.items[i]);
     for (size_t i = 0; i < junk.n; i++) free(junk.items[i]);
