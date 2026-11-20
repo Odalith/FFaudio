@@ -37,7 +37,7 @@
 #define DEFAULT_TIMEOUT_SECONDS 10.0
 #define DEFAULT_BUFFER_SECONDS 2.0
 // 10 s rides out network hiccups; more costs memory that glibc keeps per thread afterwards (see the readme's
-// "Memory use": in 2-hour soaks 30 s held 285 MB and was still growing, 8 s levelled off at 110 MB)
+// "Memory use": with glibc's defaults, 2-hour soaks kept 310 MB with 30 s and 169 MB with 10 s)
 #define DEFAULT_MAX_BUFFER_SECONDS 10.0
 #define DEFAULT_RECONNECT_ATTEMPTS 5
 

@@ -395,16 +395,31 @@ stayed at a few MB, while the process' RSS rose to about 145 MB in the first hou
 off at 300-350 MB). A plain player, with one track and no background measurement, needs less.
 AddressSanitizer runs of the same test found no leaks.
 
-Network streams read ahead (`AuNetworkConfig.max_buffer_seconds`, 10 s), and every pool keeps the largest
-read-ahead it has held: a hi-res stream over HTTP is several MB per 10 s. In 2-hour soaks with a third of the
-tracks streamed, a 10 s-class read-ahead (8 s) levelled off at about 110 MB held while 30 s reached 285 MB and was
-still growing; raise it only if your streams need it.
+Network streams are where glibc's defaults cost the most. They read ahead (`AuNetworkConfig.max_buffer_seconds`,
+10 s; a hi-res stream over HTTP is several MB per 10 s), and when a program frees blocks that large, glibc raises
+its thresholds for giving memory back (the "dynamic mmap threshold"), so its pools keep more and more. With a third
+of the tracks streamed over HTTP, 2-hour soak runs with the same seed gave:
 
-If the resident size matters (a small device, a player that runs for weeks), the application can:
+| Read-ahead, glibc settings     | RSS at 2 h | Kept by glibc | Trend               |
+|--------------------------------|-----------:|--------------:|---------------------|
+| 30 s, defaults                 |     272 MB |        310 MB | rising              |
+| 10 s (default), defaults       |     240 MB |        169 MB | rising, ~55 MB/hour |
+| 10 s, fixed thresholds (below) |      83 MB |         19 MB | flat                |
+| 10 s, `MALLOC_ARENA_MAX=2`     |      81 MB |         34 MB | flat                |
+
+"Kept by glibc" is what its pools hold, in use or free; not all of it has to be resident. The memory ffaudio was
+using was a few MB in all four.
+
+If the resident size matters (streaming, a small device, a player that runs for weeks), the application can:
+- fix glibc's thresholds, which turns the adjustment off and keeps one pool per thread:
+  `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072` in the environment, or
+  `mallopt(M_MMAP_THRESHOLD, 128 * 1024)` and `mallopt(M_TRIM_THRESHOLD, 128 * 1024)` at start-up. This is the
+  best choice with network streams;
 - limit glibc to a few pools: `MALLOC_ARENA_MAX=2` in the environment, or `mallopt(M_ARENA_MAX, 2)` at start-up
-  before any threads are created. In the soak test this cut RSS to about 94 MB;
+  before any threads are created. Threads then share the pools. With local files only, this cut RSS to about
+  94 MB in the 8-hour run;
 - call `malloc_trim(0)` now and then, e.g. after a track change, to return free pages to the system (a smaller
-  effect: about 130 MB);
+  effect: about 130 MB with local files);
 - use another allocator (jemalloc, mimalloc, tcmalloc) by linking it or with `LD_PRELOAD`.
 
 All of these change the whole process, which is why ffaudio leaves the choice to the application. Windows and
