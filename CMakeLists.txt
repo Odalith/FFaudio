@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ffAudio VERSION 2.0.0 LANGUAGES C)
+project(ffAudio VERSION 2.0.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -171,6 +171,9 @@ endfunction()
 
 if(FFAUDIO_BUILD_MANUAL_PLAYER AND NOT WIN32)
     ffaudio_test_exe(manual_player tests/manual_player.c)
+    # Long-running soak test with memory sampling (Linux /proc); not part of CTest
+    ffaudio_test_exe(soak tests/soak.c)
+    target_link_libraries(soak PRIVATE Threads::Threads)
 endif()
 if(FFAUDIO_BUILD_MANUAL_PLAYER)
     ffaudio_test_exe(loudness_scan tests/loudness_scan.c)

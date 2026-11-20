@@ -401,7 +401,10 @@ static int measure_file(const AuLoudnessConfig *cfg, const char *filename, Meter
     if (avcodec_parameters_to_context(dec, st->codecpar) < 0) goto end;
     dec->pkt_timebase = st->time_base;
     AVDictionary *opts = NULL;
-    av_dict_set(&opts, "threads", "auto", 0);
+    // At most 4 threads: decoding is a large part of the analysis for hi-res files (a 24/192 FLAC took 1.28 s with
+    // one thread, 0.65 s with four, 0.62 s with "auto" = one per core plus one), so this keeps the speed of "auto"
+    // without a thread per core for every file being measured
+    av_dict_set(&opts, "threads", "4", 0);
     ret = avcodec_open2(dec, codec, &opts);
     av_dict_free(&opts);
     if (ret < 0) goto end;

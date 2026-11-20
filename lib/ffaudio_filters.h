@@ -60,8 +60,7 @@ extern "C" {
     // Why the last au_fb_add_* call failed ("" when it did not)
     DLL_EXPORT const char *au_fb_last_error(const AuFilterBuilder *fb);
 
-    // Free strings returned by ffaudio
-    DLL_EXPORT void au_free(void *ptr);
+    // au_free() (declared in ffaudio.h) frees the strings au_fb_build() returns
 
     // Append any filter (or filter chain) as-is, e.g. "atempo=1.25"
     DLL_EXPORT int au_fb_add(AuFilterBuilder *fb, const char *filter);

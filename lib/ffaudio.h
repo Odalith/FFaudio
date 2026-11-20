@@ -40,7 +40,7 @@
 
 #define FFAUDIO_VERSION_MAJOR 2
 #define FFAUDIO_VERSION_MINOR 0
-#define FFAUDIO_VERSION_PATCH 0
+#define FFAUDIO_VERSION_PATCH 1
 
 #ifdef __cplusplus
 extern "C" {
@@ -202,8 +202,13 @@ extern "C" {
     // Blocks until the device is open. Tracks can be started before this; they wait for the device.
     DLL_EXPORT int au_configure_audio_device(const AudioDeviceConfig* custom_config);
 
-    // List the user's audio devices. Free each string and the array with free().
+    // List the user's audio devices. Free the list with au_free_audio_devices().
     DLL_EXPORT int au_get_audio_devices(int *out_total, char ***out_devices);
+
+    // Free a list from au_get_audio_devices() (NULL is fine). Use this rather than free(): on Windows the
+    // application and ffaudio can use different C runtimes (e.g. MSVC with /MT), and free() on memory that
+    // ffaudio allocated then corrupts the heap.
+    DLL_EXPORT void au_free_audio_devices(char **devices, int total);
 
     // Name of the output device in use (for the system default, the device it currently resolves to when SDL
     // can tell, otherwise "System default"). "" when no device is open. Returns the length, or
@@ -449,6 +454,10 @@ extern "C" {
 
     // "major.minor.patch"
     DLL_EXPORT const char *au_get_version(void);
+
+    // Free memory ffaudio returns without a dedicated free function, such as au_fb_build() strings. Like
+    // au_free_audio_devices(), it frees with ffaudio's own C runtime (see there).
+    DLL_EXPORT void au_free(void *ptr);
 
 #ifdef __cplusplus
 } // extern "C"
