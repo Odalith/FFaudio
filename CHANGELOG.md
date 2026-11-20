@@ -15,6 +15,19 @@
   `au_set_loop_count(0)` at the moment a loop started could turn into looping forever.
 - Tracks are destroyed without waiting up to 100 ms for a decoder that waits for an output device, and
   `au_seek_percent()` on a track still opening is picked up at once.
+- Measuring a file whose read failed partway (a disk error, a download that broke off after its reconnects) returned
+  the loudness of the part that was read, and the scan queue stored it as the file's. It now fails with
+  `AU_ERR_FILE`.
+- Measuring a file with an unspecified channel layout (e.g. a WAV without a channel mask) rebuilt the sample
+  converter for every decoded frame.
+- Measurements of network files stop right away on `au_gain_scan_stop()` and `au_gain_cache_cancel_requests()`, also
+  while connecting or waiting to reconnect, and reconnect after network errors like playback does.
+- A track waiting for its measurement (`measure_missing`) starts as soon as the measurement fails or is cancelled,
+  instead of after `measure_wait_ms`.
+- `au_gain_cache_request_album()` skips albums with a network track unless `measure_streams` is set (it ignored that
+  setting), and does not queue an album again while it is queued or being measured; an urgent request moves it to
+  the front.
+- A request made while `au_gain_scan_stop()` was running could leave the queue without workers for good.
 
 ## 2.1.0 (unreleased)
 

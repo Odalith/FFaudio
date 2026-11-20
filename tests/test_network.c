@@ -3,6 +3,7 @@
  * probing, errors and timeouts, headers and user agent, redirects, the protocol whitelists (also through HLS
  * playlists), and that network files are not measured unless asked to.
  */
+#include <math.h>
 #include "test_common.h"
 #include "http_server.h"
 #include "../lib/ffaudio_loudness.h"
@@ -193,6 +194,9 @@ static void test_no_measuring_by_default(void) {
     CHECK(au_gain_cache_set_file(cache) == AU_OK);
     const char *paths[1] = { url("/files/long_6s.flac") };
     CHECK(au_gain_cache_request(paths, 1, AU_SCAN_URGENT) == 0);   // skipped: it would download the file
+    // An album with a network track is skipped as a whole: measured without that track it would be wrong
+    const char *album[2] = { fx("s44_stereo.flac"), url("/files/long_6s.flac") };
+    CHECK(au_gain_cache_request_album(album, 2, AU_SCAN_URGENT) == 0);
 
     const AuNetworkConfig measure = { .measure_streams = true };
     CHECK(au_set_network(&measure) == AU_OK);
@@ -347,6 +351,47 @@ static void test_icy_with_file_tags(void) {
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
 }
 
+// A transfer that breaks off fails the measurement instead of measuring the part that arrived, which would be
+// stored as the file's loudness
+static void test_no_analysis_of_broken_transfer(void) {
+    const AuNetworkConfig never = { .reconnect_attempts = -1 };
+    CHECK(au_set_network(&never) == AU_OK);
+    AuLoudness l;
+    CHECK(au_loudness_analyze(url("/files/long_6s.flac?drop=40000&n=broken"), NULL, &l) == AU_ERR_FILE);
+    CHECK(au_set_network(NULL) == AU_OK);
+    // With reconnects (the default) the same drop is repaired and the whole file measured
+    CHECK(au_loudness_analyze(url("/files/long_6s.flac?drop=40000&n=repaired"), NULL, &l) == AU_OK);
+    CHECK(fabs(l.duration - 6.0) < 0.05);
+}
+
+// A track waiting for a measurement that can not be made starts right away. Live streams can not be measured;
+// the player used to wait out the whole measure_wait_ms.
+static void test_failed_measurement_ends_wait(void) {
+    char cache[1100];
+    snprintf(cache, sizeof(cache), "%s/test_network_wait.cache", tc_fixture_dir);
+    remove(cache);
+    CHECK(au_gain_cache_set_file(cache) == AU_OK);
+    const AuNetworkConfig measure = { .measure_streams = true };
+    CHECK(au_set_network(&measure) == AU_OK);
+    const AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK, .measure_missing = true, .measure_wait_ms = 8000 };
+    CHECK(au_set_replaygain(&rg) == AU_OK);
+
+    const uint32_t t0 = SDL_GetTicks();
+    au_play_audio(url("/live/live.mp3?n=wait"), NULL);
+    CHECK(TC_WAIT_FIELD(started, 1, 15000));
+    const uint32_t ms = SDL_GetTicks() - t0;
+    printf("   started after %u ms (measure_wait_ms 8000, buffer 2 s)\n", ms);
+    CHECK(ms < 6000);
+    au_stop_audio();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+
+    CHECK(au_set_replaygain(NULL) == AU_OK);
+    CHECK(au_set_network(NULL) == AU_OK);
+    au_gain_scan_stop();
+    au_gain_cache_set_file("");
+    remove(cache);
+}
+
 static void test_no_analysis_of_live_streams(void) {
     // It would wait forever for the end; it must give up right after probing
     const uint32_t t0 = SDL_GetTicks();
@@ -394,6 +439,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_ogg_now_playing);
     RUN_TEST(test_icy_with_file_tags);
     RUN_TEST(test_no_analysis_of_live_streams);
+    RUN_TEST(test_no_analysis_of_broken_transfer);
+    RUN_TEST(test_failed_measurement_ends_wait);
 
     au_shutdown();
     ts_stop(&srv);

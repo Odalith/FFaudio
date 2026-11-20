@@ -437,12 +437,21 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
     if (tags.has_track_gain || tags.has_album_gain) return;
     if (gain_cache_lookup(t->filename, NULL)) return;
 
+    const unsigned failures = gain_cache_failure_mark();
     if (!gain_scan_request_for_player(t->filename)) return; // could not be measured before
     const int wait_ms = cfg.measure_wait_ms == 0 ? DEFAULT_MEASURE_WAIT_MS : cfg.measure_wait_ms;
-    if (wait_ms > 0 && !gain_cache_wait(t->filename, wait_ms, &t->abort_request) &&
-        !SDL_AtomicGet(&t->abort_request))
-        ff_log(AU_LOG_INFO, "'%s' starts before its loudness is measured; the gain follows when it is ready",
-               t->filename);
+    if (wait_ms <= 0) return;
+    switch (gain_cache_wait(t->filename, wait_ms, &t->abort_request, failures)) {
+        case GAIN_WAIT_TIMEOUT:
+            ff_log(AU_LOG_INFO, "'%s' starts before its loudness is measured; the gain follows when it is ready",
+                   t->filename);
+            break;
+        case GAIN_WAIT_FAILED:
+            ff_log(AU_LOG_INFO, "'%s' could not be measured; it plays at the fallback gain", t->filename);
+            break;
+        default:
+            break;
+    }
 }
 
 AuMediaInfo *track_copy_info(TrackState *t) {

@@ -24,8 +24,15 @@
 // Thread-safe lookup used by the player (no-op before anything was cached)
 bool gain_cache_lookup(const char *path, AuReplayGainInfo *out);
 
-// Block until `path` is in the cache, the timeout passes or *abort becomes non-zero. true when cached.
-bool gain_cache_wait(const char *path, int timeout_ms, SDL_atomic_t *abort);
+// Block until `path` is in the cache, its measurement fails (gain_cache_note_failure() after `mark`), the timeout
+// passes or *abort becomes non-zero. Take the mark with gain_cache_failure_mark() before the measurement is
+// requested, so a quick failure is not missed.
+typedef enum GainWait { GAIN_WAIT_CACHED, GAIN_WAIT_TIMEOUT, GAIN_WAIT_FAILED, GAIN_WAIT_ABORTED } GainWait;
+GainWait gain_cache_wait(const char *path, int timeout_ms, SDL_atomic_t *abort, unsigned mark);
+unsigned gain_cache_failure_mark(void);
+
+// The scan queue gave up on `path` (an error or a cancellation): wake gain_cache_wait() for it
+void gain_cache_note_failure(const char *path);
 
 // Implemented by the player: re-evaluate the gain of live tracks with this path (NULL = every track)
 void ff_gain_cache_changed(const char *path);
