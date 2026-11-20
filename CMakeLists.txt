@@ -188,6 +188,8 @@ if(FFAUDIO_BUILD_TESTS)
 
     ffaudio_test_exe(test_filters tests/test_filters.c)
     add_test(NAME test_filters COMMAND test_filters ${CMAKE_BINARY_DIR})
+    # Renders a fixed playlist for before/after comparisons of the output; not a CTest (see the file)
+    ffaudio_test_exe(golden_render tests/golden_render.c)
 
     if(NOT FFMPEG_EXECUTABLE OR NOT BASH_EXECUTABLE)
         message(WARNING "ffaudio: ffmpeg or bash not found, playback tests are disabled")
