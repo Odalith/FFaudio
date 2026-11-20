@@ -37,6 +37,7 @@ typedef struct Job {
     int n;
     bool album;
     bool from_player;           // not dropped by au_gain_cache_cancel_requests()
+    bool measuring;             // taken by a worker
     struct Job *next;
 } Job;
 
@@ -161,35 +162,88 @@ static void job_free(Job *j) {
     av_free(j);
 }
 
+static void index_remove(const Job *j);
+
 // A queued job that will not be measured: a player waiting for one of its paths stops waiting
 static void job_drop(Job *j) {
     if (!j) return;
+    index_remove(j);
     for (int i = 0; i < j->n; i++) gain_cache_note_failure(j->paths[i]);
     job_free(j);
 }
 
-static bool job_has(const Job *j, const char *path) {
-    for (int i = 0; i < j->n; i++)
-        if (!strcmp(j->paths[i], path)) return true;
-    return false;
+// Every single-file job, queued or being measured, by path (open addressing, linear probing): a request checks a
+// path in constant time instead of comparing it with everything queued
+typedef struct IndexSlot {
+    uint32_t hash;
+    Job *job;                   // NULL = empty
+} IndexSlot;
+static IndexSlot *index_slots = NULL;
+static uint32_t index_cap = 0, index_n = 0;
+
+static uint32_t path_hash(const char *s) {
+    uint32_t h = 2166136261u; // FNV-1a
+    for (; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
+    return h;
 }
 
-// The queued job containing `path` (and the one before it, for unlinking)
-static Job *find_queued(const char *path, Job **prev_out) {
-    Job *prev = NULL;
-    for (Job *j = head; j; prev = j, j = j->next) {
-        if (job_has(j, path)) {
-            if (prev_out) *prev_out = prev;
-            return j;
+static Job *index_find(const char *path) {
+    if (!index_cap) return NULL;
+    const uint32_t h = path_hash(path), mask = index_cap - 1;
+    for (uint32_t i = h & mask;; i = (i + 1) & mask) {
+        if (!index_slots[i].job) return NULL;
+        if (index_slots[i].hash == h && !strcmp(index_slots[i].job->paths[0], path)) return index_slots[i].job;
+    }
+}
+
+static void index_insert(IndexSlot *slots, const uint32_t cap, const uint32_t h, Job *j) {
+    uint32_t i = h & (cap - 1);
+    while (slots[i].job) i = (i + 1) & (cap - 1);
+    slots[i].hash = h;
+    slots[i].job = j;
+}
+
+static bool index_add(Job *j) {
+    if ((index_n + 1) * 10 > index_cap * 7) { // keep it under 70 % full
+        const uint32_t cap = index_cap ? index_cap * 2 : 64;
+        IndexSlot *slots = av_calloc(cap, sizeof(IndexSlot));
+        if (!slots) return false;
+        for (uint32_t i = 0; i < index_cap; i++)
+            if (index_slots[i].job) index_insert(slots, cap, index_slots[i].hash, index_slots[i].job);
+        av_free(index_slots);
+        index_slots = slots;
+        index_cap = cap;
+    }
+    index_insert(index_slots, index_cap, path_hash(j->paths[0]), j);
+    index_n++;
+    return true;
+}
+
+// Remove a job, moving later entries of its run back so no probe sequence is broken
+static void index_remove(const Job *j) {
+    if (!index_cap || j->album || !j->n) return;
+    const uint32_t mask = index_cap - 1;
+    uint32_t i = path_hash(j->paths[0]) & mask;
+    while (index_slots[i].job && index_slots[i].job != j) i = (i + 1) & mask;
+    if (!index_slots[i].job) return;
+    index_n--;
+    for (uint32_t k = (i + 1) & mask; index_slots[k].job; k = (k + 1) & mask) {
+        const uint32_t home = index_slots[k].hash & mask;
+        // Move k into the hole at i when its home position is not between i (exclusive) and k (inclusive)
+        const bool between = i <= k ? (home > i && home <= k) : (home > i || home <= k);
+        if (!between) {
+            index_slots[i] = index_slots[k];
+            i = k;
         }
     }
-    return NULL;
+    index_slots[i].job = NULL;
 }
 
-static bool being_measured(const char *path) {
-    for (int i = 0; i < MAX_WORKERS; i++)
-        if (workers[i].job && job_has(workers[i].job, path)) return true;
-    return false;
+// The job before `j` in the queue (for unlinking), NULL when it is the first
+static Job *queued_before(const Job *j) {
+    Job *prev = NULL;
+    for (Job *q = head; q && q != j; q = q->next) prev = q;
+    return prev;
 }
 
 // An album job with the same first track, queued (*queued_out, *prev_out set) or being measured
@@ -271,19 +325,22 @@ static void notify(const AuGainScanConfig *cfg, const char *path, const int resu
     if (cfg->on_cached) cfg->on_cached(path, result, rg, cfg->user);
 }
 
-static void measure_job(const int index, const Job *job, const AuGainScanConfig *cfg) {
+// `scanner` is the worker's own, reused for every file
+static void measure_job(const int index, const Job *job, const AuGainScanConfig *cfg, AuLoudnessScanner *scanner) {
     ProgressCtx ctx = { .index = index };
     const AuLoudnessConfig lcfg = { .skip_true_peak = cfg->skip_true_peak, .progress = keep_going,
                                     .progress_user = &ctx };
     const AVIOInterruptCB interrupt = { .callback = interrupted, .opaque = &ctx };
+    if (!scanner) {
+        for (int i = 0; i < job->n; i++) notify(cfg, job->paths[i], AU_ERR_NO_MEMORY, NULL);
+        return;
+    }
+    loudness_scanner_configure(scanner, &lcfg);
+    loudness_scanner_set_interrupt(scanner, &interrupt);
+    au_loudness_scanner_reset(scanner);
 
     if (!job->album) {
-        AuLoudnessScanner *one = au_loudness_scanner_create(&lcfg);
-        if (!one) {
-            for (int i = 0; i < job->n; i++) notify(cfg, job->paths[i], AU_ERR_NO_MEMORY, NULL);
-            return;
-        }
-        loudness_scanner_set_interrupt(one, &interrupt);
+        AuLoudnessScanner *one = scanner;
         for (int i = 0; i < job->n; i++) {
             const char *path = job->paths[i];
             if (au_gain_cache_get(path, NULL)) continue; // measured by someone else meanwhile
@@ -301,16 +358,13 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
                 if (ret == AU_ERR_CANCELLED) break;
             }
         }
-        au_loudness_scanner_free(one);
         return;
     }
 
-    // Album: every track through one scanner, then store track + album values together
-    AuLoudnessScanner *scanner = au_loudness_scanner_create(&lcfg);
-    loudness_scanner_set_interrupt(scanner, &interrupt);
+    // Album: every track through the scanner, then store track + album values together
     AuLoudness *tracks = av_calloc(job->n, sizeof(AuLoudness));
     int *results = av_calloc(job->n, sizeof(int));
-    if (!scanner || !tracks || !results) {
+    if (!tracks || !results) {
         for (int i = 0; i < job->n; i++) notify(cfg, job->paths[i], AU_ERR_NO_MEMORY, NULL);
         goto end;
     }
@@ -334,7 +388,6 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
         notify(cfg, job->paths[i], AU_OK, &rg);
     }
 end:
-    au_loudness_scanner_free(scanner);
     av_free(tracks);
     av_free(results);
 }
@@ -342,6 +395,7 @@ end:
 static int worker_main(void *arg) {
     const int index = (int)(intptr_t)arg;
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
+    AuLoudnessScanner *scanner = au_loudness_scanner_create(NULL); // a few hundred KB, kept for every file
 
     SDL_LockMutex(lock);
     for (;;) {
@@ -353,19 +407,22 @@ static int worker_main(void *arg) {
 
         Job *job = head;
         unlink_job(job, NULL);
+        job->measuring = true;
         workers[index].job = job;
         SDL_AtomicSet(&workers[index].cancel, 0);
         const AuGainScanConfig cfg = config;
         SDL_UnlockMutex(lock);
 
-        measure_job(index, job, &cfg);
+        measure_job(index, job, &cfg, scanner);
 
         SDL_LockMutex(lock);
         workers[index].job = NULL;
         pending -= job->n;
+        index_remove(job);
         job_free(job);
     }
     SDL_UnlockMutex(lock);
+    au_loudness_scanner_free(scanner);
     return 0;
 }
 
@@ -405,62 +462,100 @@ static int request(const char *const *paths, const int count, const bool urgent,
         for (int i = 0; i < count; i++)
             if (paths[i] && au_is_network_url(paths[i])) return 0;
     }
-    Job *job = job_new(album, from_player, count);
-    if (!job) return AU_ERR_NO_MEMORY;
-
     SDL_LockMutex(lock);
     if (SDL_AtomicGet(&stopping)) {
         // au_gain_scan_stop() is waiting for the workers; new ones started now would never be joined
         SDL_UnlockMutex(lock);
-        job_free(job);
         return 0;
     }
-    if (album && paths[0] && paths[0][0]) {
-        Job *queued = NULL, *prev = NULL;
-        if (album_pending(paths[0], &queued, &prev)) {
-            if (queued && urgent && queued != head) {
-                unlink_job(queued, prev);
-                pending -= queued->n;
-                push(queued, true);
-            }
-            SDL_UnlockMutex(lock);
-            job_free(job);
-            return 0;
-        }
-    }
-    for (int i = 0; i < count; i++) {
-        const char *path = paths[i];
-        if (!path || !path[0] || job_has(job, path)) continue;
-        if (!album) {
-            if (au_gain_cache_get(path, NULL) || being_measured(path) || known_failure(path)) continue;
-            if (au_is_network_url(path) && !measure_streams) continue; // would download the whole file
-            Job *prev = NULL;
-            Job *queued = find_queued(path, &prev);
-            if (queued) {
-                // Already queued: an urgent request moves that job to the front
-                if (urgent && queued != head) {
+
+    if (album) {
+        if (paths[0] && paths[0][0]) {
+            Job *queued = NULL, *prev = NULL;
+            if (album_pending(paths[0], &queued, &prev)) {
+                if (queued && urgent && queued != head) {
                     unlink_job(queued, prev);
                     pending -= queued->n;
                     push(queued, true);
                 }
-                if (from_player) queued->from_player = true;
-                continue;
+                SDL_UnlockMutex(lock);
+                return 0;
             }
         }
-        if (!(job->paths[job->n] = av_strdup(path))) break;
-        job->n++;
+        Job *job = job_new(true, from_player, count);
+        if (!job) {
+            SDL_UnlockMutex(lock);
+            return AU_ERR_NO_MEMORY;
+        }
+        for (int i = 0; i < count; i++) {
+            const char *path = paths[i];
+            bool dup = false;
+            for (int k = 0; k < job->n && !dup; k++) dup = path && !strcmp(job->paths[k], path);
+            if (!path || !path[0] || dup) continue;
+            if (!(job->paths[job->n] = av_strdup(path))) break;
+            job->n++;
+        }
+        const int n = job->n;
+        if (n) {
+            push(job, urgent);
+            start_workers();
+        }
+        else {
+            job_free(job);
+        }
+        SDL_UnlockMutex(lock);
+        return n;
     }
 
-    const int queued_paths = job->n;
-    if (job->n) {
-        push(job, urgent);
-        start_workers();
+    // Single files: a job each, so the workers share a request and an urgent one moves exactly the files it names
+    Job **made = av_malloc_array(count, sizeof(Job *));
+    if (!made) {
+        SDL_UnlockMutex(lock);
+        return AU_ERR_NO_MEMORY;
     }
-    else {
-        job_free(job);
+    int n = 0;
+    for (int i = 0; i < count; i++) {
+        const char *path = paths[i];
+        if (!path || !path[0]) continue;
+        Job *known = index_find(path);
+        if (known) {
+            // Already queued (also earlier in this request) or being measured
+            if (!known->measuring && urgent && known != head) {
+                bool mine = false;
+                for (int k = 0; k < n && !mine; k++) mine = made[k] == known;
+                if (!mine) {
+                    unlink_job(known, queued_before(known));
+                    pending -= known->n;
+                    push(known, true);
+                }
+            }
+            if (from_player) known->from_player = true;
+            continue;
+        }
+        if (au_gain_cache_get(path, NULL) || known_failure(path)) continue;
+        if (au_is_network_url(path) && !measure_streams) continue; // would download the whole file
+        Job *job = job_new(false, from_player, 1);
+        if (!job) break;
+        if (!(job->paths[0] = av_strdup(path))) {
+            job_free(job);
+            break;
+        }
+        job->n = 1;
+        if (!index_add(job)) {
+            job_free(job);
+            break;
+        }
+        made[n++] = job;
     }
+    // Urgent ones go to the front in the order given; prefetches to the back
+    if (urgent)
+        for (int k = n - 1; k >= 0; k--) push(made[k], true);
+    else
+        for (int k = 0; k < n; k++) push(made[k], false);
+    if (n) start_workers();
+    av_free(made);
     SDL_UnlockMutex(lock);
-    return queued_paths;
+    return n;
 }
 
 bool gain_scan_request_for_player(const char *path) {

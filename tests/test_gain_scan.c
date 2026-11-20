@@ -12,6 +12,7 @@
 static SDL_mutex *done_lock;
 static char *done_path[MAX_DONE];
 static int done_result[MAX_DONE];
+static SDL_threadID done_thread[MAX_DONE];   // the worker that reported it
 static int done_n = 0;
 
 static void on_cached(const char *path, int result, const AuReplayGainInfo *rg, void *user) {
@@ -20,6 +21,7 @@ static void on_cached(const char *path, int result, const AuReplayGainInfo *rg, 
     if (done_n < MAX_DONE) {
         done_path[done_n] = strdup(path);
         done_result[done_n] = result;
+        done_thread[done_n] = SDL_ThreadID();
         done_n++;
     }
     SDL_UnlockMutex(done_lock);
@@ -111,6 +113,28 @@ static void test_urgent_goes_first(void) {
     printf("   scan_12 finished at position %d of %d\n", done_index("scan_12"), done_count());
     CHECK(done_count() == 7);
     CHECK(done_index("scan_12") >= 0 && done_index("scan_12") <= 1); // at most the one already running is first
+}
+
+// One request's files are shared by the workers (a request used to be one job, measured by one worker)
+static void test_request_uses_every_worker(void) {
+    reset_done();
+    configure(2);
+    const char *paths[5] = { scan_file(20), scan_file(21), scan_file(22), scan_file(23), scan_file(24) };
+    CHECK(au_gain_cache_request(paths, 5, AU_SCAN_PREFETCH) == 5);
+    CHECK(wait_idle(10000));
+    CHECK(done_count() == 5);
+    int threads = 0;
+    SDL_LockMutex(done_lock);
+    for (int i = 0; i < done_n; i++) {
+        bool seen = false;
+        for (int k = 0; k < i && !seen; k++) seen = done_thread[k] == done_thread[i];
+        threads += !seen;
+    }
+    SDL_UnlockMutex(done_lock);
+    printf("   5 files of one request measured on %d threads\n", threads);
+    CHECK(threads == 2);
+    configure(1);
+    for (int i = 0; i < 5; i++) au_gain_cache_remove(paths[i]); // the later tests use these files too
 }
 
 static void test_cancel(void) {
@@ -303,6 +327,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_request);
     RUN_TEST(test_dedup);
     RUN_TEST(test_urgent_goes_first);
+    RUN_TEST(test_request_uses_every_worker);
     RUN_TEST(test_cancel);
     RUN_TEST(test_album);
     RUN_TEST(test_errors);

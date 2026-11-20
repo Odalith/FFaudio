@@ -70,6 +70,9 @@
 - `au_gain_cache_request_album()` does not queue an album again while it is queued or being measured; an urgent
   request moves it to the front.
 - A request made while `au_gain_scan_stop()` was running could leave the queue without workers for good.
+- The files of one `au_gain_cache_request()` were measured by a single worker, whatever `AuGainScanConfig.threads`
+  said, and an urgent request for a file inside a queued request moved that whole request. Each file is now its own
+  job; duplicate checks no longer compare the path with everything queued, and each worker reuses its scanner.
 - Pausing faded out with `1 - curve(t)` instead of `curve(1 - t)`, the shape crossfades use and `ffaudio.h`
   describes: equal-power pause fades dipped too early, and logarithmic and exponential ones had each other's shape.
 - After a measurement that did not change a track's gain, the next gain change (e.g. a new preamp) took 2 s

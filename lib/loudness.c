@@ -660,6 +660,12 @@ AuLoudnessScanner *au_loudness_scanner_create(const AuLoudnessConfig *config) {
     return s;
 }
 
+void loudness_scanner_configure(AuLoudnessScanner *s, const AuLoudnessConfig *config) {
+    if (!s) return;
+    if (config) s->config = *config;
+    else memset(&s->config, 0, sizeof(s->config));
+}
+
 void loudness_scanner_set_interrupt(AuLoudnessScanner *s, const AVIOInterruptCB *interrupt) {
     if (!s) return;
     if (interrupt) s->interrupt = *interrupt;
