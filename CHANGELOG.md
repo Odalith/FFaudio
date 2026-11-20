@@ -74,13 +74,16 @@
 - `au_media_is_live()` is true only for network streams without a duration, as the player treats them; it was also
   true for local files with an unknown length, and for files whose length only the audio stream gave.
 - A local file named like a demuxer (`mp3`, `hls`, ...) was opened with that demuxer instead of being probed.
+- The ReplayGain cache file was not safe to share between programs, as the readme said: a compaction renamed a new
+  file over it, so another program kept appending to the replaced file, and records appended meanwhile were dropped
+  (in a test with two processes, 492 of 500 entries were lost). Writes now take a lock (a `.lock` file next to the
+  cache), a compaction reads the file again first, and appends follow a replaced file. A file of a later format is
+  left alone instead of being read as this one and appended to. Loading reads the file in one go (100000 entries:
+  40 ms instead of 74).
 - Files whose timestamps start late (MPEG-TS and so HLS, which start at 1.4 s or more) reported positions that
   included that start, while seeks and the duration count from 0: `au_get_audio_play_time()` was too large, end
   crossfades and `on_prepare_next` came that much early, and a device change jumped ahead by it.
 
-### Documentation
-- The ReplayGain cache file is not safe to write from several programs at the same time, as the readme said:
-  compacting replaces the file and can lose another writer's changes. One writer at a time.
 
 ## 2.0.1 (2026-11-20)
 

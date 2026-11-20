@@ -5,6 +5,10 @@
 #include "../lib/ffaudio_loudness.h"
 #include <math.h>
 #include <locale.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 static AuReplayGainInfo track_gain(const double db) {
     AuReplayGainInfo rg;
@@ -387,11 +391,68 @@ static void test_damaged_and_foreign_lines(void) {
     CHECK(au_gain_cache_get("/m/other process.flac", &out) && out.track_gain_db == -3.5 && out.track_peak == 0.9);
     CHECK(!au_gain_cache_get("/m/bad.flac", NULL));
 
-    // A file that is not a cache file is not used
+    // A file that is not a cache file is not used, and not written to either
     remove(cache_file);
     append_text(cache_file, "S\t-3.5\t-\t-\t-\t0\t/m/x.flac\n");
     CHECK(au_gain_cache_reload() == AU_OK);
     CHECK(au_gain_cache_count() == 0);
+    CHECK(au_gain_cache_set("/m/y.flac", &rg) == AU_ERR_FILE);  // kept in memory only
+    CHECK(au_gain_cache_get("/m/y.flac", NULL));
+    CHECK(count_lines(cache_file) == 1);
+
+    // Nor is one of a later format: version 1 records would corrupt it
+    remove(cache_file);
+    append_text(cache_file, "ffaudio-replaygain-cache 2\nwhatever version 2 writes\n");
+    CHECK(au_gain_cache_reload() == AU_OK);
+    CHECK(au_gain_cache_count() == 0);
+    CHECK(au_gain_cache_set("/m/y.flac", &rg) == AU_ERR_FILE);
+    CHECK(count_lines(cache_file) == 2);
+}
+
+// Two processes writing one cache file: while this one compacts it again and again, another appends entries of its
+// own. Every write takes a file lock and an append follows a file that was replaced, so none of them are lost (they
+// used to go to the replaced file, or be dropped by a compaction that had not seen them).
+static void test_two_processes(void) {
+#ifdef _WIN32
+    printf("   (needs fork(), skipped on Windows)\n");
+#else
+    use_fresh_file();
+    const AuReplayGainInfo old = track_gain(-1);
+    for (int i = 0; i < 2000; i++) au_gain_cache_set("/m/superseded.flac", &old);
+    fflush(NULL);
+    const pid_t pid = fork();
+    REQUIRE(pid >= 0);
+    if (pid == 0) {
+        au_gain_cache_set_file(cache_file); // its own state, its own lock
+        for (int i = 0; i < 500; i++) {
+            char path[64];
+            snprintf(path, sizeof(path), "/child/%d.flac", i);
+            const AuReplayGainInfo rg = track_gain(-i * 0.01);
+            if (au_gain_cache_set(path, &rg) != AU_OK) _exit(1);
+            usleep(400); // spread over the parent's compactions
+        }
+        _exit(0);
+    }
+    int status = 0, rounds = 0;
+    while (waitpid(pid, &status, WNOHANG) == 0) {
+        const AuReplayGainInfo rg = track_gain(-2);
+        for (int i = 0; i < 300; i++) au_gain_cache_set("/m/superseded.flac", &rg);
+        au_gain_cache_reload(); // loading compacts once superseded lines pile up
+        rounds++;
+    }
+    printf("   %d compactions while the other process wrote\n", rounds);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(au_gain_cache_reload() == AU_OK);
+    int found = 0;
+    for (int i = 0; i < 500; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/child/%d.flac", i);
+        found += au_gain_cache_get(path, NULL);
+    }
+    printf("   %d of the other process's 500 entries are in the file\n", found);
+    CHECK(found == 500);
+    CHECK(au_gain_cache_get("/m/superseded.flac", NULL));
+#endif
 }
 
 static void test_locale(void) {
@@ -451,6 +512,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_persistence);
     RUN_TEST(test_tricky_paths);
     RUN_TEST(test_compaction);
+    RUN_TEST(test_two_processes); // early: fork() while no other thread runs
     RUN_TEST(test_damaged_and_foreign_lines);
     RUN_TEST(test_locale);
     RUN_TEST(test_memory_only_and_default_location);

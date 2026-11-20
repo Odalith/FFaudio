@@ -364,8 +364,8 @@ extern "C" {
     //   macOS:     ~/Library/Application Support/ffaudio/replaygain.cache
     //   Windows:   %LOCALAPPDATA%\ffaudio\replaygain.cache
     //   others:    SDL_GetPrefPath("ffaudio", "ffaudio") + replaygain.cache (Android, iOS, ...)
-    // Each change is appended to the file right away (one small write), and the file is read on first use. Only one
-    // process at a time should write to a file: compacting replaces it, which can lose another writer's changes.
+    // Each change is appended to the file right away (one small write), and the file is read on first use. Several
+    // processes can share the file: writes take a lock (a ".lock" file next to it), so none are lost.
     // Works without au_initialize() and survives au_shutdown().
     // Media files are never touched.
     //

@@ -306,10 +306,9 @@ ffaudio, so values measured once are there in every later run.
 right away as one line, so nothing is lost if the program crashes; it is read on first use and compacted when it has
 grown with superseded lines. The folder is only created on the first write.
 
-Only one program should write to a cache file at a time. Compacting (and `au_gain_cache_clear()`) replaces the
-file, so changes another program writes at that moment can be lost; on Linux and macOS a program that has the file
-open goes on appending to the replaced copy. Programs that measure while running side by side should each use
-their own file. One after the other is fine, and `au_gain_cache_reload()` picks up what another program wrote.
+Several programs can use the file at the same time: every write takes a lock (a `.lock` file next to it), a
+compaction first reads what the others appended, and an append follows a file another program has replaced.
+`au_gain_cache_reload()` picks up what the others wrote. A cache file of a later format is not read or written.
 ffaudio never tracks, checks or modifies the media files: paths are plain strings, and keeping them current is up
 to the application (`au_gain_cache_foreach()` + `au_gain_cache_remove()` to drop entries for deleted files).
 
