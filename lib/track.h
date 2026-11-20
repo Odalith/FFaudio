@@ -62,7 +62,14 @@ double track_start_position(const TrackState *t);
 int track_pull(TrackState *t, float *dst, int frames, int rate, int channels, bool *eos, bool *looped);
 
 // SDL callback: whether decoded audio is waiting to be played
-bool track_has_audio(TrackState *t);
+bool track_has_audio(TrackState *t, int rate, int channels);
+
+// SDL callback: drop audio the mixer can not play (from before a seek, or for another output format)
+void track_drop_stale(TrackState *t, int rate, int channels);
+
+// Ring storage pool (AudioPlayer.ring_pool): give a buffer back, or free all at shutdown
+void ring_storage_give(AudioPlayer *ap, float *buf, size_t floats);
+void ring_storage_free_all(AudioPlayer *ap);
 
 // Control thread: take the first queued "now playing" entry at or before `position` (NULL when none), and put its
 // title/artist into the track's info. Free the result with track_free_stream_meta().

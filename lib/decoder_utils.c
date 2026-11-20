@@ -102,10 +102,12 @@ int decoder_decode_frame(Decoder *d, AVFrame *frame) {
 
 
 
-void decoder_abort(Decoder *d, FrameQueue *fq)
+void decoder_abort(Decoder *d, SDL_mutex *wake_mutex, SDL_cond *wake_cond)
 {
     packet_queue_abort(d->queue);
-    frame_queue_signal(fq);
+    SDL_LockMutex(wake_mutex);
+    SDL_CondSignal(wake_cond);
+    SDL_UnlockMutex(wake_mutex);
     SDL_WaitThread(d->decoder_tid, NULL);
     d->decoder_tid = NULL;
     packet_queue_flush(d->queue);

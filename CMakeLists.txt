@@ -78,8 +78,9 @@ add_library(ffaudio
         lib/filtergraph.h
         lib/packet_queue_utils.c
         lib/packet_queue_utils.h
-        lib/frame_queue_utils.c
-        lib/frame_queue_utils.h
+        lib/sample_ring.c
+        lib/sample_ring.h
+        lib/atomics.h
         lib/decoder_utils.c
         lib/decoder_utils.h
         lib/globals.h)
@@ -188,6 +189,8 @@ if(FFAUDIO_BUILD_TESTS)
 
     ffaudio_test_exe(test_filters tests/test_filters.c)
     add_test(NAME test_filters COMMAND test_filters ${CMAKE_BINARY_DIR})
+    ffaudio_test_exe(test_ring tests/test_ring.c)
+    add_test(NAME test_ring COMMAND test_ring)
     # Renders a fixed playlist for before/after comparisons of the output; not a CTest (see the file)
     ffaudio_test_exe(golden_render tests/golden_render.c)
 

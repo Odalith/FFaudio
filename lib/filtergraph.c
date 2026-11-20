@@ -278,6 +278,7 @@ int configure_convert_graph(AudioPlayer *ap, TrackState *t) {
     // Never leave src/sink pointing into a graph that has been freed
     free_filter_chain(&t->convert);
     t->convert_rate = out_rate;
+    t->convert_channels = out_channels;
     ret = build_convert_graph(&t->convert, src_args, downmix_filters, maxval, ap->use_soxr, out_rate, out_layout,
                               ap->filter_nbthreads);
     if (ret < 0 && downmix_filters) {

@@ -19,9 +19,10 @@
 /*
  * Output device and mixer.
  *
- * The SDL callback runs with the device lock held. It never blocks, allocates or frees: it pulls
- * float frames from the tracks in the mixer slots, applies fades and gain, and converts to the
- * device format (with TPDF dither for integer formats). Slot changes it makes itself (gapless
+ * The SDL callback runs with the device lock held. It never blocks, allocates, frees or signals: it
+ * takes float frames from the rings of the tracks in the mixer slots (lib/sample_ring.c), applies fades
+ * and gain, and converts to the device format (with TPDF dither for integer formats). The status for the
+ * getters goes out with a try-lock that skips a period rather than wait. Slot changes it makes itself (gapless
  * handover, crossfade at a natural end) are reported to the control thread through Mixer.events.
  */
 
@@ -194,7 +195,7 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
     double remaining = 0;
     const double fade_s = planned_end_fade(m, &fade, &remaining);
     if (fade_s <= 0 || remaining > fade_s + 0.5 / m->rate || remaining <= 0.005) return;
-    if (!track_has_audio(m->next)) return; // not decoded yet: try again next chunk (or end gapless)
+    if (!track_has_audio(m->next, m->rate, m->channels)) return; // not decoded yet: next chunk (or end gapless)
 
     AuFade f = *fade;
     f.seconds = remaining; // end exactly when the current track does
@@ -431,6 +432,11 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
     const int frame_bytes = m->channels * m->bytes_per_sample;
     const int total = frame_bytes > 0 ? len / frame_bytes : 0;
     bool advancing = false;
+
+    // Audio from before a seek (or for another format) goes right away, also while paused, so no decoder waits
+    if (m->current) track_drop_stale(m->current, m->rate, m->channels);
+    if (m->next) track_drop_stale(m->next, m->rate, m->channels);
+    if (m->outgoing) track_drop_stale(m->outgoing, m->rate, m->channels);
 
     int done = 0;
     while (done < total) {

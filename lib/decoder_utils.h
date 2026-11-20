@@ -22,7 +22,6 @@
 #define FFAUDIO_DECODER_UTILS_H
 
 #include "globals.h"
-#include "frame_queue_utils.h"
 #include "packet_queue_utils.h"
 
 void decoder_destroy(Decoder *d);
@@ -31,7 +30,8 @@ int decoder_init(Decoder *d, AVCodecContext *avctx, PacketQueue *queue, SDL_cond
 
 int decoder_decode_frame(Decoder *d, AVFrame *frame);
 
-void decoder_abort(Decoder *d, FrameQueue *fq);
+// Abort the queue, wake the decoder thread where it waits for room (wake_mutex/wake_cond) and join it
+void decoder_abort(Decoder *d, SDL_mutex *wake_mutex, SDL_cond *wake_cond);
 
 int decoder_start(Decoder *d, int (*fn)(void *), const char *thread_name, void* arg);
 

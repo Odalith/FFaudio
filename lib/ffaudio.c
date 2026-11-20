@@ -1041,7 +1041,9 @@ int au_initialize(const InitializeConfig* config) {
     ap->format_mutex = SDL_CreateMutex();
     ap->format_cond = SDL_CreateCond();
     ap->status_mutex = SDL_CreateMutex();
-    if (!ap->msg_mutex || !ap->msg_cond || !ap->format_mutex || !ap->format_cond || !ap->status_mutex)
+    ap->ring_pool_mutex = SDL_CreateMutex();
+    if (!ap->msg_mutex || !ap->msg_cond || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
+        !ap->ring_pool_mutex)
         goto fail_sync;
     publish_idle_status(ap);
 
@@ -1106,6 +1108,7 @@ fail_sync:
     SDL_DestroyMutex(ap->format_mutex);
     SDL_DestroyCond(ap->format_cond);
     SDL_DestroyMutex(ap->status_mutex);
+    SDL_DestroyMutex(ap->ring_pool_mutex);
     av_free(ap);
     return AU_ERR_SDL;
 }
@@ -1156,6 +1159,8 @@ void au_shutdown(void) {
     SDL_DestroyMutex(ap->format_mutex);
     SDL_DestroyCond(ap->format_cond);
     SDL_DestroyMutex(ap->status_mutex);
+    ring_storage_free_all(ap); // the tracks gave their storage back when they were destroyed
+    SDL_DestroyMutex(ap->ring_pool_mutex);
     av_free(ap);
 
     avformat_network_deinit();

@@ -24,16 +24,14 @@
  * Threading model (see ARCHITECTURE in readme.md):
  *  - control thread : owns every TrackState (creation, slot changes, destruction) and runs user callbacks
  *  - read thread    : one per track, demuxes packets into audio_queue
- *  - audio thread   : one per track, decodes + filters into sampq (always float32 at the output rate/layout)
- *  - SDL callback   : mixer, pulls from sampq without blocking, never allocates or frees
+ *  - audio thread   : one per track, decodes + filters into its SampleRing (float32 at the output rate/layout)
+ *  - SDL callback   : mixer, takes from the rings without locks, never allocates, frees or signals
  * Mixer slots (Mixer.current/next/outgoing) are only changed while holding the SDL audio device lock.
  */
 
 #ifndef FFAUDIO_GLOBALS_H
 #define FFAUDIO_GLOBALS_H
 
-#define SAMPLE_QUEUE_SIZE 32
-#define FRAME_QUEUE_SIZE SAMPLE_QUEUE_SIZE
 #define SecondsToMicroseconds(x) ((int64_t)((x) * 1000000.0))
 #define AV_TIME_BASE_DOUBLE 1000000.0
 #define MIXER_EVENT_CAPACITY 64
@@ -62,6 +60,7 @@
 
 #include "SDL2/SDL.h"
 #include "atomics.h"
+#include "sample_ring.h"
 #include "SDL2/SDL_thread.h"
 #include "SDL2/SDL_mutex.h"
 
@@ -94,26 +93,6 @@ typedef struct AudioParams {
     AVChannelLayout ch_layout;
     enum AVSampleFormat fmt;
 } AudioParams;
-
-typedef struct Frame {
-    AVFrame *frame;
-    int32_t serial;
-    double pts;           /* presentation timestamp of the first sample, seconds; NAN if unknown */
-    double speed;         /* playback speed it was made with: file seconds per output second */
-} Frame;
-
-typedef struct FrameQueue {
-    Frame queue[FRAME_QUEUE_SIZE];
-    int32_t rindex;   // consumer only
-    int32_t windex;   // producer only
-    int32_t size;     // guarded by mutex
-    int32_t max_size;
-    int64_t queued_samples;   // guarded by mutex
-    int64_t max_samples;      // guarded by mutex; 0 = only max_size limits the queue
-    SDL_mutex *mutex;
-    SDL_cond *cond;
-    PacketQueue *pktq;
-} FrameQueue;
 
 typedef struct Decoder {
     AVPacket *pkt;
@@ -215,7 +194,9 @@ typedef struct TrackState {
     AVStream *audio_st;
     PacketQueue audio_queue;
     Decoder audio_decoder;
-    FrameQueue sampq;
+    SampleRing ring;                    // decoded audio for the mixer (audio thread -> SDL callback)
+    SDL_mutex *ring_mutex;              // the audio thread waits for room on ring_cond; the mixer never signals it,
+    SDL_cond *ring_cond;                // seeks and aborts do
     AudioParams audio_filter_src;       // format of the frames entering the convert graph
     FilterChain convert;                // audio thread only: decoder format -> output format
     FilterChain user;                   // audio thread only: user + global filters, may be empty
@@ -228,6 +209,7 @@ typedef struct TrackState {
     int64_t speed_seg_out;              // audio thread only: samples output since then
     bool speed_seg_open;                // audio thread only: speed_seg_in is known
     int32_t convert_rate;               // output rate the graphs were built for
+    int32_t convert_channels;           // and its channel count
     AVDictionary *format_opts_n;
     char *http_headers;                 // PlayAudioConfig.http_headers (owned), network streams only
     // Network tracks (set at creation): the read thread fills buffer_target_s before the mixer takes anything,
@@ -257,7 +239,7 @@ typedef struct TrackState {
 
     // ---- status published by the worker threads ----
     int32_t opened;                     // atomics.h: 1 once the stream is open and end_pos_us is valid (and fixed)
-    SDL_atomic_t eos_serial;            // queue serial whose last frame has been pushed into sampq, -1 = none
+    int32_t eos_serial;                 // atomics.h: serial whose last frame is in the ring, -1 = none
     SDL_atomic_t loops_remaining;       // -1 infinite, 0 none
     SDL_atomic_t loops_started;         // read thread: loops it has seeked back for (the mixer reports each once)
     SDL_atomic_t filter_reconfigure;    // 1 = rebuild the convert graph before the next frame (device changed)
@@ -266,8 +248,6 @@ typedef struct TrackState {
     int64_t end_pos_us;                 // file position where playback ends, written before `opened` is set
 
     // ---- playback cursor, SDL callback only ----
-    Frame *cur;                         // frame being played, NULL = take the next one
-    int32_t cur_offset;                 // samples of `cur` already played
     double position;                    // seconds, position of the next sample to be played
     double last_frame_pts;              // used to detect loop restarts
     double play_speed;                  // speed of the audio being played (file seconds per output second)
@@ -494,6 +474,12 @@ typedef struct AudioPlayer {
     SDL_atomic_t device_events;         // 1 = an output device was added or removed
     SDL_atomic_t open_device;           // device_id, for the watch
     SDL_atomic_t open_device_lost;      // 1 = the open device was removed
+
+    // ---- ring storage kept between tracks (track.c), guarded by ring_pool_mutex ----
+    SDL_mutex *ring_pool_mutex;
+    float *ring_pool[4];
+    size_t ring_pool_floats[4];
+    int32_t n_ring_pool;
 
     // ---- mixer (SDL callback; others under SDL_LockAudioDevice) ----
     Mixer mixer;

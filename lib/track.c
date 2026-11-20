@@ -32,7 +32,6 @@
 #include <math.h>
 #include "decoder_utils.h"
 #include "filtergraph.h"
-#include "frame_queue_utils.h"
 #include "packet_queue_utils.h"
 #include "libavutil/opt.h"
 
@@ -49,6 +48,7 @@
 
 static int audio_thread(void *arg);
 static int read_thread(void *arg);
+static void wake_producer(TrackState *t);
 
 //+-----------------------------------------------------+
 //| Helpers                                             |
@@ -263,7 +263,7 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     t->pending_seek_percent = -1;
     t->last_frame_pts = NAN;
     t->play_speed = 1.0;
-    SDL_AtomicSet(&t->eos_serial, -1);
+    ffa_store_relaxed(&t->eos_serial, -1);
     SDL_AtomicSet(&t->loops_remaining, SDL_AtomicGet(&ap->loop_count));
 
     if (!(t->filename = av_strdup(filename))) goto fail;
@@ -298,7 +298,8 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     }
 
     if (packet_queue_init(&t->audio_queue) < 0) goto fail;
-    if (frame_queue_init(&t->sampq, &t->audio_queue, SAMPLE_QUEUE_SIZE) < 0) goto fail;
+    if (!(t->ring_mutex = SDL_CreateMutex())) goto fail;
+    if (!(t->ring_cond = SDL_CreateCond())) goto fail;
     if (!(t->continue_read_thread = SDL_CreateCond())) goto fail;
     if (!(t->wait_mutex = SDL_CreateMutex())) goto fail;
     if (!(t->seek_mutex = SDL_CreateMutex())) goto fail;
@@ -332,7 +333,11 @@ void track_destroy(TrackState *t) {
     if (t->read_tid) {
         SDL_AtomicSet(&t->abort_request, 1);
         packet_queue_abort(&t->audio_queue);
-        if (t->sampq.mutex) frame_queue_signal(&t->sampq);
+        if (t->ring_mutex && t->ring_cond) {
+            SDL_LockMutex(t->ring_mutex);
+            SDL_CondSignal(t->ring_cond);
+            SDL_UnlockMutex(t->ring_mutex);
+        }
         if (t->wait_mutex && t->continue_read_thread) wake_read_thread(t);
         // A decoder waiting for an output device (ensure_convert_graph) sees the abort now instead of after 100 ms
         SDL_LockMutex(t->ap->format_mutex);
@@ -343,7 +348,14 @@ void track_destroy(TrackState *t) {
         t->read_tid = NULL;
     }
 
-    if (t->sampq.mutex) frame_queue_destroy(&t->sampq);
+    {
+        float *old;
+        size_t old_floats;
+        ring_set_storage(&t->ring, NULL, 1, 0, 0, &old, &old_floats); // nothing reads it any more
+        if (old) ring_storage_give(t->ap, old, old_floats);
+    }
+    SDL_DestroyCond(t->ring_cond);
+    SDL_DestroyMutex(t->ring_mutex);
     if (t->audio_queue.mutex) packet_queue_destroy(&t->audio_queue);
     av_channel_layout_uninit(&t->audio_filter_src.ch_layout);
     av_dict_free(&t->format_opts_n);
@@ -599,7 +611,7 @@ static bool handle_demux_end(TrackState *t, AVPacket *pkt) {
 static void read_thread_fail(TrackState *t) {
     SDL_AtomicSet(&t->had_error, 1);
     // Nothing more will ever come out of this track
-    SDL_AtomicSet(&t->eos_serial, packet_queue_serial(&t->audio_queue));
+    ffa_store_release(&t->eos_serial, packet_queue_serial(&t->audio_queue));
     ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
 }
 
@@ -727,6 +739,7 @@ static int read_thread(void *arg) {
             else {
                 // New serial: the decoder, the filter graph and the mixer drop everything older
                 packet_queue_flush(&t->audio_queue);
+                wake_producer(t); // it may be waiting for room with audio from before the seek
                 SDL_LockMutex(t->seek_mutex);
                 free_stream_meta(t->stream_meta);
                 t->stream_meta = NULL;
@@ -804,7 +817,7 @@ fail:
     read_thread_fail(t);
 end:
     if (t->audio_stream >= 0) {
-        decoder_abort(&t->audio_decoder, &t->sampq); // joins the audio thread
+        decoder_abort(&t->audio_decoder, t->ring_mutex, t->ring_cond); // joins the audio thread
         decoder_destroy(&t->audio_decoder);
         t->audio_stream = -1;
         t->audio_st = NULL;
@@ -823,22 +836,133 @@ end:
 //| Audio (decoder) thread                              |
 //+-----------------------------------------------------+
 
+// Frames per ring marker at most; larger frames are written in pieces
+#define RING_MAX_CHUNK_FRAMES 8192
+
 // Decoded audio kept ready for the mixer, after all filters. Small enough that filter changes are
 // heard quickly, large enough to ride out scheduling hiccups.
 #define DECODED_BUFFER_SECONDS 0.5
 
-static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const int serial) {
-    Frame *af = frame_queue_peek_writable(&t->sampq);
-    if (!af) {
-        av_frame_unref(frame);
-        return AVERROR_EXIT;
+// Ring storage is kept between tracks: a few hundred KB allocated and freed with every track would be the kind of
+// large block glibc raises its trim thresholds for (see "Memory use" in the readme)
+static float *ring_storage_take(AudioPlayer *ap, const size_t floats, size_t *got) {
+    SDL_LockMutex(ap->ring_pool_mutex);
+    int best = -1;
+    for (int i = 0; i < ap->n_ring_pool; i++)
+        if (ap->ring_pool_floats[i] >= floats && (best < 0 || ap->ring_pool_floats[i] < ap->ring_pool_floats[best]))
+            best = i;
+    float *buf = NULL;
+    if (best >= 0) {
+        buf = ap->ring_pool[best];
+        *got = ap->ring_pool_floats[best];
+        ap->n_ring_pool--;
+        ap->ring_pool[best] = ap->ring_pool[ap->n_ring_pool];
+        ap->ring_pool_floats[best] = ap->ring_pool_floats[ap->n_ring_pool];
     }
-    af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb) - t->pts_offset;
-    af->serial = serial;
-    af->speed = t->speed_chain.graph ? t->speed_cur : 1.0;
-    av_frame_move_ref(af->frame, frame);
-    frame_queue_push(&t->sampq);
+    SDL_UnlockMutex(ap->ring_pool_mutex);
+    if (!buf && (buf = av_malloc(floats * sizeof(float)))) *got = floats;
+    return buf;
+}
+
+void ring_storage_give(AudioPlayer *ap, float *buf, const size_t floats) {
+    SDL_LockMutex(ap->ring_pool_mutex);
+    const int n = (int)(sizeof(ap->ring_pool) / sizeof(ap->ring_pool[0]));
+    if (ap->n_ring_pool < n) {
+        ap->ring_pool[ap->n_ring_pool] = buf;
+        ap->ring_pool_floats[ap->n_ring_pool] = floats;
+        ap->n_ring_pool++;
+        buf = NULL;
+    }
+    SDL_UnlockMutex(ap->ring_pool_mutex);
+    av_free(buf);
+}
+
+void ring_storage_free_all(AudioPlayer *ap) {
+    for (int i = 0; i < ap->n_ring_pool; i++) av_free(ap->ring_pool[i]);
+    ap->n_ring_pool = 0;
+}
+
+static void wake_producer(TrackState *t) {
+    SDL_LockMutex(t->ring_mutex);
+    SDL_CondSignal(t->ring_cond);
+    SDL_UnlockMutex(t->ring_mutex);
+}
+
+// Storage for DECODED_BUFFER_SECONDS of the output format plus a chunk. Another device that needs more (more channels,
+// a higher rate) gets new storage once the mixer has taken or dropped everything in the old one.
+static int ensure_ring(TrackState *t) {
+    SampleRing *r = &t->ring;
+    const int channels = t->convert_channels;
+    const uint32_t need = (uint32_t)(t->convert_rate * DECODED_BUFFER_SECONDS) + RING_MAX_CHUNK_FRAMES;
+    uint32_t frames = 1;
+    while (frames < need) frames <<= 1;
+    if (r->base && r->stride == channels && ring_capacity(r) >= frames) return 0;
+    while (ring_pending(r)) { // stale for the new format: the mixer drops it within a period
+        if (packet_queue_aborted(&t->audio_queue)) return AVERROR_EXIT;
+        SDL_LockMutex(t->ring_mutex);
+        if (!packet_queue_aborted(&t->audio_queue))
+            SDL_CondWaitTimeout(t->ring_cond, t->ring_mutex, 10);
+        SDL_UnlockMutex(t->ring_mutex);
+    }
+    size_t got = 0;
+    float *base = ring_storage_take(t->ap, (size_t)frames * (size_t)channels, &got);
+    if (!base) return AVERROR(ENOMEM);
+    float *old;
+    size_t old_floats;
+    ring_set_storage(r, base, frames, channels, got, &old, &old_floats);
+    if (old) ring_storage_give(t->ap, old, old_floats);
     return 0;
+}
+
+
+// Wait until a chunk of `frames` fits under the fill limit. The mixer never signals (no system calls on the audio
+// thread), so this sleeps as long as the mixer needs to play the ring down to half the limit; seeks and aborts wake
+// it early. Returns 1 when there is room, 0 when a seek made the chunk stale, -1 when aborted.
+static int ring_wait_room(TrackState *t, const int frames, const int serial) {
+    const int rate = FFMAX(1, t->convert_rate);
+    const uint32_t high = (uint32_t)(rate * DECODED_BUFFER_SECONDS), low = high / 2;
+    for (;;) {
+        if (packet_queue_aborted(&t->audio_queue)) return -1;
+        if (packet_queue_serial(&t->audio_queue) != serial) return 0;
+        bool stale;
+        const uint32_t used = ring_used_frames(&t->ring, serial, &stale);
+        if (used < high && ring_has_room(&t->ring, (uint32_t)frames)) return 1;
+        // Audio from before a seek is dropped by the mixer within a period; a paused or queued track comes back to
+        // check four times a second
+        const int ms = stale ? 10 : (int)FFMIN(250, FFMAX(5, (int64_t)(used > low ? used - low : 0) * 1000 / rate));
+        SDL_LockMutex(t->ring_mutex);
+        if (!packet_queue_aborted(&t->audio_queue) && packet_queue_serial(&t->audio_queue) == serial)
+            SDL_CondWaitTimeout(t->ring_cond, t->ring_mutex, (Uint32)ms);
+        SDL_UnlockMutex(t->ring_mutex);
+    }
+}
+
+// Copy a converted frame into the ring (in pieces of at most RING_MAX_CHUNK_FRAMES); the frame is unreferenced
+static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const int serial) {
+    const int channels = frame->ch_layout.nb_channels;
+    if (frame->format != AV_SAMPLE_FMT_FLT || channels != t->ring.stride || frame->sample_rate != t->convert_rate) {
+        av_frame_unref(frame); // made for an output format that is gone (the graphs are being rebuilt)
+        return 0;
+    }
+    const double speed = t->speed_chain.graph ? t->speed_cur : 1.0;
+    const double pts = frame->pts == AV_NOPTS_VALUE ? NAN : frame->pts * av_q2d(tb) - t->pts_offset;
+    const float *src = (const float *)frame->data[0];
+    int ret = 0;
+    for (int done = 0; done < frame->nb_samples;) {
+        const int n = FFMIN(frame->nb_samples - done, RING_MAX_CHUNK_FRAMES);
+        const int room = ring_wait_room(t, n, serial);
+        if (room <= 0) {
+            ret = room < 0 ? AVERROR_EXIT : 0;
+            break;
+        }
+        const RingMarker info = { .serial = serial, .rate = frame->sample_rate, .channels = channels,
+                                  .pts = isnan(pts) ? NAN : pts + (double)done / frame->sample_rate * speed,
+                                  .speed = speed };
+        ring_write(&t->ring, src + (size_t)done * channels, n, &info);
+        done += n;
+    }
+    av_frame_unref(frame);
+    return ret;
 }
 
 // Feed one converted frame (NULL = flush) through the user graph, or straight into the queue.
@@ -982,9 +1106,7 @@ static int ensure_convert_graph(TrackState *t) {
     for (;;) {
         const int ret = configure_convert_graph(ap, t);
         if (ret != AVERROR(EAGAIN)) {
-            if (ret >= 0)
-                frame_queue_set_max_samples(&t->sampq, (int64_t)(t->convert_rate * DECODED_BUFFER_SECONDS));
-            return ret;
+            return ret >= 0 ? ensure_ring(t) : ret;
         }
         SDL_LockMutex(ap->format_mutex);
         if (!ap->output_ready && !packet_queue_aborted(&t->audio_queue))
@@ -1058,7 +1180,7 @@ static void run_filter_commands(TrackState *t) {
 
 static void fail_track(TrackState *t) {
     SDL_AtomicSet(&t->had_error, 1);
-    SDL_AtomicSet(&t->eos_serial, packet_queue_serial(&t->audio_queue));
+    ffa_store_release(&t->eos_serial, packet_queue_serial(&t->audio_queue));
     ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
 }
 
@@ -1098,7 +1220,7 @@ static int audio_thread(void *arg) {
                         break;
                 }
                 ended_serial = serial;
-                SDL_AtomicSet(&t->eos_serial, serial);
+                ffa_store_release(&t->eos_serial, serial); // after the last frames are in the ring
             }
             continue;
         }
@@ -1161,7 +1283,7 @@ static int audio_thread(void *arg) {
             break;
         if (ret == AVERROR_EOF) {
             ended_serial = serial;
-            SDL_AtomicSet(&t->eos_serial, serial);
+            ffa_store_release(&t->eos_serial, serial);
         }
     }
 
@@ -1202,16 +1324,22 @@ void track_free_stream_meta(StreamMeta *m) {
     free_stream_meta(m);
 }
 
-bool track_has_audio(TrackState *t) {
+// Drop what the mixer can not play: audio decoded before a seek, or for another output format (a device change). Only
+// index arithmetic: the mixer calls it for every slot each period, also while paused, so a seek frees the ring at once.
+static void drop_stale(TrackState *t, const int serial, const int rate, const int channels) {
+    const RingMarker *m;
+    while ((m = ring_peek(&t->ring)) && (m->serial != serial || m->rate != rate || m->channels != channels))
+        ring_skip(&t->ring);
+}
+
+void track_drop_stale(TrackState *t, const int rate, const int channels) {
+    drop_stale(t, packet_queue_serial(&t->audio_queue), rate, channels);
+}
+
+bool track_has_audio(TrackState *t, const int rate, const int channels) {
     if (SDL_AtomicGet(&t->buffering)) return false; // a network track that is still filling its buffer
-    if (t->cur) return true;
-    const int serial = packet_queue_serial(&t->audio_queue);
-    for (;;) {
-        Frame *f = frame_queue_peek_nb(&t->sampq);
-        if (!f) return false;
-        if (f->serial == serial) return true;
-        frame_queue_next(&t->sampq); // stale frame from before a seek
-    }
+    drop_stale(t, packet_queue_serial(&t->audio_queue), rate, channels);
+    return ring_peek(&t->ring) != NULL;
 }
 
 int track_pull(TrackState *t, float *dst, const int frames, const int rate, const int channels, bool *eos, bool *looped) {
@@ -1220,75 +1348,53 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
     *eos = false;
     *looped = false;
 
-    if (t->cur && t->cur->serial != serial) {
-        frame_queue_next(&t->sampq);
-        t->cur = NULL;
-    }
-
     if (SDL_AtomicGet(&t->buffering)) {
         if (t->started) t->stalled = true;
         return 0;
     }
 
     while (written < frames) {
-        if (!t->cur) {
-            // The end marker is read before the queue: the decoder sets it after pushing its last frames, so an empty
-            // queue after a set marker really is the end (read the other way round, those frames could be cut)
-            const bool ended = SDL_AtomicGet(&t->eos_serial) == serial;
-            Frame *f = frame_queue_peek_nb(&t->sampq);
-            if (!f) {
-                if (ended)
-                    *eos = true;
-                else if (t->network && t->started) {
-                    // The network fell behind: wait for buffer_seconds of data instead of stuttering
-                    SDL_AtomicSet(&t->buffering, 1);
-                    t->stalled = true;
-                }
-                break; // end of track, or the decoder has not caught up yet (underrun)
+        // The end marker is read before the ring: the decoder sets it after writing its last frames, so an empty
+        // ring after a set marker really is the end (read the other way round, those frames could be cut)
+        const bool ended = ffa_load_acquire(&t->eos_serial) == serial;
+        drop_stale(t, serial, rate, channels);
+        const RingMarker *m = ring_peek(&t->ring);
+        if (!m) {
+            if (ended)
+                *eos = true;
+            else if (t->network && t->started) {
+                // The network fell behind: wait for buffer_seconds of data instead of stuttering
+                SDL_AtomicSet(&t->buffering, 1);
+                t->stalled = true;
             }
-            if (f->serial != serial
-                || f->frame->sample_rate != rate
-                || f->frame->ch_layout.nb_channels != channels
-                || f->frame->format != AV_SAMPLE_FMT_FLT) {
-                frame_queue_next(&t->sampq); // stale: from before a seek or a device change
-                continue;
-            }
-            if (!isnan(f->pts)) {
+            break; // end of track, or the decoder has not caught up yet (underrun)
+        }
+        if (ring_offset(&t->ring) == 0) {
+            // The first frames of a chunk: its position, speed and (at the start or after a seek) the clock
+            if (!isnan(m->pts)) {
                 // A jump back without a seek is a loop only if the read thread actually looped; anything else
                 // (e.g. a small position correction from the speed stage) is not reported
-                if (t->started && !isnan(t->last_frame_pts) && f->serial == t->last_frame_serial &&
-                    f->pts < t->last_frame_pts - LOOP_DETECT_SECONDS &&
+                if (t->started && !isnan(t->last_frame_pts) && m->serial == t->last_frame_serial &&
+                    m->pts < t->last_frame_pts - LOOP_DETECT_SECONDS &&
                     SDL_AtomicGet(&t->loops_started) > t->loops_heard) {
                     t->loops_heard++;
                     *looped = true;
                 }
-                t->last_frame_pts = f->pts;
-                t->last_frame_serial = f->serial;
-                t->position = f->pts;
+                t->last_frame_pts = m->pts;
+                t->last_frame_serial = m->serial;
+                t->position = m->pts;
             }
-            t->cur = f;
-            t->cur_offset = 0;
-            t->play_speed = f->speed > 0 ? f->speed : 1.0;
-            if (f->serial != t->clock_serial) { // the start, or the first frame after a seek
-                t->clock_serial = f->serial;
+            t->play_speed = m->speed > 0 ? m->speed : 1.0;
+            if (m->serial != t->clock_serial) {
+                t->clock_serial = m->serial;
                 t->play_clock = 0;
             }
         }
-
-        const int available = t->cur->frame->nb_samples - t->cur_offset;
-        const int n = FFMIN(frames - written, available);
-        memcpy(dst + (size_t)written * channels,
-               (const float *)t->cur->frame->data[0] + (size_t)t->cur_offset * channels,
-               (size_t)n * channels * sizeof(float));
+        const double speed = m->speed; // the marker may be reused once ring_read() has finished it
+        const int n = ring_read(&t->ring, dst + (size_t)written * channels, frames - written);
         written += n;
-        t->cur_offset += n;
-        t->position += (double)n / rate * t->cur->speed;
-        t->play_clock += (double)n / rate * t->cur->speed;
-
-        if (t->cur_offset >= t->cur->frame->nb_samples) {
-            frame_queue_next(&t->sampq);
-            t->cur = NULL;
-        }
+        t->position += (double)n / rate * speed;
+        t->play_clock += (double)n / rate * speed;
     }
 
     if (written > 0) {
