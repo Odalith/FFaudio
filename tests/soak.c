@@ -15,6 +15,8 @@
  *     -r minutes   shut down and re-initialize the player this often (default 30, 0 = never)
  *     -j percent   share of picks that are non-audio files from the folders (default 3)
  *     -c file      ReplayGain cache file (default soak-replaygain.cache; never the user's own cache)
+ *     -k           keep the ReplayGain cache file if it exists (default: start with an empty cache)
+ *     -d minutes   write malloc_info() (glibc: every arena's free blocks by size) to malloc-<seconds>.xml this often
  *     -m           call malloc_trim(0) after every sample (glibc), to see how much of the growth is memory that
  *                  malloc has freed but kept
  *     -v           print every ffaudio log message
@@ -118,7 +120,7 @@ static atomic_int stop_requested;
 static atomic_long heartbeat;          // seconds since start, written by the main loop
 static atomic_long last_started_at;    // when a track last started
 static const char *_Atomic last_action = "start";
-static bool verbose, trim;
+static bool verbose, trim, keep_cache;
 
 static double now_s(void) {
     struct timespec ts;
@@ -558,7 +560,8 @@ int main(int argc, char **argv) {
     const char *csv_path = "soak.csv";
     base_seed = (uint64_t)time(NULL);
     int opt;
-    while ((opt = getopt(argc, argv, "t:x:s:o:i:r:j:c:mv")) != -1) {
+    double dump_minutes = 0;
+    while ((opt = getopt(argc, argv, "t:x:s:o:i:r:j:c:kd:mv")) != -1) {
         switch (opt) {
             case 't': hours = atof(optarg); break;
             case 'x': scale = atof(optarg); break;
@@ -570,6 +573,8 @@ int main(int argc, char **argv) {
             case 'c': cache_file = optarg; break;
             case 'v': verbose = true; break;
             case 'm': trim = true; break;
+            case 'k': keep_cache = true; break;
+            case 'd': dump_minutes = atof(optarg); break;
             default:
                 fprintf(stderr, "usage: %s [-t hours] [-x scale] [-s seed] [-o csv] [-i s] [-r min] [-j %%] [-c cache] [-v] <dir>...\n", argv[0]);
                 return 2;
@@ -598,7 +603,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     t0 = now_s();
-    remove(cache_file);
+    if (!keep_cache) remove(cache_file);
     au_gain_cache_set_file(cache_file);   // never the user's own cache
     const AuGainScanConfig scan = { .threads = 2, .on_cached = on_cached };
     au_gain_scan_configure(&scan);
@@ -609,6 +614,7 @@ int main(int argc, char **argv) {
     pthread_create(&analyser, NULL, analysis_thread, NULL);
     pthread_create(&watchdog, NULL, watchdog_thread, NULL);
 
+    double next_dump = dump_minutes > 0 ? 0 : 1e18;
     double next_sample = 0, next_reinit = reinit_minutes > 0 ? reinit_minutes * 60.0 : 1e18;
     record();
     while (!atomic_load(&stop_requested) && now_s() - t0 < hours * 3600) {
@@ -626,6 +632,18 @@ int main(int argc, char **argv) {
             play_random(false);
             atomic_fetch_add(&n_reinits, 1);
             next_reinit += reinit_minutes * 60.0;
+        }
+        if (t >= next_dump) {
+#ifdef __GLIBC__
+            char name[64];
+            snprintf(name, sizeof(name), "malloc-%06.0f.xml", t);
+            FILE *mf = fopen(name, "w");
+            if (mf) {
+                malloc_info(0, mf);
+                fclose(mf);
+            }
+#endif
+            next_dump = t + dump_minutes * 60;
         }
         if (t >= next_sample) {
 #ifdef __GLIBC__
