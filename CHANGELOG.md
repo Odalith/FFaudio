@@ -9,6 +9,8 @@
 - ffaudio emptied SDL's event queue, so applications that also use SDL lost their keyboard, mouse and window
   events. It now only watches for audio device events and leaves the queue alone; it pumps the queue only when
   SDL video is not initialized (with video, the application's event loop does it).
+- A callback that caused many notifications at once (e.g. changing the device from `on_eof`) could make ffaudio free
+  memory it had already freed.
 
 ## 2.1.0 (unreleased)
 

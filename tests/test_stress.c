@@ -116,6 +116,39 @@ static void test_rapid_replace(void) {
     au_stop_audio();
 }
 
+/* ---------- 4. A callback that makes many notifications ---------- */
+
+// A device change from a callback runs inline and queues a device notification. 40 of them grow the list of
+// notifications while it is being dispatched; that used to free through a pointer into the old list (ASan sees it).
+static AudioDeviceConfig named_device;
+
+static void change_device_many(bool skip, bool error, int32_t handle) {
+    (void)skip; (void)error; (void)handle;
+    for (int i = 0; i < 40; i++)
+        au_configure_audio_device(i % 2 ? NULL : &named_device);
+}
+
+static void test_callback_adds_many_notes(void) {
+    int n = 0;
+    char **devs = NULL;
+    if (au_get_audio_devices(&n, &devs) != AU_OK || n < 1) {
+        printf("   no named output device: skipped\n");
+        return;
+    }
+    named_device = (AudioDeviceConfig){ .audio_device = devs[0], .audio_device_index = 0 };
+    SDL_LockMutex(tc_mutex);
+    tc_on_eof_hook = change_device_many;
+    SDL_UnlockMutex(tc_mutex);
+    au_play_audio(fx("s44_stereo.flac"), NULL);
+    CHECK(TC_WAIT_FIELD(eof, 1, 5000));
+    CHECK(TC_WAIT_FIELD(device, 40, 10000));
+    SDL_LockMutex(tc_mutex);
+    tc_on_eof_hook = NULL;
+    SDL_UnlockMutex(tc_mutex);
+    au_configure_audio_device(NULL);
+    au_free_audio_devices(devs, n);
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
 
@@ -129,6 +162,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_rapid_replace);
     RUN_TEST(test_callback_driven_playlist);
     RUN_TEST(test_random_ops);
+    RUN_TEST(test_callback_adds_many_notes);
 
     au_shutdown();
     return tc_finish("test_stress");

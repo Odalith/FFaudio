@@ -172,7 +172,7 @@ static void note_add(const Note n) {
     if (notes.n == notes.cap) {
         const int cap = notes.cap ? notes.cap * 2 : 32;
         Note *items = av_realloc_array(notes.items, cap, sizeof(Note));
-        if (!items) { av_free(n.text); return; }
+        if (!items) { av_free(n.text); av_free(n.text2); return; }
         notes.items = items;
         notes.cap = cap;
     }
@@ -181,45 +181,47 @@ static void note_add(const Note n) {
 
 static void dispatch_notes(AudioPlayer *ap) {
     void *ud = ap->user_data;
+    // Each note is copied out before its callback: a callback can run API calls inline that add notes and move the
+    // array. Notes added meanwhile are dispatched in this same pass.
     for (int i = 0; i < notes.n; i++) {
-        Note *n = &notes.items[i];
+        const Note n = notes.items[i];
         if (!SDL_AtomicGet(&ap->shutting_down)) {
-            switch (n->type) {
+            switch (n.type) {
                 case NOTE_LOG:
-                    if (ap->notify_of_log_callback) ap->notify_of_log_callback(n->text, n->request, (enum AU_LOG_LEVEL)n->i, ud);
+                    if (ap->notify_of_log_callback) ap->notify_of_log_callback(n.text, n.request, (enum AU_LOG_LEVEL)n.i, ud);
                     break;
                 case NOTE_EOF:
-                    if (ap->notify_of_eof_callback) ap->notify_of_eof_callback(n->b1, n->b2, n->handle, ud);
+                    if (ap->notify_of_eof_callback) ap->notify_of_eof_callback(n.b1, n.b2, n.handle, ud);
                     break;
                 case NOTE_RESTART:
-                    if (ap->notify_of_restart_callback) ap->notify_of_restart_callback(n->handle, n->d, n->b1, n->i, ud);
+                    if (ap->notify_of_restart_callback) ap->notify_of_restart_callback(n.handle, n.d, n.b1, n.i, ud);
                     break;
                 case NOTE_DURATION:
-                    if (ap->notify_of_duration_update_callback) ap->notify_of_duration_update_callback(n->handle, n->d, ud);
+                    if (ap->notify_of_duration_update_callback) ap->notify_of_duration_update_callback(n.handle, n.d, ud);
                     break;
                 case NOTE_PREPARE_NEXT:
-                    if (ap->notify_of_prepare_next_callback) ap->notify_of_prepare_next_callback(n->handle, ud);
+                    if (ap->notify_of_prepare_next_callback) ap->notify_of_prepare_next_callback(n.handle, ud);
                     break;
                 case NOTE_TRACK_STARTED:
-                    if (ap->notify_of_track_started_callback) ap->notify_of_track_started_callback(n->handle, ud);
+                    if (ap->notify_of_track_started_callback) ap->notify_of_track_started_callback(n.handle, ud);
                     break;
                 case NOTE_STREAM_METADATA:
                     if (ap->notify_of_stream_metadata_callback)
-                        ap->notify_of_stream_metadata_callback(n->handle, n->text, n->text2, ud);
+                        ap->notify_of_stream_metadata_callback(n.handle, n.text, n.text2, ud);
                     break;
                 case NOTE_BUFFERING:
-                    if (ap->notify_of_buffering_callback) ap->notify_of_buffering_callback(n->handle, n->b1, n->d, ud);
+                    if (ap->notify_of_buffering_callback) ap->notify_of_buffering_callback(n.handle, n.b1, n.d, ud);
                     break;
                 case NOTE_DEVICES_CHANGED:
                     if (ap->notify_of_audio_devices_changed_callback) ap->notify_of_audio_devices_changed_callback(ud);
                     break;
                 case NOTE_DEVICE:
-                    if (ap->notify_of_audio_device_update_callback) ap->notify_of_audio_device_update_callback(n->i, (int32_t)n->d, ud);
+                    if (ap->notify_of_audio_device_update_callback) ap->notify_of_audio_device_update_callback(n.i, (int32_t)n.d, ud);
                     break;
             }
         }
-        av_free(n->text);
-        av_free(n->text2);
+        av_free(n.text);
+        av_free(n.text2);
     }
     notes.n = 0;
 }
