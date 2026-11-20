@@ -143,6 +143,10 @@ AuMediaInfo *media_info_from_context(const AVFormatContext *ic, const int stream
     info->filename = av_strdup(filename ? filename : "");
     info->container = av_strdup(ic->iformat && ic->iformat->name ? ic->iformat->name : "");
     info->duration = ic->duration != AV_NOPTS_VALUE ? ic->duration / AV_TIME_BASE_DOUBLE : -1;
+    info->live = info->duration <= 0;
+    // HLS seeks through its playlist, everything else needs a seekable byte stream
+    info->seekable = !info->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
+                                     (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
     info->bit_rate = ic->bit_rate > 0 ? ic->bit_rate : 0;
 
     // Container tags first, stream tags (Ogg, Opus, some MP4) only where the container has none
@@ -248,6 +252,8 @@ int64_t au_media_bit_rate(const AuMediaInfo *info) { return info ? info->bit_rat
 int au_media_sample_rate(const AuMediaInfo *info) { return info ? info->sample_rate : 0; }
 int au_media_channels(const AuMediaInfo *info) { return info ? info->channels : 0; }
 int au_media_bits_per_sample(const AuMediaInfo *info) { return info ? info->bits_per_sample : 0; }
+bool au_media_is_live(const AuMediaInfo *info) { return info && info->live; }
+bool au_media_is_seekable(const AuMediaInfo *info) { return info && info->seekable; }
 
 const char *au_media_tag(const AuMediaInfo *info, const char *key) {
     if (!info || !key || !key[0]) return NULL;

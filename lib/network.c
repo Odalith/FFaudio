@@ -29,6 +29,7 @@
 #include "libavutil/avstring.h"
 #include "libavutil/bprint.h"
 #include "libavutil/mem.h"
+#include "libavutil/opt.h"
 
 #include "network.h"
 #include "once.h"
@@ -126,6 +127,13 @@ static char *crlf_headers(const char *headers) {
     return s;
 }
 
+void network_after_open(AVFormatContext *ic, const char *path) {
+    if (!ic || !ic->pb || !au_is_network_url(path)) return;
+    char ua[8];
+    if (network_config(ua, sizeof(ua)).reconnect_attempts > 0)
+        av_opt_set(ic->pb, "reconnect_on_network_error", "1", AV_OPT_SEARCH_CHILDREN); // not every protocol has it
+}
+
 void network_input_options(AVDictionary **opts, const char *path, const char *http_headers) {
     const bool net = au_is_network_url(path);
     av_dict_set(opts, "protocol_whitelist", net ? FF_NETWORK_PROTOCOLS : FF_LOCAL_PROTOCOLS, 0);
@@ -138,6 +146,18 @@ void network_input_options(AVDictionary **opts, const char *path, const char *ht
     av_dict_set(opts, "rw_timeout", us, 0);   // every read and write (microseconds)
     av_dict_set(opts, "timeout", us, 0);      // the socket, connecting included
     av_dict_set(opts, "user_agent", c.user_agent, 0);
+    // FFmpeg's http reconnects: an interrupted file continues with a range request, a live stream is opened again.
+    // Network errors (resets) are retried only once the stream is open (network_after_open()), so a server that
+    // can not be reached still fails within the timeout
+    if (c.reconnect_attempts > 0) {
+        char n[16];
+        snprintf(n, sizeof(n), "%d", c.reconnect_attempts);
+        av_dict_set(opts, "reconnect", "1", 0);
+        av_dict_set(opts, "reconnect_streamed", "1", 0);
+        av_dict_set(opts, "reconnect_on_http_error", "5xx", 0);
+        av_dict_set(opts, "reconnect_max_retries", n, 0);
+        av_dict_set(opts, "reconnect_delay_max", "30", 0);
+    }
     if (http_headers && http_headers[0]) {
         char *h = crlf_headers(http_headers);
         if (h && h[0]) av_dict_set(opts, "headers", h, 0);

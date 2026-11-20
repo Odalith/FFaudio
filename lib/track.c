@@ -37,6 +37,10 @@
 
 #define MAX_QUEUE_SIZE (15 * 1024 * 1024)
 #define MIN_FRAMES 25
+// Network tracks read ahead by time (max_buffer_seconds); this caps the bytes for very high bit rates
+#define NET_MAX_QUEUE_SIZE (64 * 1024 * 1024)
+// Packets without durations (some live streams): this many bytes count as a full buffer
+#define NET_BUFFER_FALLBACK_BYTES (256 * 1024)
 // A backwards jump of the frame timestamps larger than this, without a seek, means the track looped
 #define LOOP_DETECT_SECONDS 0.25
 // Most audio (in file seconds) the speed stage can hold between its input and output
@@ -63,6 +67,28 @@ static int stream_has_enough_packets(const AVStream *st, const int stream_id, Pa
            packet_queue_aborted(queue) ||
            (st->disposition & AV_DISPOSITION_ATTACHED_PIC) ||
            (nb_packets > MIN_FRAMES && (!duration || av_q2d(st->time_base) * duration > 1.0));
+}
+
+// Seconds of audio in the packet queue (0 when the packets have no durations)
+static double queued_seconds(const TrackState *t) {
+    PacketQueue *q = (PacketQueue *)&t->audio_queue;
+    SDL_LockMutex(q->mutex);
+    const int64_t d = q->duration;
+    SDL_UnlockMutex(q->mutex);
+    return t->audio_st ? d * av_q2d(t->audio_st->time_base) : 0;
+}
+
+static int queue_byte_size(PacketQueue *q);
+
+// Network tracks: end the wait for data once enough is queued (or nothing more will come)
+static void update_buffering(TrackState *t) {
+    if (!t->network) return;
+    const double s = queued_seconds(t);
+    SDL_AtomicSet(&t->buffered_ms, (int)(s * 1000));
+    if (!SDL_AtomicGet(&t->buffering)) return;
+    if (t->demux_eof || SDL_AtomicGet(&t->had_error) || s >= t->buffer_target_s ||
+        (s == 0 && queue_byte_size(&t->audio_queue) >= NET_BUFFER_FALLBACK_BYTES))
+        SDL_AtomicSet(&t->buffering, 0);
 }
 
 static int queue_byte_size(PacketQueue *q) {
@@ -127,6 +153,14 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     SDL_AtomicSet(&t->loops_remaining, SDL_AtomicGet(&ap->loop_count));
 
     if (!(t->filename = av_strdup(filename))) goto fail;
+    t->buffering_reported = -1;
+    if ((t->network = au_is_network_url(filename))) {
+        char ua[8];
+        const AuNetworkConfig nc = network_config(ua, sizeof(ua));
+        t->buffer_target_s = nc.buffer_seconds;
+        t->max_buffer_s = nc.max_buffer_seconds;
+        SDL_AtomicSet(&t->buffering, 1);   // nothing plays until the first buffer_seconds are in
+    }
     t->iformat = av_find_input_format(filename);
 
     if (config) {
@@ -460,6 +494,7 @@ static int read_thread(void *arg) {
     }
     av_dict_set(&t->format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
     t->ic = ic;
+    network_after_open(ic, t->filename);
 
     if (ff_input_lacks_audio(ic)) {
         if (!SDL_AtomicGet(&t->abort_request))
@@ -483,6 +518,7 @@ static int read_thread(void *arg) {
                        strcmp("ogg", ic->iformat->name) != 0;
     t->realtime = is_realtime(ic);
     t->infinite_buffer = t->realtime;
+    t->live = t->network && (ic->duration == AV_NOPTS_VALUE || ic->duration <= 0);
 
     if (t->start_time != AV_NOPTS_VALUE && seek_file(t, t->start_time) < 0)
         ff_log(AU_LOG_WARNING, "%s: could not seek to position %0.3f", t->filename, t->start_time / AV_TIME_BASE_DOUBLE);
@@ -542,10 +578,14 @@ static int read_thread(void *arg) {
             t->seek_req = true;
             t->pending_seek_percent = -1;
         }
-        const bool seek_req = t->seek_req;
+        bool seek_req = t->seek_req;
         const int64_t seek_pos = t->seek_pos;
         t->seek_req = false;
         SDL_UnlockMutex(t->seek_mutex);
+        if (seek_req && t->live) {
+            ff_log(AU_LOG_INFO, "%s: live stream, seeking is ignored", t->filename);
+            seek_req = false;
+        }
 
         if (seek_req) {
             if (seek_file(t, seek_pos) < 0) {
@@ -559,10 +599,21 @@ static int read_thread(void *arg) {
             }
         }
 
+        update_buffering(t);
+
         /* if the queue is full, no need to read more */
-        if (!t->infinite_buffer &&
-            (queue_byte_size(&t->audio_queue) > MAX_QUEUE_SIZE ||
-             stream_has_enough_packets(t->audio_st, t->audio_stream, &t->audio_queue))) {
+        const bool full = t->network
+            ? (queue_byte_size(&t->audio_queue) > NET_MAX_QUEUE_SIZE || packet_queue_aborted(&t->audio_queue) ||
+               queued_seconds(t) >= t->max_buffer_s)
+            : (queue_byte_size(&t->audio_queue) > MAX_QUEUE_SIZE ||
+               stream_has_enough_packets(t->audio_st, t->audio_stream, &t->audio_queue));
+        if (!t->infinite_buffer && full) {
+            wait_ms(t, 10);
+            continue;
+        }
+
+        // A network stream that has ended stays ended (reading again only logs errors); a seek starts it again
+        if (t->demux_eof && t->network) {
             wait_ms(t, 10);
             continue;
         }
@@ -993,6 +1044,7 @@ end:
 //+-----------------------------------------------------+
 
 bool track_has_audio(TrackState *t) {
+    if (SDL_AtomicGet(&t->buffering)) return false; // a network track that is still filling its buffer
     if (t->cur) return true;
     const int serial = packet_queue_serial(&t->audio_queue);
     for (;;) {
@@ -1014,12 +1066,22 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
         t->cur = NULL;
     }
 
+    if (SDL_AtomicGet(&t->buffering)) {
+        if (t->started) t->stalled = true;
+        return 0;
+    }
+
     while (written < frames) {
         if (!t->cur) {
             Frame *f = frame_queue_peek_nb(&t->sampq);
             if (!f) {
                 if (SDL_AtomicGet(&t->eos_serial) == serial)
                     *eos = true;
+                else if (t->network && t->started) {
+                    // The network fell behind: wait for buffer_seconds of data instead of stuttering
+                    SDL_AtomicSet(&t->buffering, 1);
+                    t->stalled = true;
+                }
                 break; // end of track, or the decoder has not caught up yet (underrun)
             }
             if (f->serial != serial
@@ -1062,7 +1124,12 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
         }
     }
 
-    if (written > 0)
+    if (written > 0) {
         t->started = true;
+        if (t->stalled) { // after a stall: fade in over 10 ms instead of starting with a click
+            t->stalled = false;
+            t->resume_fade = t->resume_fade_len = FFMAX(1, rate / 100);
+        }
+    }
     return written;
 }

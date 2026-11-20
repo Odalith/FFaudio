@@ -148,7 +148,7 @@ void ff_log(const enum AU_LOG_LEVEL level, const char *fmt, ...) {
 
 typedef enum NoteType {
     NOTE_LOG, NOTE_EOF, NOTE_RESTART, NOTE_DURATION, NOTE_PREPARE_NEXT, NOTE_TRACK_STARTED, NOTE_DEVICE,
-    NOTE_DEVICES_CHANGED,
+    NOTE_DEVICES_CHANGED, NOTE_BUFFERING,
 } NoteType;
 
 typedef struct Note {
@@ -202,6 +202,9 @@ static void dispatch_notes(AudioPlayer *ap) {
                     break;
                 case NOTE_TRACK_STARTED:
                     if (ap->notify_of_track_started_callback) ap->notify_of_track_started_callback(n->handle, ud);
+                    break;
+                case NOTE_BUFFERING:
+                    if (ap->notify_of_buffering_callback) ap->notify_of_buffering_callback(n->handle, n->b1, n->d, ud);
                     break;
                 case NOTE_DEVICES_CHANGED:
                     if (ap->notify_of_audio_devices_changed_callback) ap->notify_of_audio_devices_changed_callback(ud);
@@ -796,6 +799,20 @@ static void housekeeping(AudioPlayer *ap) {
         }
     }
 
+    // Network tracks waiting for data: every change, and progress every 500 ms while it lasts
+    const uint32_t now = SDL_GetTicks();
+    for (int i = 0; i < ap->n_tracks; i++) {
+        TrackState *t = ap->tracks[i];
+        if (t->ended || !t->network) continue;
+        const int b = SDL_AtomicGet(&t->buffering);
+        if (b != t->buffering_reported || (b && now - t->buffering_note_ticks >= 500)) {
+            note_add((Note){ .type = NOTE_BUFFERING, .handle = t->handle, .b1 = b != 0,
+                             .d = SDL_AtomicGet(&t->buffered_ms) / 1000.0 });
+            t->buffering_reported = b;
+            t->buffering_note_ticks = now;
+        }
+    }
+
     // Devices coming and going
     bool check_devices = false;
     SDL_Event e;
@@ -987,6 +1004,7 @@ int au_initialize(const InitializeConfig* config) {
     ap->notify_of_track_started_callback = config->on_track_started;
     ap->notify_of_audio_device_update_callback = config->on_audio_device_update;
     ap->notify_of_audio_devices_changed_callback = config->on_audio_devices_changed;
+    ap->notify_of_buffering_callback = config->on_buffering;
     ap->audio_target.fmt = AV_SAMPLE_FMT_NONE;
     ap->mixer.pause_gain = 1.0f;
     ap->mixer.pause_to = 1.0f;

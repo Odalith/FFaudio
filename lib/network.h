@@ -21,6 +21,7 @@
 
 #include <stdbool.h>
 #include "libavutil/dict.h"
+#include "libavformat/avformat.h"
 #include "ffaudio.h"
 
 // What FFmpeg may open for a local path and for a URL (protocol_whitelist; nested opens, such as HLS segments and
@@ -34,5 +35,9 @@ AuNetworkConfig network_config(char *ua, size_t ua_size);
 // Options for avformat_open_input(&ic, path, ...): the protocol whitelist, and for URLs the timeouts, user agent
 // and extra request headers (may be NULL)
 void network_input_options(AVDictionary **opts, const char *path, const char *http_headers);
+
+// After a successful open: also reconnect after network errors (not done while connecting, so an unreachable
+// server fails within the timeout instead of being retried)
+void network_after_open(AVFormatContext *ic, const char *path);
 
 #endif //FFAUDIO_NETWORK_H

@@ -9,6 +9,10 @@
  *   /status/404         404 Not Found
  *   /hang               reads the request and never answers (until the server stops)
  *   /text/<name>        the file as text, after replacing "{PORT}" with the server's port (playlists)
+ *   /live/<name>        the file over and over without a length, like an Icecast stream
+ *
+ * Options for /files and /live: ?bps=N sends at most N bytes per second, ?drop=N closes the connection after N
+ * bytes of the body (only on the first request for that path, so a reconnect gets through).
  */
 #ifndef FFAUDIO_TEST_HTTP_SERVER_H
 #define FFAUDIO_TEST_HTTP_SERVER_H
@@ -49,7 +53,60 @@ typedef struct TsServer {
     char last_path[512];
     char last_user_agent[256];
     char paths[64][128];            // the first 64 request paths, in order
+    char dropped[16][128];          // paths whose ?drop has been done
+    int n_dropped;
 } TsServer;
+
+typedef struct TsOptions {
+    long bps;                       // bytes per second, 0 = unlimited
+    long drop;                      // close after this many body bytes, 0 = never
+} TsOptions;
+
+// Split "path?bps=1&drop=2" into the path and its options; a drop is only done once per path
+static void ts_parse_options(TsServer *s, char *path, TsOptions *o) {
+    memset(o, 0, sizeof(*o));
+    char key[128];                      // the whole request, so the same file with another query drops again
+    snprintf(key, sizeof(key), "%s", path);
+    char *q = strchr(path, '?');
+    if (!q) return;
+    *q++ = '\0';
+    for (char *kv = q; kv && *kv;) {   // "a=1&b=2" (strtok is not thread-safe)
+        char *amp = strchr(kv, '&');
+        if (amp) *amp = '\0';
+        if (!strncmp(kv, "bps=", 4)) o->bps = atol(kv + 4);
+        else if (!strncmp(kv, "drop=", 5)) o->drop = atol(kv + 5);
+        kv = amp ? amp + 1 : NULL;
+    }
+    if (o->drop) {
+        SDL_LockMutex(s->lock);
+        bool done = false;
+        for (int i = 0; i < s->n_dropped; i++) done = done || !strcmp(s->dropped[i], key);
+        if (done) o->drop = 0;
+        else if (s->n_dropped < 16) snprintf(s->dropped[s->n_dropped++], sizeof(s->dropped[0]), "%s", key);
+        SDL_UnlockMutex(s->lock);
+    }
+}
+
+static bool ts_send_all(ts_socket sock, const char *data, size_t len);
+
+// Send a body chunk, keeping to o->bps and stopping at o->drop (sent counts the body bytes so far). false = stop.
+static bool ts_send_body(TsServer *s, const ts_socket sock, const char *data, size_t len, const TsOptions *o,
+                         long *sent, const Uint32 start) {
+    while (len > 0 && !SDL_AtomicGet(&s->stop)) {
+        size_t n = len > 4096 ? 4096 : len;
+        if (o->drop && *sent + (long)n > o->drop) n = (size_t)(o->drop - *sent);
+        if (n == 0) return false;               // the planned drop
+        if (o->bps > 0) {                        // wait until this chunk is due
+            const Uint32 due = start + (Uint32)((double)(*sent + (long)n) * 1000.0 / (double)o->bps);
+            while ((Sint32)(due - SDL_GetTicks()) > 0 && !SDL_AtomicGet(&s->stop)) SDL_Delay(5);
+        }
+        if (!ts_send_all(sock, data, n)) return false;
+        data += n;
+        len -= n;
+        *sent += (long)n;
+    }
+    return !SDL_AtomicGet(&s->stop);
+}
 
 typedef struct TsConn {
     TsServer *server;
@@ -107,7 +164,8 @@ static bool ts_header(const char *req, const char *name, char *out, const size_t
     return false;
 }
 
-static void ts_serve_file(TsServer *s, const ts_socket sock, const char *name, const char *req, const bool as_text) {
+static void ts_serve_file(TsServer *s, const ts_socket sock, const char *name, const char *req, const bool as_text,
+                          const TsOptions *o) {
     char path[1200];
     snprintf(path, sizeof(path), "%s/%s", s->root, name);
     FILE *f = (strstr(name, "..") == NULL) ? fopen(path, "rb") : NULL;
@@ -164,12 +222,36 @@ static void ts_serve_file(TsServer *s, const ts_socket sock, const char *name, c
     if (ts_send_all(sock, head, (size_t)n)) {
         fseek(f, from, SEEK_SET);
         char buf[16384];
-        long left = to - from + 1;
+        long left = to - from + 1, sent = 0;
+        const Uint32 start = SDL_GetTicks();
         while (left > 0 && !SDL_AtomicGet(&s->stop)) {
             const size_t want = left > (long)sizeof(buf) ? sizeof(buf) : (size_t)left;
             const size_t got = fread(buf, 1, want, f);
-            if (!got || !ts_send_all(sock, buf, got)) break;
+            if (!got || !ts_send_body(s, sock, buf, got, o, &sent, start)) break;
             left -= (long)got;
+        }
+    }
+    fclose(f);
+}
+
+// The file again and again, with no length: a live stream that ends only when the client hangs up
+static void ts_serve_live(TsServer *s, const ts_socket sock, const char *name, const TsOptions *o) {
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/%s", s->root, name);
+    FILE *f = (strstr(name, "..") == NULL) ? fopen(path, "rb") : NULL;
+    if (!f) {
+        ts_reply(sock, "404 Not Found", NULL, "no such file");
+        return;
+    }
+    const char *head = "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nConnection: close\r\n\r\n";
+    if (ts_send_all(sock, head, strlen(head))) {
+        char buf[16384];
+        long sent = 0;
+        const Uint32 start = SDL_GetTicks();
+        for (;;) {
+            const size_t got = fread(buf, 1, sizeof(buf), f);
+            if (!got) { rewind(f); continue; }
+            if (!ts_send_body(s, sock, buf, got, o, &sent, start)) break;
         }
     }
     fclose(f);
@@ -198,11 +280,14 @@ static int ts_connection(void *arg) {
         SDL_UnlockMutex(s->lock);
 
         char token[64];
-        if (!strncmp(path, "/files/", 7)) ts_serve_file(s, c->sock, path + 7, req, false);
-        else if (!strncmp(path, "/text/", 6)) ts_serve_file(s, c->sock, path + 6, req, true);
+        TsOptions o;
+        ts_parse_options(s, path, &o);
+        if (!strncmp(path, "/files/", 7)) ts_serve_file(s, c->sock, path + 7, req, false, &o);
+        else if (!strncmp(path, "/live/", 6)) ts_serve_live(s, c->sock, path + 6, &o);
+        else if (!strncmp(path, "/text/", 6)) ts_serve_file(s, c->sock, path + 6, req, true, &o);
         else if (!strncmp(path, "/auth/", 6)) {
             if (ts_header(req, "X-Test-Token", token, sizeof(token)) && !strcmp(token, "secret"))
-                ts_serve_file(s, c->sock, path + 6, req, false);
+                ts_serve_file(s, c->sock, path + 6, req, false, &o);
             else
                 ts_reply(c->sock, "401 Unauthorized", NULL, "token needed");
         }

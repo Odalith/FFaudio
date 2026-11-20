@@ -7,6 +7,11 @@
   analysis, for files on web and music servers (seeking with range requests), internet radio and HLS.
   `au_set_network()` sets the user agent and timeouts for all of them (also before `au_initialize()`),
   `PlayAudioConfig.http_headers` adds request headers per track, `au_is_network_url()` tells URLs from paths.
+- Live streams and buffering: network tracks buffer `buffer_seconds` before they start and after the network
+  fell behind (the position holds, a short fade-in on resume) and read ahead up to `max_buffer_seconds`;
+  `on_buffering` reports it. Live streams have no duration and ignore seeks (`au_media_is_live()`,
+  `au_media_is_seekable()`). Dropped connections are re-opened (`reconnect_attempts`): files continue with a range
+  request, live streams pick up again; an unreachable server still fails within the timeout.
 - Protocol whitelists: local paths can only open local files and URLs only http, https, tls, tcp, crypto and
   httpproxy, so playlists (HLS or otherwise) can not reach other protocols or local files.
 - Release archives: FFmpeg with the network protocols and the HLS demuxer; https through the system's GnuTLS

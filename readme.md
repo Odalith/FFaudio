@@ -200,6 +200,13 @@ au_play_audio("https://radio.example.com/stream.mp3", NULL);
 const PlayAudioConfig cfg = { .http_headers = "Authorization: Bearer abc123" };
 au_set_next("https://music.example.com/rest/stream?id=42", &cfg);
 ```
+Network tracks buffer before they start (`AuNetworkConfig.buffer_seconds`, default 2 s) and read ahead up to
+`max_buffer_seconds` (30 s). When the network falls behind, the track waits for a full buffer again instead of
+stuttering: its position holds, and it fades back in. `on_buffering(handle, buffering, buffered_seconds)` reports
+both, for a "buffering..." display. Live streams (internet radio, live HLS) have no duration and ignore seeks;
+`au_media_is_live()` and `au_media_is_seekable()` tell them apart. A dropped connection is opened again
+(`reconnect_attempts`, default 5): a file continues where it stopped, a live stream picks up the broadcast.
+
 Local paths may only open local files and URLs only network protocols, so a playlist can not make FFmpeg read
 local files. A server that stops answering ends the track with an error after the timeout; stopping or skipping
 a track that is still connecting interrupts it. Network files are not measured for ReplayGain unless
@@ -438,7 +445,7 @@ plays a folder on real hardware for listening tests.
 - [ ] Embedded cover art
 - [x] Measure R128 / ReplayGain values for files (loudness analysis; read only)
 - [x] Playback speed (tempo with and without pitch change)
-- [ ] Network streams: HTTP(S) files, HLS and protocol whitelists done; live buffering, reconnects and "now playing" next
+- [ ] Network streams: HTTP(S) files, HLS, protocol whitelists, live buffering and reconnects done; "now playing" next
 - [ ] Cue sheets / gapless playback of track ranges inside one file
 - [x] Verified multichannel (5.1/7.1) playback and configurable downmixing
 - [x] Device added/removed notifications for the application

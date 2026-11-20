@@ -203,6 +203,98 @@ static void test_no_measuring_by_default(void) {
     remove(cache);
 }
 
+/* ---------- live streams, buffering, reconnects ---------- */
+
+// live.mp3 is a constant 128 kbit/s MP3: 16000 bytes per second of audio
+#define LIVE_BPS 16000
+
+static void test_live_stream(void) {
+    au_play_audio(url("/live/live.mp3"), NULL);
+    CHECK(TC_WAIT_FIELD(started, 1, 8000));
+    tc_sleep_ms(1500);
+    CHECK(au_get_audio_duration() < 0);
+    AuMediaInfo *info = au_get_track_info(0);
+    CHECK(info && au_media_is_live(info) && !au_media_is_seekable(info));
+    au_media_info_free(info);
+
+    const double before = au_get_audio_play_time();
+    au_seek_time(60000);                              // ignored: it is live
+    tc_sleep_ms(800);
+    const double after = au_get_audio_play_time();
+    printf("   live: %.2f s -> %.2f s across a seek to 60 s\n", before, after);
+    CHECK(after >= before && after < before + 2);
+    tc_sleep_ms(4000);                                // past the end of the 5 s file: the stream goes on
+    CHECK(tc_snapshot().eof == 0);
+    au_stop_audio();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    CHECK(tc_snapshot().eof_error == 0);
+}
+
+static void test_preroll(void) {
+    // 1.5 s of audio must be in before the first sample plays; at twice real time that takes ~0.75 s
+    const AuNetworkConfig net = { .buffer_seconds = 1.5 };
+    CHECK(au_set_network(&net) == AU_OK);
+    char path[64];
+    snprintf(path, sizeof(path), "/live/live.mp3?bps=%d", 2 * LIVE_BPS);
+    const uint32_t t0 = SDL_GetTicks();
+    au_play_audio(url(path), NULL);
+    CHECK(TC_WAIT_FIELD(started, 1, 8000));
+    const uint32_t took = SDL_GetTicks() - t0;
+    const TcEvents e = tc_snapshot();
+    printf("   first sample after %u ms; buffering on %d, off %d\n", took, e.buffering_on, e.buffering_off);
+    CHECK(took >= 600);
+    CHECK(e.buffering_on >= 1 && e.buffering_off >= 1);
+    au_stop_audio();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    CHECK(au_set_network(NULL) == AU_OK);
+}
+
+static void test_stall(void) {
+    // Data at 0.6x real time: playback has to wait again and again, and its position never runs ahead of the data
+    const AuNetworkConfig net = { .buffer_seconds = 0.5 };
+    CHECK(au_set_network(&net) == AU_OK);
+    char path[64];
+    snprintf(path, sizeof(path), "/live/live.mp3?bps=%d", LIVE_BPS * 6 / 10);
+    au_play_audio(url(path), NULL);
+    tc_sleep_ms(6000);
+    const double pos = au_get_audio_play_time();
+    const TcEvents e = tc_snapshot();
+    printf("   after 6 s at 0.6x: position %.2f s (at most 3.6 s of audio arrived); buffering on %d, off %d\n", pos,
+           e.buffering_on, e.buffering_off);
+    CHECK(e.buffering_on >= 2);                       // the start, and at least one stall
+    CHECK(pos > 1.0 && pos < 3.8);
+    CHECK(e.eof == 0);
+    au_stop_audio();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    CHECK(au_set_network(NULL) == AU_OK);
+}
+
+static void test_reconnect(void) {
+    // A file whose connection drops halfway continues with a range request
+    ts_reset(&srv);
+    play_and_wait(url("/files/long_6s.flac?drop=40000"), NULL, 1, 12000);
+    printf("   dropped file: %d requests, %d with a range\n", ts_count(&srv, "/files/long_6s.flac"), ts_range_requests(&srv));
+    CHECK(tc_snapshot().eof_error == 0);
+    CHECK(ts_count(&srv, "/files/long_6s.flac") >= 2 && ts_range_requests(&srv) >= 1);
+
+    // A live stream whose connection drops after ~2.5 s of audio is opened again
+    ts_reset(&srv);
+    au_play_audio(url("/live/live.mp3?drop=40000"), NULL);
+    tc_sleep_ms(6000);
+    printf("   dropped live stream: %d requests, eof %d\n", ts_count(&srv, "/live/live.mp3"), tc_snapshot().eof);
+    CHECK(tc_snapshot().eof == 1);                   // only the file above has ended
+    CHECK(ts_count(&srv, "/live/live.mp3") >= 2);
+    au_stop_audio();
+    CHECK(TC_WAIT_FIELD(eof, 2, 3000));
+
+    // Without reconnects the drop ends it
+    const AuNetworkConfig never = { .reconnect_attempts = -1 };
+    CHECK(au_set_network(&never) == AU_OK);
+    au_play_audio(url("/live/live.mp3?drop=40000&n=2"), NULL);
+    CHECK(TC_WAIT_FIELD(eof, 3, 10000));
+    CHECK(au_set_network(NULL) == AU_OK);
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
     REQUIRE(ts_start(&srv, tc_fixture_dir));
@@ -216,6 +308,10 @@ int main(int argc, char **argv) {
     RUN_TEST(test_headers_and_user_agent);
     RUN_TEST(test_protocol_whitelists);
     RUN_TEST(test_no_measuring_by_default);
+    RUN_TEST(test_live_stream);
+    RUN_TEST(test_preroll);
+    RUN_TEST(test_stall);
+    RUN_TEST(test_reconnect);
 
     au_shutdown();
     ts_stop(&srv);

@@ -161,6 +161,7 @@ extern "C" {
         NotifyOfTrackStarted on_track_started;
         NotifyOfAudioDeviceUpdate on_audio_device_update;
         NotifyOfAudioDevicesChanged on_audio_devices_changed;
+        NotifyOfBuffering on_buffering;
     } InitializeConfig;
 
     typedef struct AudioDeviceConfig {
@@ -432,6 +433,9 @@ extern "C" {
     DLL_EXPORT int au_media_sample_rate(const AuMediaInfo *info);
     DLL_EXPORT int au_media_channels(const AuMediaInfo *info);
     DLL_EXPORT int au_media_bits_per_sample(const AuMediaInfo *info);        // 0 for lossy codecs / unknown
+    // A live stream (internet radio, live HLS): no duration and no seeking; it ends only when stopped or on errors
+    DLL_EXPORT bool au_media_is_live(const AuMediaInfo *info);
+    DLL_EXPORT bool au_media_is_seekable(const AuMediaInfo *info);
 
     // A tag by name, case-insensitive; NULL when absent. Common names are the same in every format:
     // "title", "artist", "album", "album_artist", "date", "genre", "track", "disc", "composer", "comment".

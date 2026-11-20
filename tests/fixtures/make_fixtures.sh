@@ -76,6 +76,8 @@ for i in $(seq -w 1 24); do ln -f ld_m23_48k.flac "scan_$i.flac"; done
 
 # Network tests: an HLS segment (ADTS AAC); the playlists are written by test_network with the server's port
 sine hls_seg.aac       440 2 44100 2 -c:a aac -f adts
+# A constant 128 kbit/s (16000 bytes/s) MP3 without ID3/Xing headers: looped, it is a seamless live stream
+sine live.mp3          440 5 44100 2 -c:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0
 
 # Broken / non-audio inputs
 : > empty.flac

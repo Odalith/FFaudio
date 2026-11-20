@@ -31,6 +31,8 @@ struct AuMediaInfo {
     int sample_rate;
     int channels;
     int bits_per_sample;        // 0 for lossy codecs / unknown
+    bool live;                  // no duration: a live stream
+    bool seekable;
     AVDictionary *tags;         // container tags, then stream tags for keys the container lacks
     AuReplayGainInfo replaygain;
 };

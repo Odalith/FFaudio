@@ -242,8 +242,12 @@ static void add_voice(Mixer *m, TrackState *t, float *dst, const float *src, con
             gain += step;
             if ((step > 0 && gain > target) || (step < 0 && gain < target)) gain = target;
         }
-        const float g = gain * (constant ? (fading_out ? 0.0f : 1.0f)
-                                         : (fading_out ? fade_out_gain(fade, i) : fade_in_gain(fade, i)));
+        float g = gain * (constant ? (fading_out ? 0.0f : 1.0f)
+                                   : (fading_out ? fade_out_gain(fade, i) : fade_in_gain(fade, i)));
+        if (t->resume_fade > 0) { // back after a network stall
+            g *= 1.0f - (float)t->resume_fade / (float)t->resume_fade_len;
+            t->resume_fade--;
+        }
         const float *s = src + (size_t)i * channels;
         float *d = dst + (size_t)i * channels;
         for (int c = 0; c < channels; c++)

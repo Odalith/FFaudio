@@ -226,6 +226,17 @@ typedef struct TrackState {
     int32_t convert_rate;               // output rate the graphs were built for
     AVDictionary *format_opts_n;
     char *http_headers;                 // PlayAudioConfig.http_headers (owned), network streams only
+    // Network tracks (set at creation): the read thread fills buffer_target_s before the mixer takes anything,
+    // again after the mixer ran dry while playing, and reads ahead up to max_buffer_s
+    bool network;
+    double buffer_target_s, max_buffer_s;
+    bool live;                          // read thread: no duration (internet radio, live HLS)
+    SDL_atomic_t buffering;             // 1 = waiting for data: the mixer takes nothing, the position holds
+    SDL_atomic_t buffered_ms;           // read thread: audio queued, for on_buffering
+    bool stalled;                       // SDL callback only: ran dry while playing; fades back in when data returns
+    int resume_fade, resume_fade_len;   // SDL callback only: frames left of that fade-in, and its length
+    int buffering_reported;             // control thread: last state sent to on_buffering (-1 = none yet)
+    uint32_t buffering_note_ticks;      // control thread: when it was last sent
     int32_t realtime;
     int32_t seek_by_bytes;
     bool infinite_buffer;
@@ -431,6 +442,7 @@ typedef struct AudioPlayer {
     NotifyOfTrackStarted notify_of_track_started_callback;
     NotifyOfAudioDeviceUpdate notify_of_audio_device_update_callback;
     NotifyOfAudioDevicesChanged notify_of_audio_devices_changed_callback;
+    NotifyOfBuffering notify_of_buffering_callback;
 
     // ---- control thread ----
     SDL_Thread *control_thread;

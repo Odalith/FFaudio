@@ -61,6 +61,7 @@ typedef struct TcEvents {
     int duration;
     int device;
     int devices_changed;
+    int buffering_on, buffering_off;   // on_buffering transitions (progress calls not counted)
     int log_error;
     int32_t last_eof_handle;
     int32_t last_started_handle;
@@ -69,6 +70,7 @@ typedef struct TcEvents {
 
 static SDL_cond *tc_cond = NULL;
 static TcEvents tc_ev;
+static bool tc_last_buffering;   // last on_buffering state, to count transitions
 static bool tc_verbose = false;
 
 /* Optional hooks a test can install to act from inside callbacks */
@@ -144,6 +146,17 @@ static void tc_duration_cb(int32_t handle, double duration, void *ud) {
     SDL_UnlockMutex(tc_mutex);
 }
 
+static void tc_buffering_cb(int32_t handle, bool buffering, double seconds, void *ud) {
+    (void)handle; (void)seconds; (void)ud;
+    SDL_LockMutex(tc_mutex);
+    if (buffering != tc_last_buffering) {
+        if (buffering) tc_ev.buffering_on++;
+        else tc_ev.buffering_off++;
+        tc_last_buffering = buffering;
+    }
+    SDL_UnlockMutex(tc_mutex);
+}
+
 static void tc_devices_changed_cb(void *ud) {
     (void)ud;
     tc_bump(&tc_ev.devices_changed);
@@ -164,6 +177,7 @@ static TcEvents tc_snapshot(void) {
 static void tc_reset_events(void) {
     SDL_LockMutex(tc_mutex);
     memset(&tc_ev, 0, sizeof(tc_ev));
+    tc_last_buffering = false;
     SDL_UnlockMutex(tc_mutex);
 }
 
@@ -208,6 +222,7 @@ static int tc_init_player_cfg(int loop_count, double prepare_next_seconds) {
         .on_track_started = tc_started_cb,
         .on_audio_device_update = tc_device_cb,
         .on_audio_devices_changed = tc_devices_changed_cb,
+        .on_buffering = tc_buffering_cb,
     };
     const int ret = au_initialize(&config);
     if (ret != 0) return ret;
