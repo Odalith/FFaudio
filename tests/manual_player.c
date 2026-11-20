@@ -19,7 +19,7 @@
 /*
  * Interactive player for listening tests on real hardware.
  *
- *   manual_player <music-dir> [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels]
+ *   manual_player <music-dir | URL> [-u URL]... [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels]
  *                 [-d full|norm|"filters"] [-r track|album] [-g] [-G cache-file]
  *                 [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]
  *
@@ -177,6 +177,7 @@ static void on_started(int32_t handle, void *ud) {
     bool cached = false;
     if (info) {
         const char *artist = au_media_tag(info, "artist"), *title = au_media_tag(info, "title");
+        if (!artist) artist = au_media_tag(info, "icy-name");   // a stream: its station
         cached = au_gain_cache_get(au_media_filename(info), NULL);
         printf("> now playing #%d: %s - %s  [%s %d Hz %d ch%s]", handle, artist ? artist : "?",
                title ? title : au_media_filename(info), au_media_codec(info), au_media_sample_rate(info),
@@ -449,6 +450,17 @@ static bool parse_bs2b(const char *arg) {
     return true;
 }
 
+static void on_buffering(int32_t handle, bool buffering, double seconds, void *ud) {
+    (void)ud;
+    if (buffering) printf("  #%d buffering... %.1f s\n", handle, seconds);
+    else printf("  #%d playing (%.1f s buffered)\n", handle, seconds);
+}
+
+static void on_stream_metadata(int32_t handle, const char *title, const char *artist, void *ud) {
+    (void)ud;
+    printf("> #%d now playing: %s%s%s\n", handle, artist ? artist : "", artist ? " - " : "", title ? title : "");
+}
+
 static void on_device(int32_t channels, int32_t rate, void *ud) {
     (void)ud;
     printf("  output: %d Hz, %d channels\n", rate, channels);
@@ -457,7 +469,7 @@ static void on_device(int32_t channels, int32_t rate, void *ud) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <music-dir> [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]\n", argv[0]);
+        fprintf(stderr, "usage: %s <music-dir | URL> [-u URL]... [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]\n", argv[0]);
         return 1;
     }
     double crossfade = 0;
@@ -485,6 +497,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-X")) crossfeed_on = true;
         else if (!strcmp(argv[i], "-P") && i + 1 < argc) { if (!load_peq(argv[++i])) return 1; }
         else if (!strcmp(argv[i], "-L")) limiter_on = true;
+        else if (!strcmp(argv[i], "-u") && i + 1 < argc) i++;   // streams, added below
         else if (!strcmp(argv[i], "-C") && i + 1 < argc) {
             const char *m = argv[++i];
             compressor_mode = !strcmp(m, "gentle") ? 1 : !strcmp(m, "night") ? 2 : -1;
@@ -496,7 +509,13 @@ int main(int argc, char **argv) {
     }
     if (use_cache && !replaygain) replaygain = "track"; // the cache only matters with ReplayGain on
 
-    if (nftw(argv[1], collect, 20, FTW_PHYS) != 0 || file_count == 0) {
+    // Streams: a URL instead of the folder, and every -u
+    for (int i = 1; i < argc; i++) {
+        const char *u = i == 1 ? argv[1] : (!strcmp(argv[i - 1], "-u") ? argv[i] : NULL);
+        if (u && au_is_network_url(u)) collect(u, NULL, FTW_F, NULL);
+    }
+    if (!au_is_network_url(argv[1]) && nftw(argv[1], collect, 20, FTW_PHYS) != 0) file_count = 0;
+    if (file_count == 0) {
         fprintf(stderr, "No files found under %s\n", argv[1]);
         return 1;
     }
@@ -520,6 +539,8 @@ int main(int argc, char **argv) {
         .on_duration_update = on_duration,
         .on_audio_device_update = on_device,
         .on_audio_devices_changed = on_devices_changed,
+        .on_buffering = on_buffering,
+        .on_stream_metadata = on_stream_metadata,
     };
     if (au_initialize(&config) != AU_OK) return 1;
 
