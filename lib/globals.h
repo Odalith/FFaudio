@@ -61,6 +61,7 @@
 #include "libavfilter/buffersrc.h"
 
 #include "SDL2/SDL.h"
+#include "atomics.h"
 #include "SDL2/SDL_thread.h"
 #include "SDL2/SDL_mutex.h"
 
@@ -255,7 +256,7 @@ typedef struct TrackState {
     bool demux_eof;                     // read thread only
 
     // ---- status published by the worker threads ----
-    SDL_atomic_t opened;                // 1 once the stream is open and end_pos_us is valid
+    int32_t opened;                     // atomics.h: 1 once the stream is open and end_pos_us is valid (and fixed)
     SDL_atomic_t eos_serial;            // queue serial whose last frame has been pushed into sampq, -1 = none
     SDL_atomic_t loops_remaining;       // -1 infinite, 0 none
     SDL_atomic_t loops_started;         // read thread: loops it has seeked back for (the mixer reports each once)
@@ -423,6 +424,7 @@ typedef struct StatusSnapshot {
     double duration;                // seconds, < 0 unknown
     bool advancing;                 // false while paused / underrun / idle
     double speed;                   // playback speed of the audible audio
+    double period;                  // seconds of audio per callback (SDL's buffer), 0 = no callback yet
 } StatusSnapshot;
 
 typedef struct AudioPlayer {
@@ -479,7 +481,6 @@ typedef struct AudioPlayer {
     char *downmix_filters;              // guarded by format_mutex, AU_DOWNMIX_CUSTOM only
     AudioParams audio_target;           // float32 interleaved at the device rate/layout, guarded by format_mutex
     SDL_AudioDeviceID device_id;
-    SDL_AudioSpec obtained_spec;
     bool device_running;
     bool use_default_device;
     int32_t audio_device_index;

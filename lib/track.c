@@ -232,10 +232,11 @@ double track_start_position(const TrackState *t) {
     return t->start_time != AV_NOPTS_VALUE ? t->start_time / AV_TIME_BASE_DOUBLE : 0.0;
 }
 
+// No lock: end_pos_us is written once, before `opened` is set, and read only after `opened` has been seen (the audio
+// callback calls this every period)
 double track_end_position(TrackState *t) {
-    SDL_LockMutex(t->seek_mutex);
+    if (!ffa_load_acquire(&t->opened)) return -1;
     const int64_t end = t->end_pos_us;
-    SDL_UnlockMutex(t->seek_mutex);
     return end == AV_NOPTS_VALUE ? -1 : end / AV_TIME_BASE_DOUBLE;
 }
 
@@ -694,7 +695,7 @@ static int read_thread(void *arg) {
     SDL_LockMutex(t->seek_mutex);
     t->end_pos_us = end_pos;
     SDL_UnlockMutex(t->seek_mutex);
-    SDL_AtomicSet(&t->opened, 1);
+    ffa_store_release(&t->opened, 1); // publishes end_pos_us
     ff_post_track_msg(MSG_TRACK_OPENED, t->handle, 0);
 
     for (;;) {

@@ -799,7 +799,7 @@ static void housekeeping(AudioPlayer *ap) {
     const double pos = cur ? cur->position : 0;
     unlock_mixer(ap);
 
-    if (cur && !have_next && !cur->prepare_next_sent && SDL_AtomicGet(&cur->opened)
+    if (cur && !have_next && !cur->prepare_next_sent && ffa_load_acquire(&cur->opened)
         && SDL_AtomicGet(&cur->loops_remaining) == 0) {
         const double end = track_end_position(cur);
         const double lead = ap->prepare_next_seconds + FFMAX(0.0, ap->crossfade.on_track_end.seconds);
@@ -908,7 +908,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         }
         case CMD_GET_TRACK_GAIN: {
             TrackState *t = track_for_handle(ap, msg->handle);
-            const bool known = t && !t->ended && SDL_AtomicGet(&t->opened);
+            const bool known = t && !t->ended && ffa_load_acquire(&t->opened);
             if (known) *msg->out_double = gain_centi_db(SDL_AtomicGet(&t->gain_mb)) / 100.0;
             finish_sync(msg, known ? AU_OK : AU_ERR_NOTHING_TO_DO);
             msg->done = NULL;
@@ -1572,8 +1572,7 @@ double au_get_audio_play_time(void) {
     if (!s.advancing) return s.position;
 
     // The position is that of the last sample handed to SDL; what is audible lags by the buffered audio
-    const double rate = ap->obtained_spec.freq > 0 ? ap->obtained_spec.freq : 48000;
-    const double period = ap->obtained_spec.samples / rate;
+    const double period = s.period;
     const double now = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
     const double elapsed = FFMIN(FFMAX(now - s.callback_time, 0.0), period);
     const double speed = s.speed > 0 ? s.speed : 1.0;

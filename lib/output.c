@@ -406,7 +406,7 @@ static void convert_output(Mixer *m, Uint8 *out, const int frames) {
     }
 }
 
-static void publish_status(AudioPlayer *ap, const bool advancing) {
+static void publish_status(AudioPlayer *ap, const bool advancing, const int frames) {
     Mixer *m = &ap->mixer;
     TrackState *t = m->current;
     StatusSnapshot s;
@@ -416,9 +416,13 @@ static void publish_status(AudioPlayer *ap, const bool advancing) {
     s.callback_time = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
     s.advancing = advancing;
     s.speed = t ? t->play_speed : 1.0;
-    SDL_LockMutex(ap->status_mutex);
-    ap->status = s;
-    SDL_UnlockMutex(ap->status_mutex);
+    s.period = m->rate > 0 ? (double)frames / m->rate : 0;
+    // Never waits: while a getter holds the lock (a copy of a few bytes), this period's status is skipped and the
+    // next one, a period later, is published instead
+    if (SDL_TryLockMutex(ap->status_mutex) == 0) {
+        ap->status = s;
+        SDL_UnlockMutex(ap->status_mutex);
+    }
 }
 
 static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
@@ -451,7 +455,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
     if (done * frame_bytes < len)
         memset(stream + (size_t)done * frame_bytes, m->format == AUDIO_U8 ? 0x80 : 0, (size_t)(len - done * frame_bytes));
 
-    publish_status(ap, advancing && !m->frozen);
+    publish_status(ap, advancing && !m->frozen, total);
 }
 
 //+-----------------------------------------------------+
@@ -588,7 +592,6 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
 
     ap->device_id = id;
     SDL_AtomicSet(&ap->open_device, (int)id);
-    ap->obtained_spec = obtained;
     ap->device_running = false;
 
     SDL_LockMutex(ap->format_mutex);
