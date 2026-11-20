@@ -148,7 +148,7 @@ void ff_log(const enum AU_LOG_LEVEL level, const char *fmt, ...) {
 
 typedef enum NoteType {
     NOTE_LOG, NOTE_EOF, NOTE_RESTART, NOTE_DURATION, NOTE_PREPARE_NEXT, NOTE_TRACK_STARTED, NOTE_DEVICE,
-    NOTE_DEVICES_CHANGED, NOTE_BUFFERING,
+    NOTE_DEVICES_CHANGED, NOTE_BUFFERING, NOTE_STREAM_METADATA,
 } NoteType;
 
 typedef struct Note {
@@ -158,7 +158,7 @@ typedef struct Note {
     bool b1, b2;
     int32_t i;
     int64_t request;
-    char *text;
+    char *text, *text2;
 } Note;
 
 typedef struct NoteList {
@@ -203,6 +203,10 @@ static void dispatch_notes(AudioPlayer *ap) {
                 case NOTE_TRACK_STARTED:
                     if (ap->notify_of_track_started_callback) ap->notify_of_track_started_callback(n->handle, ud);
                     break;
+                case NOTE_STREAM_METADATA:
+                    if (ap->notify_of_stream_metadata_callback)
+                        ap->notify_of_stream_metadata_callback(n->handle, n->text, n->text2, ud);
+                    break;
                 case NOTE_BUFFERING:
                     if (ap->notify_of_buffering_callback) ap->notify_of_buffering_callback(n->handle, n->b1, n->d, ud);
                     break;
@@ -215,6 +219,7 @@ static void dispatch_notes(AudioPlayer *ap) {
             }
         }
         av_free(n->text);
+        av_free(n->text2);
     }
     notes.n = 0;
 }
@@ -799,6 +804,22 @@ static void housekeeping(AudioPlayer *ap) {
         }
     }
 
+    // "Now playing" changes that playback has reached
+    for (int i = 0; i < ap->n_tracks; i++) {
+        TrackState *t = ap->tracks[i];
+        if (t->ended) continue;
+        lock_mixer(ap);
+        const bool playing = t->started;
+        const double at = t->position;
+        unlock_mixer(ap);
+        if (!playing) continue;
+        for (StreamMeta *m; (m = track_take_stream_meta(t, at));) {
+            note_add((Note){ .type = NOTE_STREAM_METADATA, .handle = t->handle, .text = m->title, .text2 = m->artist });
+            m->title = m->artist = NULL;   // owned by the note now
+            track_free_stream_meta(m);
+        }
+    }
+
     // Network tracks waiting for data: every change, and progress every 500 ms while it lasts
     const uint32_t now = SDL_GetTicks();
     for (int i = 0; i < ap->n_tracks; i++) {
@@ -1005,6 +1026,7 @@ int au_initialize(const InitializeConfig* config) {
     ap->notify_of_audio_device_update_callback = config->on_audio_device_update;
     ap->notify_of_audio_devices_changed_callback = config->on_audio_devices_changed;
     ap->notify_of_buffering_callback = config->on_buffering;
+    ap->notify_of_stream_metadata_callback = config->on_stream_metadata;
     ap->audio_target.fmt = AV_SAMPLE_FMT_NONE;
     ap->mixer.pause_gain = 1.0f;
     ap->mixer.pause_to = 1.0f;

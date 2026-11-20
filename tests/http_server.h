@@ -12,7 +12,10 @@
  *   /live/<name>        the file over and over without a length, like an Icecast stream
  *
  * Options for /files and /live: ?bps=N sends at most N bytes per second, ?drop=N closes the connection after N
- * bytes of the body (only on the first request for that path, so a reconnect gets through).
+ * bytes of the body (only on the first request for that URL, so a reconnect gets through).
+ * /live?metaint=N: Icecast metadata every N audio bytes when the client asks for it ("Icy-MetaData: 1"), with the
+ * header "icy-name: Test Radio". The title changes every 4 blocks: song 1 "Test Artist - Song 1", song 2 in
+ * Latin-1 "Caf\xe9 Band - Song 2", song 3 "Station Jingle" (no artist), then "Test Artist - Song N".
  */
 #ifndef FFAUDIO_TEST_HTTP_SERVER_H
 #define FFAUDIO_TEST_HTTP_SERVER_H
@@ -60,6 +63,7 @@ typedef struct TsServer {
 typedef struct TsOptions {
     long bps;                       // bytes per second, 0 = unlimited
     long drop;                      // close after this many body bytes, 0 = never
+    long metaint;                   // /live: ICY metadata every this many audio bytes, 0 = none
 } TsOptions;
 
 // Split "path?bps=1&drop=2" into the path and its options; a drop is only done once per path
@@ -75,6 +79,7 @@ static void ts_parse_options(TsServer *s, char *path, TsOptions *o) {
         if (amp) *amp = '\0';
         if (!strncmp(kv, "bps=", 4)) o->bps = atol(kv + 4);
         else if (!strncmp(kv, "drop=", 5)) o->drop = atol(kv + 5);
+        else if (!strncmp(kv, "metaint=", 8)) o->metaint = atol(kv + 8);
         kv = amp ? amp + 1 : NULL;
     }
     if (o->drop) {
@@ -234,8 +239,22 @@ static void ts_serve_file(TsServer *s, const ts_socket sock, const char *name, c
     fclose(f);
 }
 
+// An ICY metadata block: one length byte (in 16-byte units), then StreamTitle='...'; padded with zeros
+static bool ts_send_icy(const ts_socket sock, const long block) {
+    const long song = block / 4 + 1;
+    char title[160], meta[256];
+    if (song == 2) snprintf(title, sizeof(title), "Caf\xe9 Band - Song 2");
+    else if (song == 3) snprintf(title, sizeof(title), "Station Jingle");
+    else snprintf(title, sizeof(title), "Test Artist - Song %ld", song);
+    memset(meta, 0, sizeof(meta));
+    const int len = snprintf(meta + 1, sizeof(meta) - 1, "StreamTitle='%s';", title);
+    const int units = (len + 15) / 16;
+    meta[0] = (char)units;
+    return ts_send_all(sock, meta, (size_t)(1 + units * 16));
+}
+
 // The file again and again, with no length: a live stream that ends only when the client hangs up
-static void ts_serve_live(TsServer *s, const ts_socket sock, const char *name, const TsOptions *o) {
+static void ts_serve_live(TsServer *s, const ts_socket sock, const char *name, const char *req, const TsOptions *o) {
     char path[1200];
     snprintf(path, sizeof(path), "%s/%s", s->root, name);
     FILE *f = (strstr(name, "..") == NULL) ? fopen(path, "rb") : NULL;
@@ -243,15 +262,33 @@ static void ts_serve_live(TsServer *s, const ts_socket sock, const char *name, c
         ts_reply(sock, "404 Not Found", NULL, "no such file");
         return;
     }
-    const char *head = "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nConnection: close\r\n\r\n";
+    char icy[8];
+    const long metaint = (o->metaint > 0 && ts_header(req, "Icy-MetaData", icy, sizeof(icy)) && atoi(icy) == 1)
+                         ? o->metaint : 0;
+    char head[256];
+    if (metaint)
+        snprintf(head, sizeof(head), "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nicy-name: Test Radio\r\n"
+                 "icy-metaint: %ld\r\nConnection: close\r\n\r\n", metaint);
+    else
+        snprintf(head, sizeof(head), "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nConnection: close\r\n\r\n");
     if (ts_send_all(sock, head, strlen(head))) {
         char buf[16384];
-        long sent = 0;
+        long sent = 0, since_meta = 0, blocks = 0;
         const Uint32 start = SDL_GetTicks();
-        for (;;) {
+        for (bool ok = true; ok;) {
             const size_t got = fread(buf, 1, sizeof(buf), f);
             if (!got) { rewind(f); continue; }
-            if (!ts_send_body(s, sock, buf, got, o, &sent, start)) break;
+            for (size_t at = 0; at < got && ok;) {
+                size_t n = got - at;
+                if (metaint && (long)n > metaint - since_meta) n = (size_t)(metaint - since_meta);
+                ok = ts_send_body(s, sock, buf + at, n, o, &sent, start);
+                at += n;
+                since_meta += (long)n;
+                if (ok && metaint && since_meta == metaint) {
+                    ok = ts_send_icy(sock, blocks++);
+                    since_meta = 0;
+                }
+            }
         }
     }
     fclose(f);
@@ -283,7 +320,7 @@ static int ts_connection(void *arg) {
         TsOptions o;
         ts_parse_options(s, path, &o);
         if (!strncmp(path, "/files/", 7)) ts_serve_file(s, c->sock, path + 7, req, false, &o);
-        else if (!strncmp(path, "/live/", 6)) ts_serve_live(s, c->sock, path + 6, &o);
+        else if (!strncmp(path, "/live/", 6)) ts_serve_live(s, c->sock, path + 6, req, &o);
         else if (!strncmp(path, "/text/", 6)) ts_serve_file(s, c->sock, path + 6, req, true, &o);
         else if (!strncmp(path, "/auth/", 6)) {
             if (ts_header(req, "X-Test-Token", token, sizeof(token)) && !strcmp(token, "secret"))

@@ -295,6 +295,52 @@ static void test_reconnect(void) {
     CHECK(au_set_network(NULL) == AU_OK);
 }
 
+/* ---------- "now playing" ---------- */
+
+static void test_icy_now_playing(void) {
+    // An unthrottled server: the reader is soon many seconds ahead, but every title must come when it is heard.
+    // A block every 8000 bytes = every 0.5 s of audio; song k starts with block 4(k-1), sent after (4k-3) x 0.5 s.
+    au_play_audio(url("/live/live.mp3?metaint=8000"), NULL);
+    tc_sleep_ms(7500);
+    const TcEvents e = tc_snapshot();
+    // The first title is read while FFmpeg probes the stream, so it shows from the start (stations send the current
+    // title in their first block anyway)
+    const double starts[3] = { 0.0, 2.5, 4.5 };
+    for (int i = 0; i < e.meta_count && i < 8; i++)
+        printf("   now playing at %.2f s: \"%s\" by \"%s\"\n", e.meta_pos[i], e.meta_title[i], e.meta_artist[i]);
+    CHECK(e.meta_count >= 3);
+    CHECK(!strcmp(e.meta_title[0], "Song 1") && !strcmp(e.meta_artist[0], "Test Artist"));
+    CHECK(!strcmp(e.meta_title[1], "Song 2") && !strcmp(e.meta_artist[1], "Caf\xc3\xa9 Band")); // Latin-1 -> UTF-8
+    CHECK(!strcmp(e.meta_title[2], "Station Jingle") && e.meta_artist[2][0] == '\0');          // no artist
+    for (int i = 0; i < 3 && i < e.meta_count; i++)
+        CHECK(e.meta_pos[i] > starts[i] - 0.3 && e.meta_pos[i] < starts[i] + 1.0);              // heard, not read
+
+    AuMediaInfo *info = au_get_track_info(0);
+    CHECK(info != NULL);
+    if (info) {
+        const char *station = au_media_tag(info, "icy-name"), *title = au_media_tag(info, "title");
+        printf("   track info: station \"%s\", title \"%s\"\n", station ? station : "", title ? title : "");
+        CHECK(station && !strcmp(station, "Test Radio"));
+        CHECK(title && e.meta_count <= 8 && !strcmp(title, e.meta_title[e.meta_count - 1]));
+        au_media_info_free(info);
+    }
+    au_stop_audio();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+}
+
+static void test_ogg_now_playing(void) {
+    // A chained Ogg stream changes its tags when the next part starts (2 s in)
+    au_play_audio(url("/files/chained.ogg"), NULL);
+    CHECK(TC_WAIT_FIELD(eof, 1, 10000));
+    const TcEvents e = tc_snapshot();
+    for (int i = 0; i < e.meta_count && i < 8; i++)
+        printf("   now playing at %.2f s: \"%s\" by \"%s\"\n", e.meta_pos[i], e.meta_title[i], e.meta_artist[i]);
+    CHECK(e.meta_count >= 1);
+    const int last = (e.meta_count < 8 ? e.meta_count : 8) - 1;
+    CHECK(last >= 0 && !strcmp(e.meta_title[last], "Second Part") && !strcmp(e.meta_artist[last], "Ogg Artist"));
+    CHECK(last >= 0 && e.meta_pos[last] > 1.7);
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
     REQUIRE(ts_start(&srv, tc_fixture_dir));
@@ -312,6 +358,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_preroll);
     RUN_TEST(test_stall);
     RUN_TEST(test_reconnect);
+    RUN_TEST(test_icy_now_playing);
+    RUN_TEST(test_ogg_now_playing);
 
     au_shutdown();
     ts_stop(&srv);

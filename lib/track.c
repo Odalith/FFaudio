@@ -34,6 +34,7 @@
 #include "filtergraph.h"
 #include "frame_queue_utils.h"
 #include "packet_queue_utils.h"
+#include "libavutil/opt.h"
 
 #define MAX_QUEUE_SIZE (15 * 1024 * 1024)
 #define MIN_FRAMES 25
@@ -79,6 +80,105 @@ static double queued_seconds(const TrackState *t) {
 }
 
 static int queue_byte_size(PacketQueue *q);
+
+static void free_stream_meta(StreamMeta *m);
+
+// Queue "now playing" information to be reported when playback reaches `position` (read thread)
+static void push_stream_meta(TrackState *t, const double position, const char *title, const char *artist) {
+    StreamMeta *m = av_mallocz(sizeof(StreamMeta));
+    if (!m) return;
+    m->position = position;
+    m->title = text_to_utf8(title ? title : "");
+    m->artist = artist && artist[0] ? text_to_utf8(artist) : NULL;
+    SDL_LockMutex(t->seek_mutex);
+    int n = 0;
+    StreamMeta **tail = &t->stream_meta;
+    while (*tail) { tail = &(*tail)->next; n++; }
+    *tail = m;
+    if (n >= 32) { // something is not being played: keep the newest
+        StreamMeta *old = t->stream_meta;
+        t->stream_meta = old->next;
+        old->next = NULL;
+        free_stream_meta(old);
+    }
+    SDL_UnlockMutex(t->seek_mutex);
+}
+
+// "StreamTitle='Artist - Title';StreamUrl='...';" -> title (and artist when there is " - ")
+static void push_icy_title(TrackState *t, const double position, const char *packet) {
+    const char *p = strstr(packet, "StreamTitle='");
+    if (!p) return;
+    p += 13;
+    const char *end = strstr(p, "';");
+    if (!end) end = p + strlen(p);
+    char *text = av_strndup(p, (size_t)(end - p));
+    if (!text) return;
+    char *sep = strstr(text, " - ");
+    if (sep) {
+        *sep = '\0';
+        push_stream_meta(t, position, sep + 3, text);
+    }
+    else {
+        push_stream_meta(t, position, text, NULL);
+    }
+    av_free(text);
+}
+
+// After every audio packet: new ICY titles (checked a few times a second) and tags that changed inside the stream
+static void check_stream_metadata(TrackState *t, AVFormatContext *ic, const AVPacket *pkt) {
+    AVStream *st = ic->streams[pkt->stream_index];
+    const int64_t ts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
+    const double pos = ts != AV_NOPTS_VALUE ? ts * av_q2d(st->time_base) : t->position;
+
+    if (t->icy) { // every packet: while the reader runs ahead, packets are far apart in reading time
+        uint8_t *icy = NULL;
+        if (av_opt_get(ic->pb, "icy_metadata_packet", AV_OPT_SEARCH_CHILDREN, &icy) >= 0 && icy && icy[0] &&
+            (!t->last_icy || strcmp((char *)icy, t->last_icy) != 0)) {
+            av_free(t->last_icy);
+            t->last_icy = av_strdup((char *)icy);
+            push_icy_title(t, pos, (char *)icy);
+        }
+        av_free(icy);
+    }
+    if ((st->event_flags & AVSTREAM_EVENT_FLAG_METADATA_UPDATED) || (ic->event_flags & AVFMT_EVENT_FLAG_METADATA_UPDATED)) {
+        st->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
+        ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
+        const AVDictionaryEntry *title = av_dict_get(st->metadata, "title", NULL, 0);
+        if (!title) title = av_dict_get(ic->metadata, "title", NULL, 0);
+        const AVDictionaryEntry *artist = av_dict_get(st->metadata, "artist", NULL, 0);
+        if (!artist) artist = av_dict_get(ic->metadata, "artist", NULL, 0);
+        if (title || artist) push_stream_meta(t, pos, title ? title->value : "", artist ? artist->value : NULL);
+    }
+}
+
+// Station details from the ICY response headers ("icy-name: ...") into the track's tags
+static bool add_icy_headers(AVFormatContext *ic, AuMediaInfo *info) {
+    uint8_t *headers = NULL;
+    bool icy_on = false;
+    if (!ic->pb || av_opt_get(ic->pb, "icy_metadata_headers", AV_OPT_SEARCH_CHILDREN, &headers) < 0 || !headers)
+        return false;
+    for (char *line = (char *)headers; *line;) {
+        char *end = strchr(line, '\n');
+        if (end) *end = '\0';
+        char *colon = strchr(line, ':');
+        // FFmpeg keeps icy-metaint for itself; any other icy- header means the server speaks ICY
+        if (colon && !strncmp(line, "icy-", 4)) {
+            icy_on = true;
+            *colon = '\0';
+            const char *v = colon + 1;
+            while (*v == ' ') v++;
+            char *value = text_to_utf8(v);
+            size_t n = value ? strlen(value) : 0;
+            while (n && (value[n - 1] == '\r' || value[n - 1] == ' ')) value[--n] = '\0';
+            if (value && value[0]) av_dict_set(&info->tags, line, value, 0);
+            av_free(value);
+        }
+        if (!end) break;
+        line = end + 1;
+    }
+    av_free(headers);
+    return icy_on;
+}
 
 // Network tracks: end the wait for data once enough is queued (or nothing more will come)
 static void update_buffering(TrackState *t) {
@@ -201,6 +301,16 @@ fail:
     return NULL;
 }
 
+static void free_stream_meta(StreamMeta *m) {
+    while (m) {
+        StreamMeta *next = m->next;
+        av_free(m->title);
+        av_free(m->artist);
+        av_free(m);
+        m = next;
+    }
+}
+
 void track_destroy(TrackState *t) {
     if (!t) return;
 
@@ -222,6 +332,8 @@ void track_destroy(TrackState *t) {
     if (t->audio_queue.mutex) packet_queue_destroy(&t->audio_queue);
     av_channel_layout_uninit(&t->audio_filter_src.ch_layout);
     av_dict_free(&t->format_opts_n);
+    free_stream_meta(t->stream_meta);
+    av_free(t->last_icy);
     SDL_DestroyCond(t->continue_read_thread);
     SDL_DestroyMutex(t->wait_mutex);
     SDL_DestroyMutex(t->seek_mutex);
@@ -532,6 +644,9 @@ static int read_thread(void *arg) {
     // at the right level
     if (st_index >= 0) {
         AuMediaInfo *info = media_info_from_context(ic, st_index, t->filename);
+        if (info && t->network) t->icy = add_icy_headers(ic, info);
+        ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
+        ic->streams[st_index]->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
         SDL_LockMutex(t->seek_mutex);
         t->info = info;
         SDL_UnlockMutex(t->seek_mutex);
@@ -594,6 +709,10 @@ static int read_thread(void *arg) {
             else {
                 // New serial: the decoder, the filter graph and the mixer drop everything older
                 packet_queue_flush(&t->audio_queue);
+                SDL_LockMutex(t->seek_mutex);
+                free_stream_meta(t->stream_meta);
+                t->stream_meta = NULL;
+                SDL_UnlockMutex(t->seek_mutex);
                 t->demux_eof = false;
                 ff_post_track_msg(MSG_TRACK_SEEKED, t->handle, seek_pos / AV_TIME_BASE_DOUBLE);
             }
@@ -656,6 +775,7 @@ static int read_thread(void *arg) {
             }
         }
 
+        check_stream_metadata(t, ic, pkt);
         packet_queue_put(&t->audio_queue, pkt);
     }
     goto end;
@@ -1042,6 +1162,28 @@ end:
 //+-----------------------------------------------------+
 //| Mixer side (SDL callback)                           |
 //+-----------------------------------------------------+
+
+StreamMeta *track_take_stream_meta(TrackState *t, const double position) {
+    SDL_LockMutex(t->seek_mutex);
+    StreamMeta *m = t->stream_meta;
+    if (m && m->position <= position + 0.05) {
+        t->stream_meta = m->next;
+        m->next = NULL;
+        if (t->info) {
+            av_dict_set(&t->info->tags, "title", m->title, 0);
+            av_dict_set(&t->info->tags, "artist", m->artist, 0);   // NULL removes it
+        }
+    }
+    else {
+        m = NULL;
+    }
+    SDL_UnlockMutex(t->seek_mutex);
+    return m;
+}
+
+void track_free_stream_meta(StreamMeta *m) {
+    free_stream_meta(m);
+}
 
 bool track_has_audio(TrackState *t) {
     if (SDL_AtomicGet(&t->buffering)) return false; // a network track that is still filling its buffer

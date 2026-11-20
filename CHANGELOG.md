@@ -12,6 +12,9 @@
   `on_buffering` reports it. Live streams have no duration and ignore seeks (`au_media_is_live()`,
   `au_media_is_seekable()`). Dropped connections are re-opened (`reconnect_attempts`): files continue with a range
   request, live streams pick up again; an unreachable server still fails within the timeout.
+- "Now playing": `on_stream_metadata(handle, title, artist)` for Icecast/SHOUTcast titles ("Artist - Title" is
+  split) and tags that change inside Ogg/Opus streams, reported when that audio is heard; `au_get_track_info()`
+  follows, and the station's ICY headers (`icy-name`, ...) become tags. Latin-1 titles are converted to UTF-8.
 - Protocol whitelists: local paths can only open local files and URLs only http, https, tls, tcp, crypto and
   httpproxy, so playlists (HLS or otherwise) can not reach other protocols or local files.
 - Release archives: FFmpeg with the network protocols and the HLS demuxer; https through the system's GnuTLS

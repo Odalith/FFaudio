@@ -163,6 +163,13 @@ typedef struct FilterChain {
     AVFilterContext *sink;
 } FilterChain;
 
+// "Now playing" information read from a stream, waiting until playback reaches `position`
+typedef struct StreamMeta {
+    double position;            // seconds, the same time base as TrackState.position
+    char *title, *artist;       // UTF-8, owned; artist may be NULL
+    struct StreamMeta *next;
+} StreamMeta;
+
 typedef struct FilterCmd {
     char *target;
     char *cmd;
@@ -237,6 +244,9 @@ typedef struct TrackState {
     int resume_fade, resume_fade_len;   // SDL callback only: frames left of that fade-in, and its length
     int buffering_reported;             // control thread: last state sent to on_buffering (-1 = none yet)
     uint32_t buffering_note_ticks;      // control thread: when it was last sent
+    StreamMeta *stream_meta;            // guarded by seek_mutex: read thread appends, control thread reports
+    char *last_icy;                     // read thread: the last ICY packet seen
+    bool icy;                           // read thread: the server sends ICY metadata (icy-metaint)
     int32_t realtime;
     int32_t seek_by_bytes;
     bool infinite_buffer;
@@ -443,6 +453,7 @@ typedef struct AudioPlayer {
     NotifyOfAudioDeviceUpdate notify_of_audio_device_update_callback;
     NotifyOfAudioDevicesChanged notify_of_audio_devices_changed_callback;
     NotifyOfBuffering notify_of_buffering_callback;
+    NotifyOfStreamMetadata notify_of_stream_metadata_callback;
 
     // ---- control thread ----
     SDL_Thread *control_thread;

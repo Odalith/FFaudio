@@ -162,6 +162,7 @@ extern "C" {
         NotifyOfAudioDeviceUpdate on_audio_device_update;
         NotifyOfAudioDevicesChanged on_audio_devices_changed;
         NotifyOfBuffering on_buffering;
+        NotifyOfStreamMetadata on_stream_metadata;
     } InitializeConfig;
 
     typedef struct AudioDeviceConfig {

@@ -136,6 +136,32 @@ double replaygain_gain_db(const AuReplayGainConfig *cfg, const AuReplayGainInfo 
 //| AuMediaInfo                                         |
 //+-----------------------------------------------------+
 
+static bool valid_utf8(const unsigned char *s) {
+    while (*s) {
+        int n = *s < 0x80 ? 0 : (*s & 0xE0) == 0xC0 ? 1 : (*s & 0xF0) == 0xE0 ? 2 : (*s & 0xF8) == 0xF0 ? 3 : -1;
+        if (n < 0 || (n == 1 && *s < 0xC2)) return false;
+        s++;
+        while (n-- > 0) {
+            if ((*s & 0xC0) != 0x80) return false;
+            s++;
+        }
+    }
+    return true;
+}
+
+char *text_to_utf8(const char *s) {
+    if (!s) return NULL;
+    if (valid_utf8((const unsigned char *)s)) return av_strdup(s);
+    char *out = av_malloc(strlen(s) * 2 + 1), *o = out;
+    if (!out) return NULL;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p < 0x80) *o++ = (char)*p;
+        else { *o++ = (char)(0xC0 | (*p >> 6)); *o++ = (char)(0x80 | (*p & 0x3F)); }
+    }
+    *o = '\0';
+    return out;
+}
+
 AuMediaInfo *media_info_from_context(const AVFormatContext *ic, const int stream_index, const char *filename) {
     AuMediaInfo *info = av_mallocz(sizeof(AuMediaInfo));
     if (!info) return NULL;

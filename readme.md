@@ -204,7 +204,10 @@ Network tracks buffer before they start (`AuNetworkConfig.buffer_seconds`, defau
 `max_buffer_seconds` (30 s). When the network falls behind, the track waits for a full buffer again instead of
 stuttering: its position holds, and it fades back in. `on_buffering(handle, buffering, buffered_seconds)` reports
 both, for a "buffering..." display. Live streams (internet radio, live HLS) have no duration and ignore seeks;
-`au_media_is_live()` and `au_media_is_seekable()` tell them apart. A dropped connection is opened again
+`au_media_is_live()` and `au_media_is_seekable()` tell them apart. `on_stream_metadata(handle, title, artist)`
+reports "now playing" changes (Icecast/SHOUTcast titles, new tags inside Ogg/Opus streams) when they are heard,
+not when they are read ahead; `au_get_track_info()` shows the same title and artist, and the station's `icy-name`,
+`icy-genre`, ... headers as tags. Latin-1 titles from old servers are converted to UTF-8. A dropped connection is opened again
 (`reconnect_attempts`, default 5): a file continues where it stopped, a live stream picks up the broadcast.
 
 Local paths may only open local files and URLs only network protocols, so a playlist can not make FFmpeg read
@@ -445,7 +448,7 @@ plays a folder on real hardware for listening tests.
 - [ ] Embedded cover art
 - [x] Measure R128 / ReplayGain values for files (loudness analysis; read only)
 - [x] Playback speed (tempo with and without pitch change)
-- [ ] Network streams: HTTP(S) files, HLS, protocol whitelists, live buffering and reconnects done; "now playing" next
+- [x] Network streams: HTTP(S) files, HLS, Icecast/SHOUTcast with "now playing", buffering, reconnects
 - [ ] Cue sheets / gapless playback of track ranges inside one file
 - [x] Verified multichannel (5.1/7.1) playback and configurable downmixing
 - [x] Device added/removed notifications for the application
