@@ -37,6 +37,12 @@
   idle) instead of waking every 5 ms, and never waits for a track's thread to end: one stuck in a DNS lookup used to
   hold up every command and callback. With the change above, a player playing one track wakes about 47 times a
   second instead of 341 (24 instead of 223 when idle), with 4 threads instead of 5.
+- Loudness measurement keeps gating and short-term blocks in histograms (0.01 LU bins with exact energy sums)
+  instead of lists of every block: the memory no longer grows with the length, and an album is the sum of its tracks.
+  The true peak comes from a polyphase interpolator run on the decoded audio instead of a second resampler: scans are
+  about a third faster (8.0 s -> 5.0 s for a mixed set of files). Integrated loudness and gains are unchanged;
+  true peaks can differ by about 0.1 dB, within EBU Tech 3341's tolerance. Peaks now include the LFE channel, which
+  is played and can clip.
 - Custom fade curves (`AuFade.custom`) are sampled at 257 points when the fade is set up (`au_set_crossfade()`, or
   queueing a track with `PlayAudioConfig.fade_in`), on ffaudio's control thread, instead of being called on the
   audio thread throughout the fade; `custom_user` only has to live until that call has been processed.

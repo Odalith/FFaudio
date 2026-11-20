@@ -47,24 +47,51 @@
 #define REPLAYGAIN_REFERENCE_LUFS (-18.0)
 #define R128_REFERENCE_LUFS (-23.0)
 
-typedef struct EnergyList {
-    double *v;
-    size_t n, cap;
-} EnergyList;
+// Gating block and short-term energies are counted in histograms of HIST_STEP LU from the absolute gate up, with the
+// exact energy sum per bin: memory stays the same for any length, an album is the sum of its tracks, and only blocks in
+// the bin of the relative gate (0.01 LU wide) are taken as all above or all below it
+#define HIST_MIN_LUFS ABSOLUTE_GATE_LUFS
+#define HIST_STEP 0.01
+#define HIST_BINS 10000                  // -70 .. +30 LUFS (louder blocks count in the top bin)
+
+typedef struct Histogram {
+    uint32_t count[HIST_BINS];
+    double energy[HIST_BINS];
+} Histogram;
 
 struct AuLoudnessScanner {
     AuLoudnessConfig config;
     AVIOInterruptCB interrupt;  // loudness_scanner_set_interrupt(); no callback = none
-    EnergyList blocks;          // gating block energies of every scanned track
-    EnergyList short_term;      // short-term energies of every scanned track
+    Histogram *blocks, *short_term;          // every scanned track (the album)
+    Histogram *file_blocks, *file_short_term; // the file being scanned, reused
     double sample_peak, true_peak, duration;
     int tracks;
 };
 
+// True peak: interpolation to 4x (below 96 kHz) or 2x (below 192 kHz) with a windowed sinc in polyphase form (49
+// taps, Hann window, as libebur128), run straight on the planar float input
+#define TP_TAPS 49
+#define TP_MAX_PHASE_TAPS 25
+
+typedef struct TruePeak {
+    int factor;
+    int delay;                          // history kept per channel
+    // Phases 1 .. factor-1 (phase 0 is the input sample itself, which the sample peak covers): ntaps coefficients
+    // each, reversed, so an output is a forward dot product over the input window that ends at its sample
+    int ntaps;
+    float coef[4][TP_MAX_PHASE_TAPS];
+    double gain;                        // largest sum of |coef| of a phase: no output exceeds gain x the input's peak
+    float *hist;                        // channels x delay: the last input samples
+    float *work;                        // history + one chunk of one channel
+    size_t work_size;
+    float *hist_peak;                   // per channel: largest |x| in the history
+} TruePeak;
+
 typedef struct Meter {
     int rate, channels;
-    double b[5], a[5];          // K-weighting: pre-filter (high shelf) and RLB high pass combined
-    double (*z)[4];             // per channel filter state
+    // K-weighting as two biquads (pre-filter high shelf, RLB high pass), transposed direct form II
+    double pb[3], pa[3], rb[3], ra[3];
+    double (*z)[4];             // per channel: two states per biquad
     double *weight;             // per channel weight (0 = not measured, e.g. LFE)
     int sub_len;                // samples per 100 ms
     int sub_pos;
@@ -72,100 +99,94 @@ typedef struct Meter {
     double ring[SUB_BLOCKS_PER_SHORT_TERM];
     int ring_pos;
     int64_t sub_count;
-    EnergyList blocks, short_term;
+    Histogram *blocks, *short_term; // the scanner's, cleared for this file
     double sample_peak, true_peak;
     int64_t samples;
-
-    // True peak: upsampled copy of the signal
-    SwrContext *tp;
-    int tp_factor;
-    uint8_t **tp_buf;
-    int tp_buf_samples;
+    TruePeak *tp;               // NULL: none (skipped, or 192 kHz and up)
 } Meter;
 
 //+-----------------------------------------------------+
-//| Energy lists and gating                             |
+//| Histograms and gating                               |
 //+-----------------------------------------------------+
-
-static int list_push(EnergyList *l, const double v) {
-    if (l->n == l->cap) {
-        const size_t cap = l->cap ? l->cap * 2 : 1024;
-        double *nv = av_realloc_array(l->v, cap, sizeof(double));
-        if (!nv) return AVERROR(ENOMEM);
-        l->v = nv;
-        l->cap = cap;
-    }
-    l->v[l->n++] = v;
-    return 0;
-}
-
-static int list_append(EnergyList *dst, const EnergyList *src) {
-    for (size_t i = 0; i < src->n; i++)
-        if (list_push(dst, src->v[i]) < 0) return AVERROR(ENOMEM);
-    return 0;
-}
-
-static void list_free(EnergyList *l) {
-    av_freep(&l->v);
-    l->n = l->cap = 0;
-}
 
 static double energy_to_lufs(const double e) { return -0.691 + 10.0 * log10(e); }
 static double lufs_to_energy(const double l) { return pow(10.0, (l + 0.691) / 10.0); }
 
-// Gated integrated loudness of a set of block energies; false when nothing passes the absolute gate
-static bool integrated_loudness(const EnergyList *blocks, double *lufs) {
-    const double abs_gate = lufs_to_energy(ABSOLUTE_GATE_LUFS);
-    double sum = 0;
-    size_t count = 0;
-    for (size_t i = 0; i < blocks->n; i++)
-        if (blocks->v[i] >= abs_gate) { sum += blocks->v[i]; count++; }
-    if (!count) return false;
+static int bin_of(const double lufs) {
+    const int i = (int)floor((lufs - HIST_MIN_LUFS) / HIST_STEP);
+    return i < 0 ? 0 : (i >= HIST_BINS ? HIST_BINS - 1 : i);
+}
 
-    const double rel_gate = (sum / (double)count) * pow(10.0, RELATIVE_GATE_LU / 10.0);
-    const double gate = rel_gate > abs_gate ? rel_gate : abs_gate;
-    sum = 0;
-    count = 0;
-    for (size_t i = 0; i < blocks->n; i++)
-        if (blocks->v[i] >= gate) { sum += blocks->v[i]; count++; }
-    if (!count) return false;
-    *lufs = energy_to_lufs(sum / (double)count);
+static double bin_center(const int i) { return HIST_MIN_LUFS + (i + 0.5) * HIST_STEP; }
+
+// Blocks below the absolute gate are not counted at all
+static void hist_add(Histogram *h, const double e) {
+    if (!(e >= lufs_to_energy(ABSOLUTE_GATE_LUFS))) return;
+    const int i = bin_of(energy_to_lufs(e));
+    h->count[i]++;
+    h->energy[i] += e;
+}
+
+static void hist_merge(Histogram *dst, const Histogram *src) {
+    for (int i = 0; i < HIST_BINS; i++) {
+        dst->count[i] += src->count[i];
+        dst->energy[i] += src->energy[i];
+    }
+}
+
+// First bin at or above a gate: its own bin counts when the gate is in its lower half
+static int gate_bin(const double gate_lufs) {
+    const int i = bin_of(gate_lufs);
+    return gate_lufs > bin_center(i) ? i + 1 : i;
+}
+
+// Mean energy of the counted blocks, and how many there are
+static double hist_mean(const Histogram *h, const int from, uint64_t *count) {
+    double sum = 0;
+    uint64_t n = 0;
+    for (int i = from; i < HIST_BINS; i++) {
+        sum += h->energy[i];
+        n += h->count[i];
+    }
+    *count = n;
+    return n ? sum / (double)n : 0;
+}
+
+// Gated integrated loudness; false when nothing passes the absolute gate
+static bool integrated_loudness(const Histogram *h, double *lufs) {
+    uint64_t n;
+    const double mean = hist_mean(h, 0, &n);
+    if (!n) return false;
+    const double gate = FFMAX(energy_to_lufs(mean) + RELATIVE_GATE_LU, ABSOLUTE_GATE_LUFS);
+    const double gated = hist_mean(h, gate_bin(gate), &n);
+    if (!n) return false;
+    *lufs = energy_to_lufs(gated);
     return true;
 }
 
-static int compare_double(const void *a, const void *b) {
-    const double x = *(const double *)a, y = *(const double *)b;
-    return x < y ? -1 : (x > y);
-}
-
 // Loudness range (EBU Tech 3342): spread between the 10th and 95th percentile of the gated short-term loudness
-static double loudness_range(const EnergyList *st) {
-    const double abs_gate = lufs_to_energy(ABSOLUTE_GATE_LUFS);
-    double sum = 0;
-    size_t count = 0;
-    for (size_t i = 0; i < st->n; i++)
-        if (st->v[i] >= abs_gate) { sum += st->v[i]; count++; }
-    if (count < 2) return 0;
-
-    const double rel_gate = (sum / (double)count) * pow(10.0, LRA_RELATIVE_GATE_LU / 10.0);
-    const double gate = rel_gate > abs_gate ? rel_gate : abs_gate;
-    double *values = av_malloc_array(count, sizeof(double));
-    if (!values) return 0;
-    size_t n = 0;
-    for (size_t i = 0; i < st->n; i++)
-        if (st->v[i] >= gate) values[n++] = energy_to_lufs(st->v[i]);
-    double lra = 0;
-    if (n >= 2) {
-        qsort(values, n, sizeof(double), compare_double);
-        const size_t lo = (size_t)((double)(n - 1) * 0.10 + 0.5);
-        const size_t hi = (size_t)((double)(n - 1) * 0.95 + 0.5);
-        lra = values[hi] - values[lo];
+static double loudness_range(const Histogram *h) {
+    uint64_t n;
+    const double mean = hist_mean(h, 0, &n);
+    if (n < 2) return 0;
+    const int from = gate_bin(FFMAX(energy_to_lufs(mean) + LRA_RELATIVE_GATE_LU, ABSOLUTE_GATE_LUFS));
+    uint64_t total = 0;
+    for (int i = from; i < HIST_BINS; i++) total += h->count[i];
+    if (total < 2) return 0;
+    const uint64_t lo_rank = (uint64_t)((double)(total - 1) * 0.10 + 0.5);
+    const uint64_t hi_rank = (uint64_t)((double)(total - 1) * 0.95 + 0.5);
+    double lo = 0, hi = 0;
+    uint64_t seen = 0;
+    bool have_lo = false;
+    for (int i = from; i < HIST_BINS; i++) {
+        seen += h->count[i];
+        if (!have_lo && seen > lo_rank) { lo = bin_center(i); have_lo = true; }
+        if (seen > hi_rank) { hi = bin_center(i); break; }
     }
-    av_free(values);
-    return lra;
+    return hi - lo;
 }
 
-static void fill_result(AuLoudness *out, const EnergyList *blocks, const EnergyList *st,
+static void fill_result(AuLoudness *out, const Histogram *blocks, const Histogram *st,
                         const double sample_peak, const double true_peak, const double duration) {
     memset(out, 0, sizeof(*out));
     out->sample_peak = sample_peak;
@@ -197,27 +218,23 @@ static void k_weighting(Meter *m) {
     const double Vh = pow(10.0, G / 20.0);
     const double Vb = pow(Vh, 0.4996667741545416);
     double a0 = 1.0 + K / Q + K * K;
-    const double pb[3] = { (Vh + Vb * K / Q + K * K) / a0, 2.0 * (K * K - Vh) / a0, (Vh - Vb * K / Q + K * K) / a0 };
-    const double pa[3] = { 1.0, 2.0 * (K * K - 1.0) / a0, (1.0 - K / Q + K * K) / a0 };
+    m->pb[0] = (Vh + Vb * K / Q + K * K) / a0;
+    m->pb[1] = 2.0 * (K * K - Vh) / a0;
+    m->pb[2] = (Vh - Vb * K / Q + K * K) / a0;
+    m->pa[0] = 1.0;
+    m->pa[1] = 2.0 * (K * K - 1.0) / a0;
+    m->pa[2] = (1.0 - K / Q + K * K) / a0;
 
     f0 = 38.13547087602444;
     Q = 0.5003270373238773;
     K = tan(M_PI * f0 / rate);
     a0 = 1.0 + K / Q + K * K;
-    const double rb[3] = { 1.0, -2.0, 1.0 };
-    const double ra[3] = { 1.0, 2.0 * (K * K - 1.0) / a0, (1.0 - K / Q + K * K) / a0 };
-
-    // Cascade the two biquads into one 4th order filter
-    m->b[0] = pb[0] * rb[0];
-    m->b[1] = pb[0] * rb[1] + pb[1] * rb[0];
-    m->b[2] = pb[0] * rb[2] + pb[1] * rb[1] + pb[2] * rb[0];
-    m->b[3] = pb[1] * rb[2] + pb[2] * rb[1];
-    m->b[4] = pb[2] * rb[2];
-    m->a[0] = pa[0] * ra[0];
-    m->a[1] = pa[0] * ra[1] + pa[1] * ra[0];
-    m->a[2] = pa[0] * ra[2] + pa[1] * ra[1] + pa[2] * ra[0];
-    m->a[3] = pa[1] * ra[2] + pa[2] * ra[1];
-    m->a[4] = pa[2] * ra[2];
+    m->rb[0] = 1.0;
+    m->rb[1] = -2.0;
+    m->rb[2] = 1.0;
+    m->ra[0] = 1.0;
+    m->ra[1] = 2.0 * (K * K - 1.0) / a0;
+    m->ra[2] = (1.0 - K / Q + K * K) / a0;
 }
 
 // BS.1770-4 channel weights: surround channels 1.41 (+1.5 dB), LFE not measured, others 1.0
@@ -238,24 +255,106 @@ static double channel_weight(const enum AVChannel ch) {
     }
 }
 
+static void true_peak_free(TruePeak **tp) {
+    if (!*tp) return;
+    av_free((*tp)->hist);
+    av_free((*tp)->work);
+    av_free((*tp)->hist_peak);
+    av_freep(tp);
+}
+
+static TruePeak *true_peak_create(const int factor, const int channels) {
+    TruePeak *tp = av_mallocz(sizeof(TruePeak));
+    if (!tp) return NULL;
+    tp->factor = factor;
+    tp->delay = (TP_TAPS + factor - 1) / factor;
+    tp->ntaps = TP_TAPS / factor; // taps j = f + k * factor of phase f >= 1 (12 at 4x, 24 at 2x)
+    for (int f = 1; f < factor; f++) {
+        double g = 0;
+        for (int k = 0; k < tp->ntaps; k++) {
+            const int j = f + k * factor;
+            const double x = (double)j - (TP_TAPS - 1) / 2.0;
+            double c = fabs(x) > 1e-12 ? sin(x * M_PI / factor) / (x * M_PI / factor) : 1.0;
+            c *= 0.5 * (1.0 - cos(2.0 * M_PI * j / (TP_TAPS - 1)));
+            tp->coef[f][tp->ntaps - 1 - k] = (float)c; // tap k weighs the input k samples back
+            g += fabs(c);
+        }
+        tp->gain = FFMAX(tp->gain, g);
+    }
+    tp->hist = av_calloc((size_t)channels * tp->delay, sizeof(float));
+    tp->hist_peak = av_calloc(channels, sizeof(float));
+    if (!tp->hist || !tp->hist_peak) true_peak_free(&tp);
+    return tp;
+}
+
+// One channel's chunk: the largest interpolated value goes into *peak. Skipped (only the history moves on) when no
+// output can exceed *peak: after the loudest part of a file, nearly every chunk is.
+static int true_peak_channel(TruePeak *tp, const int c, const float *x, const int n, const float chunk_peak,
+                             double *peak) {
+    const int d = tp->delay;
+    float *hist = tp->hist + (size_t)c * d;
+    const bool needed = (double)FFMAX(chunk_peak, tp->hist_peak[c]) * tp->gain > *peak;
+    if (needed) {
+        const size_t need = (size_t)(d + n) * sizeof(float);
+        if (need > tp->work_size) {
+            float *w = av_realloc(tp->work, need);
+            if (!w) return AVERROR(ENOMEM);
+            tp->work = w;
+            tp->work_size = need;
+        }
+        float *w = tp->work;
+        memcpy(w, hist, (size_t)d * sizeof(float));
+        memcpy(w + d, x, (size_t)n * sizeof(float));
+        // Outputs in blocks, one tap at a time across the block: the inner loop is a vectorizable multiply-add
+        float p = (float)*peak;
+        const int nt = tp->ntaps;
+        float acc[256];
+        for (int b = 0; b < n; b += 256) {
+            const int len = FFMIN(256, n - b);
+            const float *base = w + d + b - (nt - 1);
+            for (int f = 1; f < tp->factor; f++) {
+                for (int i = 0; i < len; i++) acc[i] = 0.0f;
+                for (int k = 0; k < nt; k++) {
+                    const float c = tp->coef[f][k];
+                    const float *src = base + k;
+                    for (int i = 0; i < len; i++) acc[i] += c * src[i];
+                }
+                for (int i = 0; i < len; i++) p = FFMAX(p, fabsf(acc[i]));
+            }
+        }
+        *peak = FFMAX(*peak, (double)p);
+    }
+    // Keep the last `delay` samples
+    if (n >= d) {
+        memcpy(hist, x + n - d, (size_t)d * sizeof(float));
+    }
+    else {
+        memmove(hist, hist + n, (size_t)(d - n) * sizeof(float));
+        memcpy(hist + d - n, x, (size_t)n * sizeof(float));
+    }
+    float hp = 0;
+    for (int i = 0; i < d; i++) hp = FFMAX(hp, fabsf(hist[i]));
+    tp->hist_peak[c] = hp;
+    return 0;
+}
+
 static void meter_free(Meter *m) {
     av_freep(&m->z);
     av_freep(&m->weight);
-    list_free(&m->blocks);
-    list_free(&m->short_term);
-    swr_free(&m->tp);
-    if (m->tp_buf) {
-        av_freep(&m->tp_buf[0]);
-        av_freep(&m->tp_buf);
-    }
+    true_peak_free(&m->tp);
 }
 
-static int meter_init(Meter *m, const int rate, const AVChannelLayout *layout, const bool true_peak) {
+static int meter_init(Meter *m, const int rate, const AVChannelLayout *layout, const bool true_peak,
+                      Histogram *blocks, Histogram *short_term) {
     memset(m, 0, sizeof(*m));
     m->rate = rate;
     m->channels = layout->nb_channels;
     m->sub_len = (int)lrint(rate / 10.0);
     if (m->channels < 1 || m->sub_len < 1) return AVERROR(EINVAL);
+    m->blocks = blocks;
+    m->short_term = short_term;
+    memset(blocks, 0, sizeof(*blocks));
+    memset(short_term, 0, sizeof(*short_term));
 
     m->z = av_calloc(m->channels, sizeof(*m->z));
     m->weight = av_calloc(m->channels, sizeof(double));
@@ -268,20 +367,15 @@ static int meter_init(Meter *m, const int rate, const AVChannelLayout *layout, c
                            ? 1.0 : channel_weight(av_channel_layout_channel_from_index(layout, c));
     k_weighting(m);
 
-    // True peak: oversample to at least 192 kHz
-    m->tp_factor = rate < 96000 ? 4 : (rate < 192000 ? 2 : 1);
-    if (true_peak && m->tp_factor > 1) {
-        int ret = swr_alloc_set_opts2(&m->tp, layout, AV_SAMPLE_FMT_FLTP, rate * m->tp_factor,
-                                      layout, AV_SAMPLE_FMT_FLTP, rate, 0, NULL);
-        if (ret < 0 || (ret = swr_init(m->tp)) < 0) {
-            meter_free(m);
-            return ret;
-        }
+    const int factor = rate < 96000 ? 4 : (rate < 192000 ? 2 : 1);
+    if (true_peak && factor > 1 && !(m->tp = true_peak_create(factor, m->channels))) {
+        meter_free(m);
+        return AVERROR(ENOMEM);
     }
     return 0;
 }
 
-static int finish_sub_block(Meter *m) {
+static void finish_sub_block(Meter *m) {
     m->ring[m->ring_pos] = m->sub_energy;
     m->ring_pos = (m->ring_pos + 1) % SUB_BLOCKS_PER_SHORT_TERM;
     m->sub_count++;
@@ -292,87 +386,81 @@ static int finish_sub_block(Meter *m) {
         double e = 0;
         for (int i = 1; i <= SUB_BLOCKS_PER_BLOCK; i++)
             e += m->ring[(m->ring_pos - i + SUB_BLOCKS_PER_SHORT_TERM) % SUB_BLOCKS_PER_SHORT_TERM];
-        if (list_push(&m->blocks, e / ((double)SUB_BLOCKS_PER_BLOCK * m->sub_len)) < 0) return AVERROR(ENOMEM);
+        hist_add(m->blocks, e / ((double)SUB_BLOCKS_PER_BLOCK * m->sub_len));
     }
     if (m->sub_count >= SUB_BLOCKS_PER_SHORT_TERM) {
         double e = 0;
         for (int i = 0; i < SUB_BLOCKS_PER_SHORT_TERM; i++) e += m->ring[i];
-        if (list_push(&m->short_term, e / ((double)SUB_BLOCKS_PER_SHORT_TERM * m->sub_len)) < 0) return AVERROR(ENOMEM);
+        hist_add(m->short_term, e / ((double)SUB_BLOCKS_PER_SHORT_TERM * m->sub_len));
     }
-    return 0;
-}
-
-static int true_peak_feed(Meter *m, const float *const *data, const int samples) {
-    if (!m->tp) return 0;
-    const int out_max = swr_get_out_samples(m->tp, samples);
-    if (out_max > m->tp_buf_samples) {
-        if (m->tp_buf) {
-            av_freep(&m->tp_buf[0]);
-            av_freep(&m->tp_buf);
-        }
-        if (av_samples_alloc_array_and_samples(&m->tp_buf, NULL, m->channels, out_max, AV_SAMPLE_FMT_FLTP, 0) < 0)
-            return AVERROR(ENOMEM);
-        m->tp_buf_samples = out_max;
-    }
-    const int got = swr_convert(m->tp, m->tp_buf, m->tp_buf_samples, (const uint8_t **)data, samples);
-    if (got < 0) return got;
-    for (int c = 0; c < m->channels; c++) {
-        if (m->weight[c] == 0.0) continue;
-        const float *s = (const float *)m->tp_buf[c];
-        for (int i = 0; i < got; i++) {
-            const double v = fabs((double)s[i]);
-            if (v > m->true_peak) m->true_peak = v;
-        }
-    }
-    return 0;
 }
 
 static int meter_process(Meter *m, const float *const *data, const int samples) {
-    const double b0 = m->b[0], b1 = m->b[1], b2 = m->b[2], b3 = m->b[3], b4 = m->b[4];
-    const double a1 = m->a[1], a2 = m->a[2], a3 = m->a[3], a4 = m->a[4];
-    int done = 0;
+    const double pb0 = m->pb[0], pb1 = m->pb[1], pb2 = m->pb[2], pa1 = m->pa[1], pa2 = m->pa[2];
+    const double rb0 = m->rb[0], rb1 = m->rb[1], rb2 = m->rb[2], ra1 = m->ra[1], ra2 = m->ra[2];
 
+    // Peaks of every channel, LFE included (it is played, and it can clip)
+    for (int c = 0; c < m->channels; c++) {
+        const float *x = data[c];
+        float peak = 0;
+        for (int i = 0; i < samples; i++) peak = FFMAX(peak, fabsf(x[i]));
+        if (peak > m->sample_peak) m->sample_peak = peak;
+        if (m->tp) {
+            const int ret = true_peak_channel(m->tp, c, x, samples, peak, &m->true_peak);
+            if (ret < 0) return ret;
+        }
+    }
+
+    int done = 0;
     while (done < samples) {
         const int n = FFMIN(samples - done, m->sub_len - m->sub_pos);
         double energy = 0;
         for (int c = 0; c < m->channels; c++) {
-            const float *x = data[c] + done;
             const double w = m->weight[c];
-            double peak = m->sample_peak;
-            for (int i = 0; i < n; i++) {
-                const double v = fabs((double)x[i]);
-                if (v > peak && w != 0.0) peak = v;
-            }
-            m->sample_peak = peak;
             if (w == 0.0) continue;
-
-            // Direct form II, 4th order
-            double z1 = m->z[c][0], z2 = m->z[c][1], z3 = m->z[c][2], z4 = m->z[c][3];
+            const float *x = data[c] + done;
+            double s1 = m->z[c][0], s2 = m->z[c][1], t1 = m->z[c][2], t2 = m->z[c][3];
             double sum = 0;
             for (int i = 0; i < n; i++) {
-                const double v0 = (double)x[i] - a1 * z1 - a2 * z2 - a3 * z3 - a4 * z4;
-                const double y = b0 * v0 + b1 * z1 + b2 * z2 + b3 * z3 + b4 * z4;
-                z4 = z3; z3 = z2; z2 = z1; z1 = v0;
+                const double in = (double)x[i];
+                const double y1 = pb0 * in + s1;
+                s1 = pb1 * in - pa1 * y1 + s2;
+                s2 = pb2 * in - pa2 * y1;
+                const double y = rb0 * y1 + t1;
+                t1 = rb1 * y1 - ra1 * y + t2;
+                t2 = rb2 * y1 - ra2 * y;
                 sum += y * y;
             }
             // Flush denormals so silence does not slow the filter down
-            if (fabs(z1) < 1e-30) z1 = 0;
-            if (fabs(z2) < 1e-30) z2 = 0;
-            if (fabs(z3) < 1e-30) z3 = 0;
-            if (fabs(z4) < 1e-30) z4 = 0;
-            m->z[c][0] = z1; m->z[c][1] = z2; m->z[c][2] = z3; m->z[c][3] = z4;
+            if (fabs(s1) < 1e-30) s1 = 0;
+            if (fabs(s2) < 1e-30) s2 = 0;
+            if (fabs(t1) < 1e-30) t1 = 0;
+            if (fabs(t2) < 1e-30) t2 = 0;
+            m->z[c][0] = s1; m->z[c][1] = s2; m->z[c][2] = t1; m->z[c][3] = t2;
             energy += w * sum;
         }
         m->sub_energy += energy;
         m->sub_pos += n;
         done += n;
-        if (m->sub_pos == m->sub_len) {
-            const int ret = finish_sub_block(m);
-            if (ret < 0) return ret;
-        }
+        if (m->sub_pos == m->sub_len) finish_sub_block(m);
     }
     m->samples += samples;
-    return true_peak_feed(m, data, samples);
+    return 0;
+}
+
+// The end: the interpolator's last outputs need input after the last sample
+static int meter_finish(Meter *m) {
+    if (!m->tp) {
+        m->true_peak = m->sample_peak;
+        return 0;
+    }
+    float zeros[TP_MAX_PHASE_TAPS + 1] = {0};
+    for (int c = 0; c < m->channels; c++) {
+        const int ret = true_peak_channel(m->tp, c, zeros, m->tp->delay, 0.0f, &m->true_peak);
+        if (ret < 0) return ret;
+    }
+    m->true_peak = FFMAX(m->true_peak, m->sample_peak); // the interpolator's phase 0: the samples themselves
+    return 0;
 }
 
 //+-----------------------------------------------------+
@@ -381,7 +469,7 @@ static int meter_process(Meter *m, const float *const *data, const int samples) 
 
 // Decode `filename` into `m`. Returns 0, AU_ERR_* on failure.
 static int measure_file(const AuLoudnessConfig *cfg, const AVIOInterruptCB *interrupt, const char *filename,
-                        Meter *m) {
+                        Meter *m, Histogram *blocks, Histogram *short_term) {
     AVFormatContext *ic = NULL;
     AVCodecContext *dec = NULL;
     AVPacket *pkt = NULL;
@@ -467,7 +555,7 @@ static int measure_file(const AuLoudnessConfig *cfg, const AVIOInterruptCB *inte
                 if (frame->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC || !av_channel_layout_check(&frame->ch_layout))
                     av_channel_layout_default(&layout, frame->ch_layout.nb_channels);
                 else if (av_channel_layout_copy(&layout, &frame->ch_layout) < 0) { result = AU_ERR_NO_MEMORY; goto end; }
-                if (meter_init(m, frame->sample_rate, &layout, !cfg->skip_true_peak) < 0) goto end;
+                if (meter_init(m, frame->sample_rate, &layout, !cfg->skip_true_peak, blocks, short_term) < 0) goto end;
                 meter_ready = true;
             }
             // Compared with the frames' own layout: an unspecified one is replaced for the converter, and
@@ -519,20 +607,9 @@ static int measure_file(const AuLoudnessConfig *cfg, const AVIOInterruptCB *inte
 
 done:
     if (!meter_ready) goto end; // no audio at all
-    if (m->tp) {
-        // Push out what the upsampler still holds
-        if (m->tp_buf) {
-            const int got = swr_convert(m->tp, m->tp_buf, m->tp_buf_samples, NULL, 0);
-            for (int c = 0; c < m->channels && got > 0; c++) {
-                if (m->weight[c] == 0.0) continue;
-                const float *s = (const float *)m->tp_buf[c];
-                for (int i = 0; i < got; i++)
-                    if (fabs((double)s[i]) > m->true_peak) m->true_peak = fabs((double)s[i]);
-            }
-        }
-    }
-    else {
-        m->true_peak = m->sample_peak;
+    if ((ret = meter_finish(m)) < 0) {
+        result = AU_ERR_NO_MEMORY;
+        goto end;
     }
     if (cfg->progress) cfg->progress(1.0, cfg->progress_user);
     result = AU_OK;
@@ -559,9 +636,27 @@ end:
 //| Public API                                          |
 //+-----------------------------------------------------+
 
+void au_loudness_scanner_free(AuLoudnessScanner *s) {
+    if (!s) return;
+    av_free(s->blocks);
+    av_free(s->short_term);
+    av_free(s->file_blocks);
+    av_free(s->file_short_term);
+    av_free(s);
+}
+
 AuLoudnessScanner *au_loudness_scanner_create(const AuLoudnessConfig *config) {
     AuLoudnessScanner *s = av_mallocz(sizeof(AuLoudnessScanner));
-    if (s && config) s->config = *config;
+    if (!s) return NULL;
+    if (config) s->config = *config;
+    s->blocks = av_mallocz(sizeof(Histogram));
+    s->short_term = av_mallocz(sizeof(Histogram));
+    s->file_blocks = av_mallocz(sizeof(Histogram));
+    s->file_short_term = av_mallocz(sizeof(Histogram));
+    if (!s->blocks || !s->short_term || !s->file_blocks || !s->file_short_term) {
+        au_loudness_scanner_free(s);
+        return NULL;
+    }
     return s;
 }
 
@@ -573,16 +668,10 @@ void loudness_scanner_set_interrupt(AuLoudnessScanner *s, const AVIOInterruptCB 
 
 void au_loudness_scanner_reset(AuLoudnessScanner *s) {
     if (!s) return;
-    list_free(&s->blocks);
-    list_free(&s->short_term);
+    memset(s->blocks, 0, sizeof(Histogram));
+    memset(s->short_term, 0, sizeof(Histogram));
     s->sample_peak = s->true_peak = s->duration = 0;
     s->tracks = 0;
-}
-
-void au_loudness_scanner_free(AuLoudnessScanner *s) {
-    if (!s) return;
-    au_loudness_scanner_reset(s);
-    av_free(s);
 }
 
 int au_loudness_track_count(const AuLoudnessScanner *s) {
@@ -593,20 +682,15 @@ int au_loudness_scan_file(AuLoudnessScanner *s, const char *filename, AuLoudness
     if (!s || !filename || !filename[0]) return AU_ERR_INVALID_ARGUMENT;
 
     Meter m;
-    const int ret = measure_file(&s->config, &s->interrupt, filename, &m);
+    const int ret = measure_file(&s->config, &s->interrupt, filename, &m, s->file_blocks, s->file_short_term);
     if (ret != AU_OK) return ret;
 
     const double duration = (double)m.samples / m.rate;
-    if (out) fill_result(out, &m.blocks, &m.short_term, m.sample_peak, m.true_peak, duration);
+    if (out) fill_result(out, s->file_blocks, s->file_short_term, m.sample_peak, m.true_peak, duration);
 
-    // Add to the album; on failure leave the album as it was
-    const size_t nb = s->blocks.n, ns = s->short_term.n;
-    if (list_append(&s->blocks, &m.blocks) < 0 || list_append(&s->short_term, &m.short_term) < 0) {
-        s->blocks.n = nb;
-        s->short_term.n = ns;
-        meter_free(&m);
-        return AU_ERR_NO_MEMORY;
-    }
+    // The album is the sum of its tracks
+    hist_merge(s->blocks, s->file_blocks);
+    hist_merge(s->short_term, s->file_short_term);
     s->sample_peak = FFMAX(s->sample_peak, m.sample_peak);
     s->true_peak = FFMAX(s->true_peak, m.true_peak);
     s->duration += duration;
@@ -618,7 +702,7 @@ int au_loudness_scan_file(AuLoudnessScanner *s, const char *filename, AuLoudness
 int au_loudness_album(const AuLoudnessScanner *s, AuLoudness *out) {
     if (!s || !out) return AU_ERR_INVALID_ARGUMENT;
     if (!s->tracks) return AU_ERR_NOTHING_TO_DO;
-    fill_result(out, &s->blocks, &s->short_term, s->sample_peak, s->true_peak, s->duration);
+    fill_result(out, s->blocks, s->short_term, s->sample_peak, s->true_peak, s->duration);
     return AU_OK;
 }
 
