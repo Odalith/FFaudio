@@ -39,7 +39,7 @@
 #define MAX_QUEUE_SIZE (15 * 1024 * 1024)
 #define MIN_FRAMES 25
 // Network tracks read ahead by time (max_buffer_seconds); this caps the bytes for very high bit rates
-#define NET_MAX_QUEUE_SIZE (64 * 1024 * 1024)
+#define NET_MAX_QUEUE_SIZE (32 * 1024 * 1024)
 // Packets without durations (some live streams): this many bytes count as a full buffer
 #define NET_BUFFER_FALLBACK_BYTES (256 * 1024)
 // A backwards jump of the frame timestamps larger than this, without a seek, means the track looped

@@ -280,7 +280,8 @@ extern "C" {
         const char *user_agent;       // NULL = "ffaudio/<version>"
         double timeout_seconds;       // connecting and every read; 0 = 10 s. A dead server ends the track with an error
         double buffer_seconds;        // live streams: audio buffered before starting and after a stall; 0 = 2 s
-        double max_buffer_seconds;    // most audio read ahead from the network; 0 = 30 s
+        double max_buffer_seconds;    // most audio read ahead from the network; 0 = 10 s. More rides out longer
+                                      // stalls, but costs memory (on Linux glibc keeps it afterwards, per thread)
         int reconnect_attempts;       // after a dropped connection, with growing delays; 0 = 5, -1 = never
         // Measure network files for ReplayGain (AuReplayGainConfig.measure_missing, au_gain_cache_request()).
         // false (default): they are skipped, since measuring downloads the whole file

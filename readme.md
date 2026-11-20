@@ -201,7 +201,7 @@ const PlayAudioConfig cfg = { .http_headers = "Authorization: Bearer abc123" };
 au_set_next("https://music.example.com/rest/stream?id=42", &cfg);
 ```
 Network tracks buffer before they start (`AuNetworkConfig.buffer_seconds`, default 2 s) and read ahead up to
-`max_buffer_seconds` (30 s). When the network falls behind, the track waits for a full buffer again instead of
+`max_buffer_seconds` (10 s). When the network falls behind, the track waits for a full buffer again instead of
 stuttering: its position holds, and it fades back in. `on_buffering(handle, buffering, buffered_seconds)` reports
 both, for a "buffering..." display. Live streams (internet radio, live HLS) have no duration and ignore seeks;
 `au_media_is_live()` and `au_media_is_seekable()` tell them apart. `on_stream_metadata(handle, title, artist)`
@@ -394,6 +394,11 @@ stayed at a few MB, while the process' RSS rose to about 145 MB in the first hou
 170 MB, without growing, for the remaining seven (2.0.0, with a thread pool per decoder and filter graph, levelled
 off at 300-350 MB). A plain player, with one track and no background measurement, needs less.
 AddressSanitizer runs of the same test found no leaks.
+
+Network streams read ahead (`AuNetworkConfig.max_buffer_seconds`, 10 s), and every pool keeps the largest
+read-ahead it has held: a hi-res stream over HTTP is several MB per 10 s. In 2-hour soaks with a third of the
+tracks streamed, a 10 s-class read-ahead (8 s) levelled off at about 110 MB held while 30 s reached 285 MB and was
+still growing; raise it only if your streams need it.
 
 If the resident size matters (a small device, a player that runs for weeks), the application can:
 - limit glibc to a few pools: `MALLOC_ARENA_MAX=2` in the environment, or `mallopt(M_ARENA_MAX, 2)` at start-up
