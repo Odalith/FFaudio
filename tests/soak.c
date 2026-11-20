@@ -19,6 +19,7 @@
  *     -d minutes   write malloc_info() (glibc: every arena's free blocks by size) to malloc-<seconds>.xml this often
  *     -m           call malloc_trim(0) after every sample (glibc), to see how much of the growth is memory that
  *                  malloc has freed but kept
+ *     -B seconds   network read-ahead (AuNetworkConfig.max_buffer_seconds; default: ffaudio's)
  *     -w percent   play this share of picks over HTTP from a local server (tests/http_server.h): files with range
  *                  requests, and MP3s also as endless live streams with "now playing" titles, sometimes throttled
  *                  below real time (stalls) or with dropped connections (reconnects). Default 0
@@ -109,6 +110,7 @@ static bool chance(const double p) { return rnd_real(0, 1) < p; }
 static int junk_percent = 3;
 
 static int web_percent;
+static double max_buffer_seconds;   // -B, 0 = ffaudio's default
 static TsServer server;
 
 // http://127.0.0.1:<port>/<kind>/<absolute path, percent-encoded><query>, from a per-thread ring of buffers
@@ -614,7 +616,7 @@ int main(int argc, char **argv) {
     base_seed = (uint64_t)time(NULL);
     int opt;
     double dump_minutes = 0;
-    while ((opt = getopt(argc, argv, "t:x:s:o:i:r:j:c:kd:mw:v")) != -1) {
+    while ((opt = getopt(argc, argv, "t:x:s:o:i:r:j:c:kd:mw:B:v")) != -1) {
         switch (opt) {
             case 't': hours = atof(optarg); break;
             case 'x': scale = atof(optarg); break;
@@ -627,6 +629,7 @@ int main(int argc, char **argv) {
             case 'v': verbose = true; break;
             case 'm': trim = true; break;
             case 'w': web_percent = atoi(optarg); break;
+            case 'B': max_buffer_seconds = atof(optarg); break;
             case 'k': keep_cache = true; break;
             case 'd': dump_minutes = atof(optarg); break;
             default:
@@ -654,6 +657,11 @@ int main(int argc, char **argv) {
     printf("ffaudio %s soak: %zu audio + %zu other files, %.2f h, seed %llu, %s, CSV %s\n", au_get_version(), audio.n,
            junk.n, hours, (unsigned long long)base_seed, scale > 0 ? "disk driver (fast)" : "real device", csv_path);
 
+    if (max_buffer_seconds > 0) {
+        const AuNetworkConfig net = { .max_buffer_seconds = max_buffer_seconds };
+        au_set_network(&net);
+        printf("network read-ahead: %.1f s\n", max_buffer_seconds);
+    }
     if (web_percent > 0) {
         if (!ts_start(&server, "")) { fprintf(stderr, "could not start the HTTP server\n"); return 1; }
         printf("HTTP server on port %d serves %d%% of the picks\n", server.port, web_percent);
