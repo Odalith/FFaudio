@@ -41,7 +41,10 @@
 #include "once.h"
 
 
-#define CONTROL_TICK_MS 5
+// The control thread sleeps until a message or a mixer event wakes it, or for this long: while tracks are loaded
+// (prepare-next, "now playing", buffering progress), and when idle (device changes)
+#define CONTROL_PLAYING_MS 50
+#define CONTROL_IDLE_MS 500
 #define DEFAULT_PREPARE_NEXT_SECONDS 10.0
 
 static AudioPlayer *audio_player = NULL;
@@ -70,8 +73,8 @@ static void msg_post(AudioPlayer *ap, Msg *m) {
     if (ap->msg_tail) ap->msg_tail->next = m;
     else ap->msg_head = m;
     ap->msg_tail = m;
-    SDL_CondSignal(ap->msg_cond);
     SDL_UnlockMutex(ap->msg_mutex);
+    SDL_SemPost(ap->wake_sem);
 }
 
 static bool on_control_thread(const AudioPlayer *ap) {
@@ -269,13 +272,32 @@ static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
     (void)ap;
 }
 
+// Ended tracks are stopped here and freed once their worker has returned (MSG_TRACK_EXITED wakes the loop): the control
+// thread never waits for a worker
 static void destroy_ended_tracks(AudioPlayer *ap) {
     for (int i = ap->n_tracks - 1; i >= 0; i--) {
         TrackState *t = ap->tracks[i];
-        if (t->ended && t->role == ROLE_NONE) {
-            registry_remove(ap, t);
-            track_destroy(t);
+        if (!t->ended || t->role != ROLE_NONE) continue;
+        if (ap->n_dying == ap->cap_dying) {
+            const int cap = ap->cap_dying ? ap->cap_dying * 2 : 8;
+            TrackState **arr = av_realloc_array(ap->dying, cap, sizeof(TrackState *));
+            if (!arr) { // out of memory: wait for this one now
+                registry_remove(ap, t);
+                track_destroy(t);
+                continue;
+            }
+            ap->dying = arr;
+            ap->cap_dying = cap;
         }
+        registry_remove(ap, t);
+        track_stop(t);
+        ap->dying[ap->n_dying++] = t;
+    }
+    for (int i = ap->n_dying - 1; i >= 0; i--) {
+        TrackState *t = ap->dying[i];
+        if (!track_stopped(t)) continue;
+        track_destroy(t); // its worker has returned: no wait
+        ap->dying[i] = ap->dying[--ap->n_dying];
     }
 }
 
@@ -939,6 +961,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case MSG_TRACK_FAILED:
         case MSG_TRACK_DEMUX_EOF:
         case MSG_TRACK_SEEKED:     handle_track_msg(ap, msg); break;
+        case MSG_TRACK_EXITED:     break; // reaped at the end of this loop iteration
     }
     return true;
 }
@@ -953,8 +976,13 @@ static void shutdown_tracks(AudioPlayer *ap) {
     unlock_mixer(ap);
     output_close(ap);
     for (int i = 0; i < ap->n_tracks; i++)
+        track_stop(ap->tracks[i]);
+    for (int i = 0; i < ap->n_tracks; i++)
         track_destroy(ap->tracks[i]);
     ap->n_tracks = 0;
+    for (int i = 0; i < ap->n_dying; i++)
+        track_destroy(ap->dying[i]);
+    ap->n_dying = 0;
 }
 
 static int control_thread(void *arg) {
@@ -962,9 +990,8 @@ static int control_thread(void *arg) {
     Msg *shutdown_msg = NULL;
 
     while (!shutdown_msg) {
+        SDL_SemWaitTimeout(ap->wake_sem, ap->n_tracks || ap->n_dying ? CONTROL_PLAYING_MS : CONTROL_IDLE_MS);
         SDL_LockMutex(ap->msg_mutex);
-        if (!ap->msg_head)
-            SDL_CondWaitTimeout(ap->msg_cond, ap->msg_mutex, CONTROL_TICK_MS);
         Msg *list = ap->msg_head;
         ap->msg_head = ap->msg_tail = NULL;
         SDL_UnlockMutex(ap->msg_mutex);
@@ -1056,12 +1083,12 @@ int au_initialize(const InitializeConfig* config) {
     apply_crossfade_config(ap, &no_fades); // no device yet: lock_mixer() does nothing
 
     ap->msg_mutex = SDL_CreateMutex();
-    ap->msg_cond = SDL_CreateCond();
+    ap->wake_sem = SDL_CreateSemaphore(0);
     ap->format_mutex = SDL_CreateMutex();
     ap->format_cond = SDL_CreateCond();
     ap->status_mutex = SDL_CreateMutex();
     ap->ring_pool_mutex = SDL_CreateMutex();
-    if (!ap->msg_mutex || !ap->msg_cond || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
+    if (!ap->msg_mutex || !ap->wake_sem || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
         !ap->ring_pool_mutex)
         goto fail_sync;
     publish_idle_status(ap);
@@ -1123,7 +1150,7 @@ int au_initialize(const InitializeConfig* config) {
 
 fail_sync:
     SDL_DestroyMutex(ap->msg_mutex);
-    SDL_DestroyCond(ap->msg_cond);
+    SDL_DestroySemaphore(ap->wake_sem);
     SDL_DestroyMutex(ap->format_mutex);
     SDL_DestroyCond(ap->format_cond);
     SDL_DestroyMutex(ap->status_mutex);
@@ -1167,6 +1194,7 @@ void au_shutdown(void) {
         rest = n;
     }
     av_free(ap->tracks);
+    av_free(ap->dying);
     av_free(ap->audio_device_name);
     av_free(ap->device_in_use);
     free_device_list(ap->known_devices, ap->n_known_devices);
@@ -1174,7 +1202,7 @@ void au_shutdown(void) {
     av_free(ap->downmix_filters);
     av_channel_layout_uninit(&ap->audio_target.ch_layout);
     SDL_DestroyMutex(ap->msg_mutex);
-    SDL_DestroyCond(ap->msg_cond);
+    SDL_DestroySemaphore(ap->wake_sem);
     SDL_DestroyMutex(ap->format_mutex);
     SDL_DestroyCond(ap->format_cond);
     SDL_DestroyMutex(ap->status_mutex);

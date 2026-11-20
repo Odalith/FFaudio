@@ -92,6 +92,7 @@ static void push_event(Mixer *m, const MixerEventType type, TrackState *t, const
     e->type = type;
     e->track = t;
     e->position = position;
+    m->wake_control = true;
 }
 
 //+-----------------------------------------------------+
@@ -531,6 +532,12 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
         memset(stream + (size_t)done * frame_bytes, m->format == AUDIO_U8 ? 0x80 : 0, (size_t)(len - done * frame_bytes));
 
     publish_status(ap, advancing && !m->frozen, total);
+    // Events are rare (a few per track): only then is the control thread woken, with a semaphore post that never
+    // blocks; otherwise it comes by itself every CONTROL_PLAYING_MS
+    if (m->wake_control) {
+        m->wake_control = false;
+        SDL_SemPost(ap->wake_sem);
+    }
 }
 
 //+-----------------------------------------------------+

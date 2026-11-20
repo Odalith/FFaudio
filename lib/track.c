@@ -327,6 +327,22 @@ static void free_stream_meta(StreamMeta *m) {
     }
 }
 
+void track_stop(TrackState *t) {
+    if (!t || !t->worker_tid) return;
+    SDL_AtomicSet(&t->abort_request, 1);
+    packet_queue_abort(&t->audio_queue);
+    if (t->ring_mutex && t->ring_cond) wake_producer(t);
+    if (t->wait_mutex && t->continue_read_thread) wake_read_thread(t);
+    // A decoder waiting for an output device (ensure_convert_graph) sees the abort now instead of after 100 ms
+    SDL_LockMutex(t->ap->format_mutex);
+    SDL_CondBroadcast(t->ap->format_cond);
+    SDL_UnlockMutex(t->ap->format_mutex);
+}
+
+bool track_stopped(TrackState *t) {
+    return !t->worker_tid || SDL_AtomicGet(&t->worker_exited);
+}
+
 void track_destroy(TrackState *t) {
     if (!t) return;
 
@@ -911,6 +927,10 @@ end:
         t->audio_st = NULL;
     }
     if (t->ic) avformat_close_input(&t->ic);
+    // Last: from here on the control thread may join this thread without waiting, and free the track
+    const int32_t handle = t->handle;
+    SDL_AtomicSet(&t->worker_exited, 1);
+    ff_post_track_msg(MSG_TRACK_EXITED, handle, 0);
     return 0;
 }
 

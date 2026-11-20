@@ -200,6 +200,7 @@ typedef struct TrackState {
     SDL_cond *continue_read_thread;     // wakes whoever reads (worker or reader): seeks and aborts
     SDL_mutex *wait_mutex;
     int32_t read_errors;                // worker: read errors in a row (local files)
+    SDL_atomic_t worker_exited;         // 1 = the worker has returned (joining it does not wait)
 
     // ---- seek requests (control thread -> read thread), guarded by seek_mutex ----
     SDL_mutex *seek_mutex;              // also guards filtergraph_str, filter_cmds and end_pos_us
@@ -351,6 +352,7 @@ typedef struct Mixer {
     MixerEvent events[MIXER_EVENT_CAPACITY];
     int32_t n_events;
     bool events_overflowed;
+    bool wake_control;              // an event was pushed this period: wake the control thread
 
     uint32_t dither_state;
 } Mixer;
@@ -385,6 +387,7 @@ typedef enum MsgType {
     MSG_TRACK_FAILED,
     MSG_TRACK_DEMUX_EOF,
     MSG_TRACK_SEEKED,
+    MSG_TRACK_EXITED,       // the worker has ended: the track can be reaped
 } MsgType;
 
 typedef struct Msg {
@@ -463,7 +466,7 @@ typedef struct AudioPlayer {
     SDL_threadID control_thread_id;
     SDL_atomic_t shutting_down;
     SDL_mutex *msg_mutex;
-    SDL_cond *msg_cond;
+    SDL_sem *wake_sem;                  // posted for every message and by the mixer when it raises an event
     Msg *msg_head;
     Msg *msg_tail;
     SDL_atomic_t handle_count;
@@ -471,6 +474,9 @@ typedef struct AudioPlayer {
     TrackState **tracks;                // every live track, control thread only
     int32_t n_tracks;
     int32_t cap_tracks;
+    TrackState **dying;                 // ended tracks whose worker is stopping, control thread only
+    int32_t n_dying;
+    int32_t cap_dying;
 
     // ---- output device (control thread writes, others read under format_mutex) ----
     SDL_mutex *format_mutex;

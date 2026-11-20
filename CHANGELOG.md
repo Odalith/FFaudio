@@ -32,8 +32,11 @@
   track no longer leaves it to start with a gap.
 - One thread per local track instead of two (network streams keep their reader thread): it reads, decodes and
   filters, waits for events instead of polling every 10 ms, and stops at the end of a file instead of reading it again
-  100 times a second until the track is removed. Playing one track: 4 threads instead of 5, about a third fewer
-  context switches.
+  100 times a second until the track is removed.
+- The control thread sleeps until a command or a mixer event needs it (or 50 ms while tracks are loaded, 500 ms when
+  idle) instead of waking every 5 ms, and never waits for a track's thread to end: one stuck in a DNS lookup used to
+  hold up every command and callback. With the change above, a player playing one track wakes about 47 times a
+  second instead of 341 (24 instead of 223 when idle), with 4 threads instead of 5.
 - Custom fade curves (`AuFade.custom`) are sampled at 257 points when the fade is set up (`au_set_crossfade()`, or
   queueing a track with `PlayAudioConfig.fade_in`), on ffaudio's control thread, instead of being called on the
   audio thread throughout the fade; `custom_user` only has to live until that call has been processed.
