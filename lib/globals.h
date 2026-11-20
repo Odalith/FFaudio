@@ -92,20 +92,12 @@ typedef struct AudioParams {
     int32_t freq;
     AVChannelLayout ch_layout;
     enum AVSampleFormat fmt;
-    int32_t frame_size;
-    int32_t bytes_per_sec;
 } AudioParams;
-
-typedef struct FrameData {
-    int64_t pkt_pos;
-} FrameData;
 
 typedef struct Frame {
     AVFrame *frame;
     int32_t serial;
     double pts;           /* presentation timestamp of the first sample, seconds; NAN if unknown */
-    double duration;      /* duration of the frame, seconds */
-    int64_t pos;          /* byte position of the frame in the input file */
     double speed;         /* playback speed it was made with: file seconds per output second */
 } Frame;
 
@@ -210,7 +202,7 @@ typedef struct TrackState {
     SDL_mutex *wait_mutex;
 
     // ---- seek requests (control thread -> read thread), guarded by seek_mutex ----
-    SDL_mutex *seek_mutex;              // also guards filtergraph_str, filter_cmds, duration_us and end_pos_us
+    SDL_mutex *seek_mutex;              // also guards filtergraph_str, filter_cmds and end_pos_us
     FilterCmd *filter_cmds;             // pending avfilter_graph_send_command() calls
     bool seek_req;
     int64_t seek_pos;                   // AV_TIME_BASE units
@@ -260,21 +252,16 @@ typedef struct TrackState {
     double play_clock;                  // SDL callback: file time played
     int clock_serial;                   // SDL callback: the serial play_clock counts for
     bool icy;                           // read thread: the server sends ICY metadata (icy-metaint)
-    int32_t realtime;
-    int32_t seek_by_bytes;
-    bool infinite_buffer;
     bool demux_eof;                     // read thread only
 
     // ---- status published by the worker threads ----
-    SDL_atomic_t opened;                // 1 once the stream is open and duration_us is valid
-    SDL_atomic_t failed;                // 1 when the track can not produce (more) audio because of an error
+    SDL_atomic_t opened;                // 1 once the stream is open and end_pos_us is valid
     SDL_atomic_t eos_serial;            // queue serial whose last frame has been pushed into sampq, -1 = none
     SDL_atomic_t loops_remaining;       // -1 infinite, 0 none
     SDL_atomic_t loops_started;         // read thread: loops it has seeked back for (the mixer reports each once)
     SDL_atomic_t filter_reconfigure;    // 1 = rebuild the convert graph before the next frame (device changed)
     SDL_atomic_t user_filters_changed;  // 1 = rebuild the user graph before the next frame
     SDL_atomic_t had_error;             // 1 = the track ends as an error, even if some audio played
-    int64_t duration_us;                // written before `opened` is set, AV_NOPTS_VALUE = unknown
     int64_t end_pos_us;                 // file position where playback ends, written before `opened` is set
 
     // ---- playback cursor, SDL callback only ----
@@ -293,9 +280,7 @@ typedef struct TrackState {
     TrackEndReason fade_reason;         // why it is fading out (ROLE_OUTGOING)
 
     // ---- control thread only ----
-    TrackEndReason end_reason;
-    bool ended;                         // removed from the mixer, waiting for destruction
-    bool reported;                      // on_eof has been called
+    bool ended;                         // removed from the mixer and reported, waiting for destruction
     bool prepare_next_sent;
     bool duration_reported;
     double reported_duration;
@@ -339,7 +324,6 @@ typedef struct Mixer {
     int32_t channels;
     SDL_AudioFormat format;
     int32_t bytes_per_sample;
-    int32_t period_frames;          // SDL buffer size in frames
 
     // Gains. vol_gain follows volume * !muted with a short ramp, pause_gain follows the pause fade.
     float vol_gain;
@@ -497,7 +481,6 @@ typedef struct AudioPlayer {
     SDL_AudioDeviceID device_id;
     SDL_AudioSpec obtained_spec;
     bool device_running;
-    bool is_audio_device_initialized;
     bool use_default_device;
     int32_t audio_device_index;
     char *audio_device_name;

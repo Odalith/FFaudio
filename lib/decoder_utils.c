@@ -47,18 +47,16 @@ int decoder_decode_frame(Decoder *d, AVFrame *frame) {
                 if (packet_queue_aborted(d->queue))
                     return -1;
 
-                if (d->avctx->codec_type == AVMEDIA_TYPE_AUDIO) {
-                    ret = avcodec_receive_frame(d->avctx, frame);
-                    if (ret >= 0) {
-                        AVRational tb = (AVRational){1, frame->sample_rate};
-                        if (frame->pts != AV_NOPTS_VALUE)
-                            frame->pts = av_rescale_q(frame->pts, d->avctx->pkt_timebase, tb);
-                        else if (d->next_pts != AV_NOPTS_VALUE)
-                            frame->pts = av_rescale_q(d->next_pts, d->next_pts_tb, tb);
-                        if (frame->pts != AV_NOPTS_VALUE) {
-                            d->next_pts = frame->pts + frame->nb_samples;
-                            d->next_pts_tb = tb;
-                        }
+                ret = avcodec_receive_frame(d->avctx, frame);
+                if (ret >= 0) {
+                    AVRational tb = (AVRational){1, frame->sample_rate};
+                    if (frame->pts != AV_NOPTS_VALUE)
+                        frame->pts = av_rescale_q(frame->pts, d->avctx->pkt_timebase, tb);
+                    else if (d->next_pts != AV_NOPTS_VALUE)
+                        frame->pts = av_rescale_q(d->next_pts, d->next_pts_tb, tb);
+                    if (frame->pts != AV_NOPTS_VALUE) {
+                        d->next_pts = frame->pts + frame->nb_samples;
+                        d->next_pts_tb = tb;
                     }
                 }
 
@@ -93,23 +91,11 @@ int decoder_decode_frame(Decoder *d, AVFrame *frame) {
             av_packet_unref(d->pkt);
         } while (1);
 
-        if (d->avctx->codec_type != AVMEDIA_TYPE_SUBTITLE) {
-            if (d->pkt->buf && !d->pkt->opaque_ref) {
-                FrameData *fd;
-
-                d->pkt->opaque_ref = av_buffer_allocz(sizeof(*fd));
-                if (!d->pkt->opaque_ref)
-                    return AVERROR(ENOMEM);
-                fd = (FrameData*)d->pkt->opaque_ref->data;
-                fd->pkt_pos = d->pkt->pos;
-            }
-
-            if (avcodec_send_packet(d->avctx, d->pkt) == AVERROR(EAGAIN)) {
-                av_log(d->avctx, AV_LOG_ERROR, "Receive_frame and send_packet both returned EAGAIN, which is an API violation.\n");
-                d->packet_pending = 1;
-            } else {
-                av_packet_unref(d->pkt);
-            }
+        if (avcodec_send_packet(d->avctx, d->pkt) == AVERROR(EAGAIN)) {
+            av_log(d->avctx, AV_LOG_ERROR, "Receive_frame and send_packet both returned EAGAIN, which is an API violation.\n");
+            d->packet_pending = 1; // sent again on the next call instead of being lost
+        } else {
+            av_packet_unref(d->pkt);
         }
     }
 }

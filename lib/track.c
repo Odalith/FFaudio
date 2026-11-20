@@ -215,14 +215,6 @@ static int queue_byte_size(PacketQueue *q) {
     return size;
 }
 
-static int is_realtime(const AVFormatContext *s) {
-    if (!strcmp(s->iformat->name, "rtp") || !strcmp(s->iformat->name, "rtsp") || !strcmp(s->iformat->name, "sdp"))
-        return 1;
-    if (s->pb && (!strncmp(s->url, "rtp:", 4) || !strncmp(s->url, "udp:", 4)))
-        return 1;
-    return 0;
-}
-
 static void wait_ms(TrackState *t, int ms) {
     SDL_LockMutex(t->wait_mutex);
     if (!SDL_AtomicGet(&t->abort_request))
@@ -267,9 +259,7 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     t->start_time = AV_NOPTS_VALUE;
     t->play_duration = AV_NOPTS_VALUE;
     t->end_pos_us = AV_NOPTS_VALUE;
-    t->duration_us = AV_NOPTS_VALUE;
     t->pending_seek_percent = -1;
-    t->seek_by_bytes = -1;
     t->last_frame_pts = NAN;
     t->play_speed = 1.0;
     SDL_AtomicSet(&t->eos_serial, -1);
@@ -527,7 +517,6 @@ static int stream_component_open(TrackState *t, const int stream_index) {
     // One thread: audio decodes hundreds of times faster than real time, and "auto" gave e.g. the FLAC decoder a
     // frame thread per core (13 threads per track on 12 cores) for nothing
     av_dict_set(&opts, "threads", "1", 0);
-    av_dict_set(&opts, "flags", "+copy_opaque", AV_DICT_MULTIKEY);
 
     if ((ret = avcodec_open2(avctx, codec, &opts)) < 0)
         goto fail;
@@ -608,7 +597,6 @@ static bool handle_demux_end(TrackState *t, AVPacket *pkt) {
 
 static void read_thread_fail(TrackState *t) {
     SDL_AtomicSet(&t->had_error, 1);
-    SDL_AtomicSet(&t->failed, 1);
     // Nothing more will ever come out of this track
     SDL_AtomicSet(&t->eos_serial, packet_queue_serial(&t->audio_queue));
     ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
@@ -620,7 +608,6 @@ static int read_thread(void *arg) {
     AVFormatContext *ic = NULL;
     AVPacket *pkt = NULL;
     int ret;
-    bool last_paused = false;
 
     if (!(pkt = av_packet_alloc())) {
         ff_log(AU_LOG_FATAL, "Could not allocate packet.");
@@ -665,10 +652,6 @@ static int read_thread(void *arg) {
     if (ic->pb)
         ic->pb->eof_reached = 0; // FIXME hack, ffplay maybe should not use avio_feof() to test for the end
 
-    t->seek_by_bytes = !(ic->iformat->flags & AVFMT_NO_BYTE_SEEK) && !!(ic->iformat->flags & AVFMT_TS_DISCONT) &&
-                       strcmp("ogg", ic->iformat->name) != 0;
-    t->realtime = is_realtime(ic);
-    t->infinite_buffer = t->realtime;
     t->live = t->network && (ic->duration == AV_NOPTS_VALUE || ic->duration <= 0);
     // Positions count from the start of the file, like seeks and the duration: MPEG-TS (and so HLS) and some other
     // containers start their timestamps later. Set before the decoder thread starts, which reads it.
@@ -709,7 +692,6 @@ static int read_thread(void *arg) {
         end_pos = end_pos == AV_NOPTS_VALUE ? end : FFMIN(end_pos, end);
     }
     SDL_LockMutex(t->seek_mutex);
-    t->duration_us = ic->duration;
     t->end_pos_us = end_pos;
     SDL_UnlockMutex(t->seek_mutex);
     SDL_AtomicSet(&t->opened, 1);
@@ -718,13 +700,6 @@ static int read_thread(void *arg) {
     for (;;) {
         if (SDL_AtomicGet(&t->abort_request))
             break;
-
-        const bool paused = SDL_AtomicGet(&ap->paused) != 0;
-        if (paused != last_paused) {
-            last_paused = paused;
-            if (paused) av_read_pause(ic);
-            else av_read_play(ic);
-        }
 
         // Seek requests from the control thread
         SDL_LockMutex(t->seek_mutex);
@@ -770,7 +745,7 @@ static int read_thread(void *arg) {
                queued_seconds(t) >= t->max_buffer_s)
             : (queue_byte_size(&t->audio_queue) > MAX_QUEUE_SIZE ||
                stream_has_enough_packets(t->audio_st, t->audio_stream, &t->audio_queue));
-        if (!t->infinite_buffer && full) {
+        if (full) {
             wait_ms(t, 10);
             continue;
         }
@@ -858,10 +833,8 @@ static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const
         return AVERROR_EXIT;
     }
     af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb) - t->pts_offset;
-    af->pos = -1;
     af->serial = serial;
     af->speed = t->speed_chain.graph ? t->speed_cur : 1.0;
-    af->duration = av_q2d((AVRational){frame->nb_samples, frame->sample_rate});
     av_frame_move_ref(af->frame, frame);
     frame_queue_push(&t->sampq);
     return 0;
@@ -1084,7 +1057,6 @@ static void run_filter_commands(TrackState *t) {
 
 static void fail_track(TrackState *t) {
     SDL_AtomicSet(&t->had_error, 1);
-    SDL_AtomicSet(&t->failed, 1);
     SDL_AtomicSet(&t->eos_serial, packet_queue_serial(&t->audio_queue));
     ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
 }

@@ -492,7 +492,6 @@ void output_close(AudioPlayer *ap) {
         ap->device_id = 0;
     }
     ap->device_running = false;
-    ap->is_audio_device_initialized = false;
 
     SDL_LockMutex(ap->format_mutex);
     ap->output_ready = false;
@@ -574,7 +573,6 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
     m->channels = obtained.channels;
     m->format = obtained.format;
     m->bytes_per_sample = SDL_AUDIO_BITSIZE(obtained.format) / 8;
-    m->period_frames = obtained.samples;
     m->vol_ramp_frames = FFMAX(1, (int)(VOLUME_RAMP_SECONDS * obtained.freq));
     m->buf_frames = FFMAX(1024, obtained.samples);
     m->mix_buf = av_malloc_array((size_t)m->buf_frames * m->channels, sizeof(float));
@@ -592,15 +590,12 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
     SDL_AtomicSet(&ap->open_device, (int)id);
     ap->obtained_spec = obtained;
     ap->device_running = false;
-    ap->is_audio_device_initialized = true;
 
     SDL_LockMutex(ap->format_mutex);
     ap->audio_target.freq = obtained.freq;
     av_channel_layout_uninit(&ap->audio_target.ch_layout);
     ap->audio_target.ch_layout = sdl_channel_layout(obtained.channels);
     ap->audio_target.fmt = AV_SAMPLE_FMT_FLT;
-    ap->audio_target.frame_size = (int32_t)(obtained.channels * sizeof(float));
-    ap->audio_target.bytes_per_sec = ap->audio_target.frame_size * obtained.freq;
     ap->output_ready = true;
     av_free(ap->device_in_use);
     ap->device_in_use = in_use;

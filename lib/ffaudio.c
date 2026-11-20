@@ -265,12 +265,7 @@ static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
     if (reason == END_NATURAL && SDL_AtomicGet(&t->had_error))
         reason = END_ERROR;
     t->ended = true;
-    t->end_reason = reason;
-    if (!t->reported) {
-        t->reported = true;
-        note_add((Note){ .type = NOTE_EOF, .handle = t->handle,
-                         .b1 = reason == END_SKIPPED, .b2 = reason == END_ERROR });
-    }
+    note_add((Note){ .type = NOTE_EOF, .handle = t->handle, .b1 = reason == END_SKIPPED, .b2 = reason == END_ERROR });
     (void)ap;
 }
 
@@ -612,7 +607,7 @@ static int cmd_configure_device(AudioPlayer *ap, const Msg *msg) {
     if (!use_default && (!msg->device.audio_device || msg->device.audio_device_index < 0))
         return AU_ERR_INVALID_ARGUMENT;
 
-    if (ap->is_audio_device_initialized) {
+    if (ap->device_id) {
         if (use_default && ap->use_default_device)
             return AU_ERR_NOTHING_TO_DO;
         if (!use_default && !ap->use_default_device && ap->audio_device_name &&
