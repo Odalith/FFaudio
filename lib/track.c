@@ -85,6 +85,15 @@ static void free_stream_meta(StreamMeta *m);
 
 // Queue "now playing" information to be reported when playback reaches `position` (read thread)
 static void push_stream_meta(TrackState *t, const double position, const char *title, const char *artist) {
+    // The same title again (e.g. the stream's tags re-sent) is no change
+    char *key = av_asprintf("%s\n%s", title ? title : "", artist ? artist : "");
+    if (!key) return;
+    if (t->last_meta && !strcmp(key, t->last_meta)) {
+        av_free(key);
+        return;
+    }
+    av_free(t->last_meta);
+    t->last_meta = key;
     StreamMeta *m = av_mallocz(sizeof(StreamMeta));
     if (!m) return;
     m->position = position;
@@ -95,7 +104,7 @@ static void push_stream_meta(TrackState *t, const double position, const char *t
     StreamMeta **tail = &t->stream_meta;
     while (*tail) { tail = &(*tail)->next; n++; }
     *tail = m;
-    if (n >= 32) { // something is not being played: keep the newest
+    if (n >= 512) { // far more than 30 s of read-ahead can hold: this track is not being played
         StreamMeta *old = t->stream_meta;
         t->stream_meta = old->next;
         old->next = NULL;
@@ -143,6 +152,8 @@ static void check_stream_metadata(TrackState *t, AVFormatContext *ic, const AVPa
     if ((st->event_flags & AVSTREAM_EVENT_FLAG_METADATA_UPDATED) || (ic->event_flags & AVFMT_EVENT_FLAG_METADATA_UPDATED)) {
         st->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
         ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
+        // FFmpeg also flags ICY changes; their titles come from above, the tags here are the file's own (ID3)
+        if (t->icy) return;
         const AVDictionaryEntry *title = av_dict_get(st->metadata, "title", NULL, 0);
         if (!title) title = av_dict_get(ic->metadata, "title", NULL, 0);
         const AVDictionaryEntry *artist = av_dict_get(st->metadata, "artist", NULL, 0);
@@ -334,6 +345,7 @@ void track_destroy(TrackState *t) {
     av_dict_free(&t->format_opts_n);
     free_stream_meta(t->stream_meta);
     av_free(t->last_icy);
+    av_free(t->last_meta);
     SDL_DestroyCond(t->continue_read_thread);
     SDL_DestroyMutex(t->wait_mutex);
     SDL_DestroyMutex(t->seek_mutex);

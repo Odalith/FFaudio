@@ -328,6 +328,35 @@ static void test_icy_now_playing(void) {
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
 }
 
+static void test_icy_with_file_tags(void) {
+    // An MP3 with its own ID3 title (looped by the server, so the tag also turns up mid-stream): only the ICY
+    // titles count, each once, in order
+    au_play_audio(url("/live/live_id3.mp3?metaint=8000"), NULL);
+    tc_sleep_ms(5500);
+    const TcEvents e = tc_snapshot();
+    for (int i = 0; i < e.meta_count && i < 8; i++)
+        printf("   now playing at %.2f s: \"%s\" by \"%s\"\n", e.meta_pos[i], e.meta_title[i], e.meta_artist[i]);
+    CHECK(e.meta_count >= 2);
+    for (int i = 0; i < e.meta_count && i < 8; i++) CHECK(strcmp(e.meta_title[i], "File Title") != 0);
+    CHECK(!strcmp(e.meta_title[0], "Song 1"));
+    CHECK(e.meta_count < 2 || !strcmp(e.meta_title[1], "Song 2"));
+    au_stop_audio();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+}
+
+static void test_no_analysis_of_live_streams(void) {
+    // It would wait forever for the end; it must give up right after probing
+    const uint32_t t0 = SDL_GetTicks();
+    AuLoudness l;
+    CHECK(au_loudness_analyze(url("/live/live.mp3"), NULL, &l) == AU_ERR_UNSUPPORTED);
+    printf("   refused after %u ms\n", SDL_GetTicks() - t0);
+    CHECK(SDL_GetTicks() - t0 < 5000);
+    int err = 0;
+    AuMediaInfo *info = au_probe(url("/live/live.mp3"), &err);   // probing is fine
+    CHECK(info && au_media_is_live(info));
+    au_media_info_free(info);
+}
+
 static void test_ogg_now_playing(void) {
     // A chained Ogg stream changes its tags when the next part starts (2 s in)
     au_play_audio(url("/files/chained.ogg"), NULL);
@@ -360,6 +389,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_reconnect);
     RUN_TEST(test_icy_now_playing);
     RUN_TEST(test_ogg_now_playing);
+    RUN_TEST(test_icy_with_file_tags);
+    RUN_TEST(test_no_analysis_of_live_streams);
 
     au_shutdown();
     ts_stop(&srv);

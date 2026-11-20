@@ -78,6 +78,9 @@ for i in $(seq -w 1 24); do ln -f ld_m23_48k.flac "scan_$i.flac"; done
 sine hls_seg.aac       440 2 44100 2 -c:a aac -f adts
 # A constant 128 kbit/s (16000 bytes/s) MP3 without ID3/Xing headers: looped, it is a seamless live stream
 sine live.mp3          440 5 44100 2 -c:a libmp3lame -b:a 128k -write_xing 0 -id3v2_version 0
+# The same live stream with an ID3 title of its own, like most real MP3 files: ICY titles must win
+sine live_id3.mp3      440 5 44100 2 -c:a libmp3lame -b:a 128k -write_xing 0 -metadata title="File Title"
+
 # A chained Ogg stream (how Ogg/Opus radio changes songs): two Vorbis parts with their own titles
 sine chain_a.ogg       440 2 44100 2 -c:a libvorbis -metadata title="First Part" -metadata artist="Ogg Artist"
 sine chain_b.ogg       660 2 44100 2 -c:a libvorbis -metadata title="Second Part" -metadata artist="Ogg Artist"

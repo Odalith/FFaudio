@@ -246,6 +246,7 @@ typedef struct TrackState {
     uint32_t buffering_note_ticks;      // control thread: when it was last sent
     StreamMeta *stream_meta;            // guarded by seek_mutex: read thread appends, control thread reports
     char *last_icy;                     // read thread: the last ICY packet seen
+    char *last_meta;                    // read thread: "title\nartist" last queued, to skip repeats
     bool icy;                           // read thread: the server sends ICY metadata (icy-metaint)
     int32_t realtime;
     int32_t seek_by_bytes;

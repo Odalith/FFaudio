@@ -19,6 +19,9 @@
  *     -d minutes   write malloc_info() (glibc: every arena's free blocks by size) to malloc-<seconds>.xml this often
  *     -m           call malloc_trim(0) after every sample (glibc), to see how much of the growth is memory that
  *                  malloc has freed but kept
+ *     -w percent   play this share of picks over HTTP from a local server (tests/http_server.h): files with range
+ *                  requests, and MP3s also as endless live streams with "now playing" titles, sometimes throttled
+ *                  below real time (stalls) or with dropped connections (reconnects). Default 0
  *     -v           print every ffaudio log message
  *
  * Ctrl-C stops it cleanly (a second Ctrl-C aborts), so sanitizer builds still print their leak report.
@@ -27,6 +30,7 @@
 
 #define _GNU_SOURCE
 
+#include <ctype.h>
 #include <dirent.h>
 #include <ftw.h>
 #include <malloc.h>
@@ -42,6 +46,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "http_server.h"
 #include "../lib/ffaudio.h"
 #include "../lib/ffaudio_filters.h"
 #include "../lib/ffaudio_loudness.h"
@@ -103,9 +108,42 @@ static bool chance(const double p) { return rnd_real(0, 1) < p; }
 
 static int junk_percent = 3;
 
+static int web_percent;
+static TsServer server;
+
+// http://127.0.0.1:<port>/<kind>/<absolute path, percent-encoded><query>, from a per-thread ring of buffers
+static const char *web_url(const char *kind, const char *path, const char *query) {
+    static __thread char bufs[8][4096];
+    static __thread int next;
+    char *b = bufs[next++ % 8];
+    int n = snprintf(b, sizeof(bufs[0]), "http://127.0.0.1:%d/%s/", server.port, kind);
+    for (const unsigned char *p = (const unsigned char *)path; *p && n < (int)sizeof(bufs[0]) - 8; p++) {
+        if (isalnum(*p) || strchr("-._~/", *p)) b[n++] = (char)*p;
+        else n += snprintf(b + n, 4, "%%%02X", *p);
+    }
+    snprintf(b + n, sizeof(bufs[0]) - (size_t)n, "%s", query ? query : "");
+    return b;
+}
+
+static bool is_mp3(const char *path) {
+    const char *dot = strrchr(path, '.');
+    return dot && !strcasecmp(dot, ".mp3");
+}
+
 static const char *pick_file(void) {
-    if (junk.n && rnd_int(100) < junk_percent) return junk.items[rnd_int((int)junk.n)];
-    return audio.items[rnd_int((int)audio.n)];
+    const char *f = (junk.n && rnd_int(100) < junk_percent) ? junk.items[rnd_int((int)junk.n)]
+                                                            : audio.items[rnd_int((int)audio.n)];
+    if (web_percent <= 0 || rnd_int(100) >= web_percent) return f;
+    char query[96] = "";
+    if (is_mp3(f) && chance(0.4)) {   // an endless live stream, like a radio station
+        snprintf(query, sizeof(query), "?metaint=8000%s%s", chance(0.3) ? "&bps=12000" : "",
+                 chance(0.2) ? "&drop=300000" : "");
+        // a unique query, so a drop happens again for the same file
+        snprintf(query + strlen(query), sizeof(query) - strlen(query), "&n=%d", rnd_int(1000000));
+        return web_url("live", f, query);
+    }
+    if (chance(0.15)) snprintf(query, sizeof(query), "?drop=%d&n=%d", 200000 + rnd_int(2000000), rnd_int(1000000));
+    return web_url("files", f, query);
 }
 
 static const char *pick_audio(void) { return audio.items[rnd_int((int)audio.n)]; }
@@ -115,7 +153,7 @@ static const char *pick_audio(void) { return audio.items[rnd_int((int)audio.n)];
 //+-----------------------------------------------------+
 
 static atomic_long n_started, n_ended, n_ended_error, n_restarts, n_logs_error, n_logs_warning, n_actions,
-    n_analyses, n_analysis_failed, n_probes, n_reinits, n_prepare_next, n_cached;
+    n_analyses, n_analysis_failed, n_probes, n_reinits, n_prepare_next, n_cached, n_buffering, n_titles;
 static atomic_int stop_requested;
 static atomic_long heartbeat;          // seconds since start, written by the main loop
 static atomic_long last_started_at;    // when a track last started
@@ -169,6 +207,18 @@ static void on_prepare_next(int32_t current, void *ud) {
     (void)current; (void)ud;
     atomic_fetch_add(&n_prepare_next, 1);
     if (chance(0.9)) au_set_next(pick_file(), NULL);   // sometimes nothing is queued and playback just ends
+}
+
+static void on_buffering(int32_t handle, bool buffering, double seconds, void *ud) {
+    (void)handle; (void)seconds; (void)ud;
+    static __thread bool last;
+    if (buffering && !last) atomic_fetch_add(&n_buffering, 1);
+    last = buffering;
+}
+
+static void on_stream_metadata(int32_t handle, const char *title, const char *artist, void *ud) {
+    (void)handle; (void)title; (void)artist; (void)ud;
+    atomic_fetch_add(&n_titles, 1);
 }
 
 static void on_cached(const char *path, int result, const AuReplayGainInfo *rg, void *user) {
@@ -314,6 +364,8 @@ static void init_player(void) {
         .on_prepare_next = on_prepare_next,
         .on_track_started = on_started,
         .on_audio_devices_changed = on_devices_changed,
+        .on_buffering = on_buffering,
+        .on_stream_metadata = on_stream_metadata,
     };
     if (au_initialize(&config) != AU_OK || au_configure_audio_device(NULL) != AU_OK) {
         fprintf(stderr, "could not start the player\n");
@@ -425,15 +477,16 @@ static void record(void) {
         samples = n;
     }
     samples[n_samples++] = s;
-    fprintf(csv, "%.0f,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%d,%d\n", s.t, s.rss_kb,
+    fprintf(csv, "%.0f,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%d,%d,%ld,%ld\n", s.t, s.rss_kb,
             s.anon_kb, s.heap_kb, s.heap_free_kb, s.heap_total_kb, s.threads, s.fds, atomic_load(&n_started), atomic_load(&n_ended), atomic_load(&n_ended_error),
             atomic_load(&n_actions), atomic_load(&n_analyses), atomic_load(&n_probes), atomic_load(&n_reinits),
-            atomic_load(&n_logs_error), atomic_load(&n_cached), au_gain_cache_count(), au_gain_cache_pending());
+            atomic_load(&n_logs_error), atomic_load(&n_cached), au_gain_cache_count(), au_gain_cache_pending(),
+            atomic_load(&n_buffering), atomic_load(&n_titles));
     fflush(csv);
     printf("[%6.0f s] rss %6ld KB  heap %6ld KB (held %6ld KB)  threads %3ld  fds %3ld  tracks %ld (%ld failed)  actions %ld  "
-           "analyses %ld  probes %ld  restarts %ld\n", s.t, s.rss_kb, s.heap_kb, s.heap_total_kb, s.threads, s.fds,
+           "analyses %ld  probes %ld  restarts %ld  waits %ld  titles %ld\n", s.t, s.rss_kb, s.heap_kb, s.heap_total_kb, s.threads, s.fds,
            atomic_load(&n_started), atomic_load(&n_ended_error), atomic_load(&n_actions), atomic_load(&n_analyses),
-           atomic_load(&n_probes), atomic_load(&n_reinits));
+           atomic_load(&n_probes), atomic_load(&n_reinits), atomic_load(&n_buffering), atomic_load(&n_titles));
     fflush(stdout);
 }
 
@@ -561,7 +614,7 @@ int main(int argc, char **argv) {
     base_seed = (uint64_t)time(NULL);
     int opt;
     double dump_minutes = 0;
-    while ((opt = getopt(argc, argv, "t:x:s:o:i:r:j:c:kd:mv")) != -1) {
+    while ((opt = getopt(argc, argv, "t:x:s:o:i:r:j:c:kd:mw:v")) != -1) {
         switch (opt) {
             case 't': hours = atof(optarg); break;
             case 'x': scale = atof(optarg); break;
@@ -573,6 +626,7 @@ int main(int argc, char **argv) {
             case 'c': cache_file = optarg; break;
             case 'v': verbose = true; break;
             case 'm': trim = true; break;
+            case 'w': web_percent = atoi(optarg); break;
             case 'k': keep_cache = true; break;
             case 'd': dump_minutes = atof(optarg); break;
             default:
@@ -596,10 +650,14 @@ int main(int argc, char **argv) {
     csv = fopen(csv_path, "w");
     if (!csv) { perror(csv_path); return 1; }
     fprintf(csv, "seconds,rss_kb,rss_anon_kb,heap_kb,heap_free_kb,heap_total_kb,threads,fds,tracks_started,tracks_ended,tracks_failed,actions,"
-                 "analyses,probes,reinits,log_errors,gains_cached,gain_cache_entries,pending_scans\n");
+                 "analyses,probes,reinits,log_errors,gains_cached,gain_cache_entries,pending_scans,buffering_waits,stream_titles\n");
     printf("ffaudio %s soak: %zu audio + %zu other files, %.2f h, seed %llu, %s, CSV %s\n", au_get_version(), audio.n,
            junk.n, hours, (unsigned long long)base_seed, scale > 0 ? "disk driver (fast)" : "real device", csv_path);
 
+    if (web_percent > 0) {
+        if (!ts_start(&server, "")) { fprintf(stderr, "could not start the HTTP server\n"); return 1; }
+        printf("HTTP server on port %d serves %d%% of the picks\n", server.port, web_percent);
+    }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     t0 = now_s();
@@ -670,6 +728,8 @@ int main(int argc, char **argv) {
     record();
     pthread_join(watchdog, NULL);
     summary();
+    printf("   network: %ld buffering waits, %ld stream titles\n", atomic_load(&n_buffering), atomic_load(&n_titles));
+    if (web_percent > 0) ts_stop(&server);
     fclose(csv);
     for (size_t i = 0; i < audio.n; i++) free(audio.items[i]);
     for (size_t i = 0; i < junk.n; i++) free(junk.items[i]);

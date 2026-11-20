@@ -20,6 +20,7 @@
 #ifndef FFAUDIO_TEST_HTTP_SERVER_H
 #define FFAUDIO_TEST_HTTP_SERVER_H
 
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -294,6 +295,21 @@ static void ts_serve_live(TsServer *s, const ts_socket sock, const char *name, c
     fclose(f);
 }
 
+// "%20" and friends, in place (file names with spaces and non-ASCII characters)
+static void ts_url_decode(char *s) {
+    char *o = s;
+    for (const char *p = s; *p; p++) {
+        if (p[0] == '%' && p[1] && p[2]) {
+            const char hex[3] = { p[1], p[2], 0 };
+            char *end;
+            const long v = strtol(hex, &end, 16);
+            if (*end == '\0') { *o++ = (char)v; p += 2; continue; }
+        }
+        *o++ = *p;
+    }
+    *o = '\0';
+}
+
 static int ts_connection(void *arg) {
     TsConn *c = arg;
     TsServer *s = c->server;
@@ -309,6 +325,7 @@ static int ts_connection(void *arg) {
     req[len] = '\0';
     char method[16] = "", path[512] = "";
     if (sscanf(req, "%15s %511s", method, path) == 2) {
+        ts_url_decode(path);
         SDL_LockMutex(s->lock);
         if (s->requests < 64) snprintf(s->paths[s->requests], sizeof(s->paths[0]), "%s", path);
         s->requests++;
