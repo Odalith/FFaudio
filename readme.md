@@ -188,6 +188,34 @@ Named filters can be changed with commands; a command reaches the tracks that ar
 string for tracks that start later. `au_filter_available()` tells whether this FFmpeg build has a filter (bs2b
 needs libbs2b); the helpers return `AU_ERR_UNSUPPORTED` when it does not.
 
+### Network streams
+URLs work wherever paths do: files on web and music servers (seekable when the server supports range requests),
+Icecast/SHOUTcast internet radio and HLS (`.m3u8`).
+```c
+const AuNetworkConfig net = { .user_agent = "myplayer/1.0", .timeout_seconds = 15 };
+au_set_network(&net);                                   // optional; also applies to au_probe() and analysis
+
+au_play_audio("https://radio.example.com/stream.mp3", NULL);
+
+const PlayAudioConfig cfg = { .http_headers = "Authorization: Bearer abc123" };
+au_set_next("https://music.example.com/rest/stream?id=42", &cfg);
+```
+Network tracks buffer before they start (`AuNetworkConfig.buffer_seconds`, default 2 s) and read ahead up to
+`max_buffer_seconds` (10 s). When the network falls behind, the track waits for a full buffer again instead of
+stuttering: its position holds, and it fades back in. `on_buffering(handle, buffering, buffered_seconds)` reports
+both, for a "buffering..." display. Live streams (internet radio, live HLS) have no duration and ignore seeks;
+`au_media_is_live()` and `au_media_is_seekable()` tell them apart. `on_stream_metadata(handle, title, artist)`
+reports "now playing" changes (Icecast/SHOUTcast titles, new tags inside Ogg/Opus streams) when they are heard,
+not when they are read ahead; `au_get_track_info()` shows the same title and artist, and the station's `icy-name`,
+`icy-genre`, ... headers as tags. Latin-1 titles from old servers are converted to UTF-8. A dropped connection is opened again
+(`reconnect_attempts`, default 5): a file continues where it stopped, a live stream picks up the broadcast.
+
+Local paths may only open local files and URLs only network protocols, so a playlist can not make FFmpeg read
+local files. A server that stops answering ends the track with an error after the timeout; stopping or skipping
+a track that is still connecting interrupts it. Network files are not measured for ReplayGain unless
+`AuNetworkConfig.measure_streams` is set (it downloads the whole file). The release archives use the system's
+GnuTLS for https on Linux and Windows' own TLS.
+
 ### 5. ReplayGain and metadata
 ```c
 const AuReplayGainConfig rg = {
@@ -367,11 +395,31 @@ stayed at a few MB, while the process' RSS rose to about 145 MB in the first hou
 off at 300-350 MB). A plain player, with one track and no background measurement, needs less.
 AddressSanitizer runs of the same test found no leaks.
 
-If the resident size matters (a small device, a player that runs for weeks), the application can:
+Network streams are where glibc's defaults cost the most. They read ahead (`AuNetworkConfig.max_buffer_seconds`,
+10 s; a hi-res stream over HTTP is several MB per 10 s), and when a program frees blocks that large, glibc raises
+its thresholds for giving memory back (the "dynamic mmap threshold"), so its pools keep more and more. With a third
+of the tracks streamed over HTTP, 2-hour soak runs with the same seed gave:
+
+| Read-ahead, glibc settings     | RSS at 2 h | Kept by glibc | Trend               |
+|--------------------------------|-----------:|--------------:|---------------------|
+| 30 s, defaults                 |     272 MB |        310 MB | rising              |
+| 10 s (default), defaults       |     240 MB |        169 MB | rising, ~55 MB/hour |
+| 10 s, fixed thresholds (below) |      83 MB |         19 MB | flat                |
+| 10 s, `MALLOC_ARENA_MAX=2`     |      81 MB |         34 MB | flat                |
+
+"Kept by glibc" is what its pools hold, in use or free; not all of it has to be resident. The memory ffaudio was
+using was a few MB in all four.
+
+If the resident size matters (streaming, a small device, a player that runs for weeks), the application can:
+- fix glibc's thresholds, which turns the adjustment off and keeps one pool per thread:
+  `GLIBC_TUNABLES=glibc.malloc.mmap_threshold=131072:glibc.malloc.trim_threshold=131072` in the environment, or
+  `mallopt(M_MMAP_THRESHOLD, 128 * 1024)` and `mallopt(M_TRIM_THRESHOLD, 128 * 1024)` at start-up. This is the
+  best choice with network streams;
 - limit glibc to a few pools: `MALLOC_ARENA_MAX=2` in the environment, or `mallopt(M_ARENA_MAX, 2)` at start-up
-  before any threads are created. In the soak test this cut RSS to about 94 MB;
+  before any threads are created. Threads then share the pools. With local files only, this cut RSS to about
+  94 MB in the 8-hour run;
 - call `malloc_trim(0)` now and then, e.g. after a track change, to return free pages to the system (a smaller
-  effect: about 130 MB);
+  effect: about 130 MB with local files);
 - use another allocator (jemalloc, mimalloc, tcmalloc) by linking it or with `LD_PRELOAD`.
 
 All of these change the whole process, which is why ffaudio leaves the choice to the application. Windows and
@@ -420,7 +468,7 @@ plays a folder on real hardware for listening tests.
 - [ ] Embedded cover art
 - [x] Measure R128 / ReplayGain values for files (loudness analysis; read only)
 - [x] Playback speed (tempo with and without pitch change)
-- [ ] Network streams: HTTP/Icecast with "now playing" metadata, reconnects, buffering state (rtp/rtsp)
+- [x] Network streams: HTTP(S) files, HLS, Icecast/SHOUTcast with "now playing", buffering, reconnects
 - [ ] Cue sheets / gapless playback of track ranges inside one file
 - [x] Verified multichannel (5.1/7.1) playback and configurable downmixing
 - [x] Device added/removed notifications for the application

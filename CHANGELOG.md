@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.1.0 (unreleased)
+
+### Added
+- Network streams: `http://` and `https://` URLs in `au_play_audio()`, `au_set_next()`, `au_probe()` and loudness
+  analysis, for files on web and music servers (seeking with range requests), internet radio and HLS.
+  `au_set_network()` sets the user agent and timeouts for all of them (also before `au_initialize()`),
+  `PlayAudioConfig.http_headers` adds request headers per track, `au_is_network_url()` tells URLs from paths.
+- Live streams and buffering: network tracks buffer `buffer_seconds` before they start and after the network
+  fell behind (the position holds, a short fade-in on resume) and read ahead up to `max_buffer_seconds` (10 s);
+  `on_buffering` reports it. Live streams have no duration and ignore seeks (`au_media_is_live()`,
+  `au_media_is_seekable()`). Dropped connections are re-opened (`reconnect_attempts`): files continue with a range
+  request, live streams pick up again; an unreachable server still fails within the timeout.
+- "Now playing": `on_stream_metadata(handle, title, artist)` for Icecast/SHOUTcast titles ("Artist - Title" is
+  split) and tags that change inside Ogg/Opus streams, reported when that audio is heard; `au_get_track_info()`
+  follows, and the station's ICY headers (`icy-name`, ...) become tags. Latin-1 titles are converted to UTF-8.
+- Protocol whitelists: local paths can only open local files and URLs only http, https, tls, tcp, crypto and
+  httpproxy, so playlists (HLS or otherwise) can not reach other protocols or local files.
+- Release archives: FFmpeg with the network protocols and the HLS demuxer; https through the system's GnuTLS
+  on Linux and schannel on Windows.
+- The readme's "Memory use" covers streaming on Linux: with glibc's default settings, the read-ahead buffers make a
+  long-running player grow (240 MB after 2 hours in the soak test, still rising); fixed malloc thresholds
+  (`GLIBC_TUNABLES` or `mallopt()`) kept it flat at about 80 MB.
+
 ## 2.0.1 (2026-11-20)
 
 ### Changed

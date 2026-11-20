@@ -161,6 +161,8 @@ extern "C" {
         NotifyOfTrackStarted on_track_started;
         NotifyOfAudioDeviceUpdate on_audio_device_update;
         NotifyOfAudioDevicesChanged on_audio_devices_changed;
+        NotifyOfBuffering on_buffering;
+        NotifyOfStreamMetadata on_stream_metadata;
     } InitializeConfig;
 
     typedef struct AudioDeviceConfig {
@@ -185,6 +187,9 @@ extern "C" {
         // Optional; NULL = read ReplayGain/R128 values from the file's tags. Use this to supply values
         // from your own library database (e.g. scanned but not written to the file).
         const AuReplayGainInfo *replaygain;
+        // Optional, network streams only: extra HTTP request headers, one "Name: value" per line, e.g.
+        // "Authorization: Bearer abc\nX-Client: myplayer". For servers that want a token in a header.
+        const char *http_headers;
     } PlayAudioConfig;
 
     //+-----------------------------------------------------+
@@ -261,6 +266,34 @@ extern "C" {
     DLL_EXPORT int au_set_playback_speed(double speed, bool keep_pitch);
 
     DLL_EXPORT double au_get_playback_speed(void);
+
+    //+-----------------------------------------------------+
+    //| Network streams                                     |
+    //+-----------------------------------------------------+
+    // au_play_audio(), au_set_next() and au_probe() also take http:// and https:// URLs: files on a web server or a
+    // music server (seekable when the server supports range requests), internet radio (Icecast/SHOUTcast) and HLS
+    // (.m3u8). Local paths may only use local files, and URLs only network protocols (http, https, tls, tcp,
+    // crypto, httpproxy): a playlist can not make FFmpeg read local files or other protocols. Opening a URL takes
+    // a moment; stopping or skipping a track that is still connecting interrupts it.
+
+    typedef struct AuNetworkConfig {
+        const char *user_agent;       // NULL = "ffaudio/<version>"
+        double timeout_seconds;       // connecting and every read; 0 = 10 s. A dead server ends the track with an error
+        double buffer_seconds;        // live streams: audio buffered before starting and after a stall; 0 = 2 s
+        double max_buffer_seconds;    // most audio read ahead from the network; 0 = 10 s. More rides out longer
+                                      // stalls, but costs memory (on Linux glibc keeps it afterwards, per thread)
+        int reconnect_attempts;       // after a dropped connection, with growing delays; 0 = 5, -1 = never
+        // Measure network files for ReplayGain (AuReplayGainConfig.measure_missing, au_gain_cache_request()).
+        // false (default): they are skipped, since measuring downloads the whole file
+        bool measure_streams;
+    } AuNetworkConfig;
+
+    // Settings for every network stream (player, au_probe(), loudness analysis); NULL restores the defaults. Can be
+    // called at any time, also before au_initialize(); tracks that are already open keep their settings.
+    DLL_EXPORT int au_set_network(const AuNetworkConfig *config);
+
+    // true for http(s):// and other URLs with a scheme other than file://
+    DLL_EXPORT bool au_is_network_url(const char *path);
 
     //+-----------------------------------------------------+
     //| Filters                                             |
@@ -402,6 +435,9 @@ extern "C" {
     DLL_EXPORT int au_media_sample_rate(const AuMediaInfo *info);
     DLL_EXPORT int au_media_channels(const AuMediaInfo *info);
     DLL_EXPORT int au_media_bits_per_sample(const AuMediaInfo *info);        // 0 for lossy codecs / unknown
+    // A live stream (internet radio, live HLS): no duration and no seeking; it ends only when stopped or on errors
+    DLL_EXPORT bool au_media_is_live(const AuMediaInfo *info);
+    DLL_EXPORT bool au_media_is_seekable(const AuMediaInfo *info);
 
     // A tag by name, case-insensitive; NULL when absent. Common names are the same in every format:
     // "title", "artist", "album", "album_artist", "date", "genre", "track", "disc", "composer", "comment".

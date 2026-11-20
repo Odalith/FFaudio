@@ -20,6 +20,7 @@
 #include <ctype.h>
 #include "metadata.h"
 #include "probe.h"
+#include "network.h"
 
 // R128 gains are relative to -23 LUFS, ReplayGain 2.0 to -18 LUFS
 #define R128_TO_REPLAYGAIN_DB 5.0
@@ -135,6 +136,32 @@ double replaygain_gain_db(const AuReplayGainConfig *cfg, const AuReplayGainInfo 
 //| AuMediaInfo                                         |
 //+-----------------------------------------------------+
 
+static bool valid_utf8(const unsigned char *s) {
+    while (*s) {
+        int n = *s < 0x80 ? 0 : (*s & 0xE0) == 0xC0 ? 1 : (*s & 0xF0) == 0xE0 ? 2 : (*s & 0xF8) == 0xF0 ? 3 : -1;
+        if (n < 0 || (n == 1 && *s < 0xC2)) return false;
+        s++;
+        while (n-- > 0) {
+            if ((*s & 0xC0) != 0x80) return false;
+            s++;
+        }
+    }
+    return true;
+}
+
+char *text_to_utf8(const char *s) {
+    if (!s) return NULL;
+    if (valid_utf8((const unsigned char *)s)) return av_strdup(s);
+    char *out = av_malloc(strlen(s) * 2 + 1), *o = out;
+    if (!out) return NULL;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p < 0x80) *o++ = (char)*p;
+        else { *o++ = (char)(0xC0 | (*p >> 6)); *o++ = (char)(0x80 | (*p & 0x3F)); }
+    }
+    *o = '\0';
+    return out;
+}
+
 AuMediaInfo *media_info_from_context(const AVFormatContext *ic, const int stream_index, const char *filename) {
     AuMediaInfo *info = av_mallocz(sizeof(AuMediaInfo));
     if (!info) return NULL;
@@ -142,6 +169,10 @@ AuMediaInfo *media_info_from_context(const AVFormatContext *ic, const int stream
     info->filename = av_strdup(filename ? filename : "");
     info->container = av_strdup(ic->iformat && ic->iformat->name ? ic->iformat->name : "");
     info->duration = ic->duration != AV_NOPTS_VALUE ? ic->duration / AV_TIME_BASE_DOUBLE : -1;
+    info->live = info->duration <= 0;
+    // HLS seeks through its playlist, everything else needs a seekable byte stream
+    info->seekable = !info->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
+                                     (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
     info->bit_rate = ic->bit_rate > 0 ? ic->bit_rate : 0;
 
     // Container tags first, stream tags (Ogg, Opus, some MP4) only where the container has none
@@ -208,7 +239,11 @@ AuMediaInfo *au_probe(const char *filename, int *out_error) {
         if (out_error) *out_error = AU_ERR_INVALID_ARGUMENT;
         return NULL;
     }
-    if ((ret = avformat_open_input(&ic, filename, NULL, NULL)) < 0) goto end;
+    AVDictionary *opts = NULL;
+    network_input_options(&opts, filename, NULL);
+    ret = avformat_open_input(&ic, filename, NULL, &opts);
+    av_dict_free(&opts);
+    if (ret < 0) goto end;
     if (ff_input_lacks_audio(ic)) { ret = AVERROR_STREAM_NOT_FOUND; goto end; }
     if ((ret = avformat_find_stream_info(ic, NULL)) < 0) goto end;
 
@@ -243,6 +278,8 @@ int64_t au_media_bit_rate(const AuMediaInfo *info) { return info ? info->bit_rat
 int au_media_sample_rate(const AuMediaInfo *info) { return info ? info->sample_rate : 0; }
 int au_media_channels(const AuMediaInfo *info) { return info ? info->channels : 0; }
 int au_media_bits_per_sample(const AuMediaInfo *info) { return info ? info->bits_per_sample : 0; }
+bool au_media_is_live(const AuMediaInfo *info) { return info && info->live; }
+bool au_media_is_seekable(const AuMediaInfo *info) { return info && info->seekable; }
 
 const char *au_media_tag(const AuMediaInfo *info, const char *key) {
     if (!info || !key || !key[0]) return NULL;

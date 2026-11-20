@@ -27,6 +27,7 @@
 #include "gain_cache.h"
 #include "once.h"
 #include "ffaudio_loudness.h"
+#include "network.h"
 
 #define MAX_WORKERS 16
 #define MAX_FAILED 1024          // files remembered as not measurable (the oldest are forgotten first)
@@ -360,6 +361,8 @@ static int request(const char *const *paths, const int count, const bool urgent,
         if (all_done) return 0;
     }
 
+    char ua[8];
+    const bool measure_streams = network_config(ua, sizeof(ua)).measure_streams;
     Job *job = job_new(album, from_player, count);
     if (!job) return AU_ERR_NO_MEMORY;
 
@@ -369,6 +372,7 @@ static int request(const char *const *paths, const int count, const bool urgent,
         if (!path || !path[0] || job_has(job, path)) continue;
         if (!album) {
             if (au_gain_cache_get(path, NULL) || being_measured(path) || known_failure(path)) continue;
+            if (au_is_network_url(path) && !measure_streams) continue; // would download the whole file
             Job *prev = NULL;
             Job *queued = find_queued(path, &prev);
             if (queued) {

@@ -163,6 +163,13 @@ typedef struct FilterChain {
     AVFilterContext *sink;
 } FilterChain;
 
+// "Now playing" information read from a stream, waiting until playback reaches `position`
+typedef struct StreamMeta {
+    double position;            // seconds of file time read since the start or the last seek (read_clock)
+    char *title, *artist;       // UTF-8, owned; artist may be NULL
+    struct StreamMeta *next;
+} StreamMeta;
+
 typedef struct FilterCmd {
     char *target;
     char *cmd;
@@ -225,6 +232,28 @@ typedef struct TrackState {
     bool speed_seg_open;                // audio thread only: speed_seg_in is known
     int32_t convert_rate;               // output rate the graphs were built for
     AVDictionary *format_opts_n;
+    char *http_headers;                 // PlayAudioConfig.http_headers (owned), network streams only
+    // Network tracks (set at creation): the read thread fills buffer_target_s before the mixer takes anything,
+    // again after the mixer ran dry while playing, and reads ahead up to max_buffer_s
+    bool network;
+    double buffer_target_s, max_buffer_s;
+    bool live;                          // read thread: no duration (internet radio, live HLS)
+    SDL_atomic_t buffering;             // 1 = waiting for data: the mixer takes nothing, the position holds
+    SDL_atomic_t buffered_ms;           // read thread: audio queued, for on_buffering
+    bool stalled;                       // SDL callback only: ran dry while playing; fades back in when data returns
+    int resume_fade, resume_fade_len;   // SDL callback only: frames left of that fade-in, and its length
+    int buffering_reported;             // control thread: last state sent to on_buffering (-1 = none yet)
+    uint32_t buffering_note_ticks;      // control thread: when it was last sent
+    StreamMeta *stream_meta;            // guarded by seek_mutex: read thread appends, control thread reports
+    char *last_icy;                     // read thread: the last ICY packet seen
+    char *last_meta;                    // read thread: "title\nartist" last queued, to skip repeats
+    // File time read and played since the start (or the last seek), for "now playing": timestamps can not be
+    // used for that, chained Ogg (FFmpeg < 7) and HLS discontinuities start them again from 0
+    double read_clock;                  // read thread: durations of the audio packets read
+    int64_t last_pkt_ts;                // read thread: for packets without a duration
+    double play_clock;                  // SDL callback: file time played
+    int clock_serial;                   // SDL callback: the serial play_clock counts for
+    bool icy;                           // read thread: the server sends ICY metadata (icy-metaint)
     int32_t realtime;
     int32_t seek_by_bytes;
     bool infinite_buffer;
@@ -370,7 +399,7 @@ typedef struct Msg {
     char *str;                      // owned
     char *str2;                     // owned
     char *str3;                     // owned
-    PlayAudioConfig play_config;    // av_filtergraph points at str2
+    PlayAudioConfig play_config;    // av_filtergraph points at str2, http_headers at str3
     bool has_play_config;
     AuFade fade_in_override;
     bool has_fade_in_override;
@@ -430,6 +459,8 @@ typedef struct AudioPlayer {
     NotifyOfTrackStarted notify_of_track_started_callback;
     NotifyOfAudioDeviceUpdate notify_of_audio_device_update_callback;
     NotifyOfAudioDevicesChanged notify_of_audio_devices_changed_callback;
+    NotifyOfBuffering notify_of_buffering_callback;
+    NotifyOfStreamMetadata notify_of_stream_metadata_callback;
 
     // ---- control thread ----
     SDL_Thread *control_thread;

@@ -90,7 +90,8 @@ extern "C" {
     // Number of files in the current album
     DLL_EXPORT int au_loudness_track_count(const AuLoudnessScanner *scanner);
 
-    // Measure a single file without keeping a scanner around (track values only)
+    // Measure a single file without keeping a scanner around (track values only). URLs work too (it downloads the
+    // file); a live stream (no duration) returns AU_ERR_UNSUPPORTED, since it never ends.
     DLL_EXPORT int au_loudness_analyze(const char *filename, const AuLoudnessConfig *config, AuLoudness *out);
 
     // ReplayGain values for PlayAudioConfig.replaygain. album may be NULL. Peaks are the true peaks

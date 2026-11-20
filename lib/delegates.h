@@ -63,6 +63,17 @@ typedef void (*NotifyOfTrackStarted)(int32_t handle, void *user_data);
 // The output device was opened or changed. Useful to rebuild channel-dependent filter strings.
 typedef void (*NotifyOfAudioDeviceUpdate)(int32_t channel_count, int32_t sample_rate, void *user_data);
 
+// A network track waits for data (buffering = true: before it starts, or after the network fell behind) or plays
+// again (false). While buffering it is called about every 500 ms with how much audio is queued; its position does
+// not move meanwhile.
+typedef void (*NotifyOfBuffering)(int32_t handle, bool buffering, double buffered_seconds, void *user_data);
+
+// The "now playing" information of a stream changed: Icecast/SHOUTcast titles, or new tags inside an Ogg/Opus
+// stream. Called when that part is heard (not when it is read, which can be up to max_buffer_seconds earlier).
+// Icecast's "Artist - Title" is split at " - "; artist is NULL when there is no artist. au_get_track_info() shows
+// the same values from then on.
+typedef void (*NotifyOfStreamMetadata)(int32_t handle, const char *title, const char *artist, void *user_data);
+
 // An output device was added or removed (headphones plugged in, a USB/Bluetooth device appeared, ...).
 // Call au_get_audio_devices() for the new list.
 typedef void (*NotifyOfAudioDevicesChanged)(void *user_data);

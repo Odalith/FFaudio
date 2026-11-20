@@ -66,6 +66,8 @@ add_library(ffaudio
         lib/gain_cache.c
         lib/gain_cache.h
         lib/gain_scan.c
+        lib/network.c
+        lib/network.h
         lib/once.h
         lib/metadata.h
         lib/track.c
@@ -204,10 +206,13 @@ if(FFAUDIO_BUILD_TESTS)
         if(WIN32)
             string(APPEND FFAUDIO_TEST_DATA_ENV ";LOCALAPPDATA=${CMAKE_BINARY_DIR}/localappdata")
         endif()
-        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan)
+        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})
+            if(t STREQUAL "test_network" AND WIN32)
+                target_link_libraries(${t} PRIVATE ws2_32)   # the test's HTTP server
+            endif()
             if(t STREQUAL "test_metadata")
                 # Watches FFmpeg's own log messages (av_log_set_callback)
                 target_link_libraries(${t} PRIVATE PkgConfig::FFMPEG)

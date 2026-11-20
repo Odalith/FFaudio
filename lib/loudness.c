@@ -37,6 +37,7 @@
 
 #include "ffaudio_loudness.h"
 #include "probe.h"
+#include "network.h"
 
 #define ABSOLUTE_GATE_LUFS (-70.0)
 #define RELATIVE_GATE_LU (-10.0)
@@ -387,9 +388,17 @@ static int measure_file(const AuLoudnessConfig *cfg, const char *filename, Meter
     int ret;
 
     memset(m, 0, sizeof(*m));
-    if (avformat_open_input(&ic, filename, NULL, NULL) < 0) goto end;
+    AVDictionary *in_opts = NULL;
+    network_input_options(&in_opts, filename, NULL);
+    ret = avformat_open_input(&ic, filename, NULL, &in_opts);
+    av_dict_free(&in_opts);
+    if (ret < 0) goto end;
     if (ff_input_lacks_audio(ic)) goto end;
     if (avformat_find_stream_info(ic, NULL) < 0) goto end;
+    if (au_is_network_url(filename) && (ic->duration == AV_NOPTS_VALUE || ic->duration <= 0)) {
+        result = AU_ERR_UNSUPPORTED;   // a live stream: it never ends, so it can not be measured
+        goto end;
+    }
     const int st_index = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (st_index < 0) goto end;
     AVStream *st = ic->streams[st_index];

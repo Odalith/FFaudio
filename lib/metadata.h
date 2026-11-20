@@ -31,9 +31,14 @@ struct AuMediaInfo {
     int sample_rate;
     int channels;
     int bits_per_sample;        // 0 for lossy codecs / unknown
+    bool live;                  // no duration: a live stream
+    bool seekable;
     AVDictionary *tags;         // container tags, then stream tags for keys the container lacks
     AuReplayGainInfo replaygain;
 };
+
+// UTF-8 copy of text that may be Latin-1 (old Icecast servers): valid UTF-8 is kept, anything else is read as Latin-1
+char *text_to_utf8(const char *s);
 
 // Describe the audio stream `stream_index` of an opened (and probed) input
 AuMediaInfo *media_info_from_context(const AVFormatContext *ic, int stream_index, const char *filename);

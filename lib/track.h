@@ -63,4 +63,9 @@ int track_pull(TrackState *t, float *dst, int frames, int rate, int channels, bo
 // SDL callback: whether decoded audio is waiting to be played
 bool track_has_audio(TrackState *t);
 
+// Control thread: take the first queued "now playing" entry at or before `position` (NULL when none), and put its
+// title/artist into the track's info. Free the result with track_free_stream_meta().
+StreamMeta *track_take_stream_meta(TrackState *t, double position);
+void track_free_stream_meta(StreamMeta *m);
+
 #endif //FFAUDIO_TRACK_H
