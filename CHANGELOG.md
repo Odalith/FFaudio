@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.0 (unreleased)
+
+### Added
+- Network streams: `http://` and `https://` URLs in `au_play_audio()`, `au_set_next()`, `au_probe()` and loudness
+  analysis, for files on web and music servers (seeking with range requests), internet radio and HLS.
+  `au_set_network()` sets the user agent and timeouts for all of them (also before `au_initialize()`),
+  `PlayAudioConfig.http_headers` adds request headers per track, `au_is_network_url()` tells URLs from paths.
+- Protocol whitelists: local paths can only open local files and URLs only http, https, tls, tcp, crypto and
+  httpproxy, so playlists (HLS or otherwise) can not reach other protocols or local files.
+- Release archives: FFmpeg with the network protocols and the HLS demuxer; https through the system's GnuTLS
+  on Linux and schannel on Windows.
+
 ## 2.0.1 (2026-11-20)
 
 ### Changed

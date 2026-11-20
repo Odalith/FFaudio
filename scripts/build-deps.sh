@@ -7,14 +7,16 @@
 #   - every audio decoder (taken from FFmpeg's own codec list, so new ones are picked up automatically)
 #   - every demuxer, parser and bitstream filter (files often carry video or cover art next to the audio)
 #   - every audio filter, with soxr and (when its development files are installed) bs2b
-#   - the file and pipe protocols
-# Not built: encoders, muxers, video decoders and filters, devices, swscale, hardware acceleration, network
-# protocols and the ffmpeg/ffprobe programs.
+#   - the file and pipe protocols, and for streams http, https, tcp, tls, crypto (AES-encrypted HLS) and httpproxy.
+#     TLS comes from the system: GnuTLS on Linux (not bundled; FFmpeg stays LGPL 2.1+), schannel on Windows
+# Not built: encoders, muxers, video decoders and filters, devices, swscale, hardware acceleration, other network
+# protocols (rtmp, rtsp, udp, ...) and the ffmpeg/ffprobe programs.
 #
 # Usage: scripts/build-deps.sh <install-prefix> [work-dir]
 # The source tarballs are kept in the work dir (default ./deps-build); releases attach them.
 # Environment: JOBS (default: all cores), EXTRA_CONFIGURE (more FFmpeg configure options)
-# Needs: curl, tar, a C compiler, make, cmake, pkg-config, nasm (x86); libbs2b development files are optional.
+# Needs: curl, tar, a C compiler, make, cmake, pkg-config, nasm (x86); libbs2b and (Linux) GnuTLS development files
+# are optional: without GnuTLS there is no https.
 set -euo pipefail
 
 FFMPEG_VERSION=9.0.2
@@ -131,9 +133,14 @@ if pkg-config --exists libbs2b; then
 else
     echo "note: libbs2b not found, building without it"
 fi
+case "$(uname -s)" in
+    MINGW*|MSYS*) ;;
+    *) if pkg-config --exists gnutls; then optional+=(--enable-gnutls)
+       else echo "note: GnuTLS not found, building without https"; fi ;;
+esac
 
 case "$(uname -s)" in
-    MINGW*|MSYS*) platform=(--enable-w32threads) ;;
+    MINGW*|MSYS*) platform=(--enable-w32threads --enable-schannel) ;;
     # $ORIGIN passes four interpreters: configure's eval (\\\$\$\$\$ -> \$$$$), make twice (library.mak expands
     # its link rule with $(eval), $$$$ -> $$ -> $) and the shell running the link command (\$ -> $)
     *)            platform=(--enable-pthreads '--extra-ldflags=-Wl,-rpath,\\\$\$\$\$ORIGIN') ;;
@@ -146,11 +153,11 @@ esac
     --disable-programs --disable-doc --disable-debug \
     --disable-autodetect --enable-zlib "${platform[@]}" \
     --disable-everything \
-    --disable-avdevice --disable-swscale --disable-network \
+    --disable-avdevice --disable-swscale \
     --enable-decoder="$decoders" \
     --enable-demuxers --enable-parsers --enable-bsfs \
     --enable-filter="$filters" \
-    --enable-protocol=file,pipe \
+    --enable-protocol=file,pipe,http,https,tcp,tls,crypto,httpproxy \
     --extra-cflags="-I$prefix/include" --extra-ldflags="-L$prefix/lib" \
     "${optional[@]}" ${EXTRA_CONFIGURE:-} \
     | tee "$work/configure.log"

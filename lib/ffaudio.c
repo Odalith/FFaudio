@@ -1230,6 +1230,10 @@ static int32_t post_track_command(const MsgType type, const char *filename, cons
             if (!(m->str2 = av_strdup(config->av_filtergraph))) { msg_free(m); return AU_ERR_NO_MEMORY; }
             m->play_config.av_filtergraph = m->str2;
         }
+        if (config->http_headers) {
+            if (!(m->str3 = av_strdup(config->http_headers))) { msg_free(m); return AU_ERR_NO_MEMORY; }
+            m->play_config.http_headers = m->str3;
+        }
         if (config->fade_in) {
             m->fade_in_override = *config->fade_in;
             m->has_fade_in_override = true;

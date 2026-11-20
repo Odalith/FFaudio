@@ -188,6 +188,24 @@ Named filters can be changed with commands; a command reaches the tracks that ar
 string for tracks that start later. `au_filter_available()` tells whether this FFmpeg build has a filter (bs2b
 needs libbs2b); the helpers return `AU_ERR_UNSUPPORTED` when it does not.
 
+### Network streams
+URLs work wherever paths do: files on web and music servers (seekable when the server supports range requests),
+Icecast/SHOUTcast internet radio and HLS (`.m3u8`).
+```c
+const AuNetworkConfig net = { .user_agent = "myplayer/1.0", .timeout_seconds = 15 };
+au_set_network(&net);                                   // optional; also applies to au_probe() and analysis
+
+au_play_audio("https://radio.example.com/stream.mp3", NULL);
+
+const PlayAudioConfig cfg = { .http_headers = "Authorization: Bearer abc123" };
+au_set_next("https://music.example.com/rest/stream?id=42", &cfg);
+```
+Local paths may only open local files and URLs only network protocols, so a playlist can not make FFmpeg read
+local files. A server that stops answering ends the track with an error after the timeout; stopping or skipping
+a track that is still connecting interrupts it. Network files are not measured for ReplayGain unless
+`AuNetworkConfig.measure_streams` is set (it downloads the whole file). The release archives use the system's
+GnuTLS for https on Linux and Windows' own TLS.
+
 ### 5. ReplayGain and metadata
 ```c
 const AuReplayGainConfig rg = {
@@ -420,7 +438,7 @@ plays a folder on real hardware for listening tests.
 - [ ] Embedded cover art
 - [x] Measure R128 / ReplayGain values for files (loudness analysis; read only)
 - [x] Playback speed (tempo with and without pitch change)
-- [ ] Network streams: HTTP/Icecast with "now playing" metadata, reconnects, buffering state (rtp/rtsp)
+- [ ] Network streams: HTTP(S) files, HLS and protocol whitelists done; live buffering, reconnects and "now playing" next
 - [ ] Cue sheets / gapless playback of track ranges inside one file
 - [x] Verified multichannel (5.1/7.1) playback and configurable downmixing
 - [x] Device added/removed notifications for the application

@@ -74,6 +74,9 @@ ff -f lavfi -i "anullsrc=r=48000:cl=stereo" -t 3 ld_silence.flac
 # Many distinct paths for the measurement queue tests (hard links: no extra space)
 for i in $(seq -w 1 24); do ln -f ld_m23_48k.flac "scan_$i.flac"; done
 
+# Network tests: an HLS segment (ADTS AAC); the playlists are written by test_network with the server's port
+sine hls_seg.aac       440 2 44100 2 -c:a aac -f adts
+
 # Broken / non-audio inputs
 : > empty.flac
 echo "this is not audio" > text.mp3

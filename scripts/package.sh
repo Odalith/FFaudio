@@ -52,6 +52,7 @@ if [ "$os" = linux ]; then
         case "$1" in
             linux-vdso.so.*|ld-linux*.so.*|libc.so.*|libm.so.*|libpthread.so.*|libdl.so.*|librt.so.*) return 0 ;;
             libgcc_s.so.*|libstdc++.so.*|libz.so.*|libSDL2-2.0.so.*) return 0 ;;
+            libgnutls.so.*) return 0 ;;   # https; on practically every desktop Linux, kept up to date by the system
         esac
         return 1
     }
@@ -170,6 +171,7 @@ fi
         echo "  lib/cmake/ffaudio   find_package(ffaudio) with CMAKE_PREFIX_PATH=<here>, target ffaudio::ffaudio"
         echo
         echo "Needs SDL2 (2.24 or newer) from the system, e.g. libsdl2-2.0-0 on Debian/Ubuntu, sdl2 on Arch/Fedora."
+        echo "https streams need GnuTLS from the system (libgnutls30 on Debian/Ubuntu, gnutls elsewhere)."
         echo "Built on Ubuntu 24.04: needs glibc 2.39 or newer."
     else
         echo "  bin/                libffaudio.dll and every DLL it needs (FFmpeg, soxr, SDL2, MinGW runtime)."

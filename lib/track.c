@@ -27,6 +27,7 @@
 #include "track.h"
 #include "metadata.h"
 #include "probe.h"
+#include "network.h"
 #include "gain_cache.h"
 #include <math.h>
 #include "decoder_utils.h"
@@ -131,6 +132,8 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     if (config) {
         if (config->av_filtergraph && config->av_filtergraph[0] && !(t->filtergraph_str = av_strdup(config->av_filtergraph)))
             goto fail;
+        if (config->http_headers && config->http_headers[0] && !(t->http_headers = av_strdup(config->http_headers)))
+            goto fail;
         if (config->play_duration > 0)
             t->play_duration = SecondsToMicroseconds(config->play_duration);
         if (config->skip_seconds > 0)
@@ -191,6 +194,7 @@ void track_destroy(TrackState *t) {
     au_media_info_free(t->info);
     av_free(t->filename);
     av_free(t->filtergraph_str);
+    av_free(t->http_headers);
     while (t->filter_cmds) {
         FilterCmd *c = t->filter_cmds;
         t->filter_cmds = c->next;
@@ -257,6 +261,8 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
     SDL_UnlockMutex(ap->format_mutex);
 
     if (cfg.mode == AU_REPLAYGAIN_OFF || !cfg.measure_missing || t->has_replaygain_override) return;
+    char ua[8];
+    if (au_is_network_url(t->filename) && !network_config(ua, sizeof(ua)).measure_streams) return; // a download
     const AuReplayGainInfo tags = au_media_replaygain(info);
     if (tags.has_track_gain || tags.has_album_gain) return;
     if (gain_cache_lookup(t->filename, NULL)) return;
@@ -443,6 +449,7 @@ static int read_thread(void *arg) {
     ic->interrupt_callback.opaque = t;
 
     av_dict_set(&t->format_opts_n, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
+    network_input_options(&t->format_opts_n, t->filename, t->http_headers);
     ret = avformat_open_input(&ic, t->filename, t->iformat, &t->format_opts_n);
     if (ret < 0) {
         // avformat_open_input frees ic on failure

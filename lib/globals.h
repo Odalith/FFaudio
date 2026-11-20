@@ -225,6 +225,7 @@ typedef struct TrackState {
     bool speed_seg_open;                // audio thread only: speed_seg_in is known
     int32_t convert_rate;               // output rate the graphs were built for
     AVDictionary *format_opts_n;
+    char *http_headers;                 // PlayAudioConfig.http_headers (owned), network streams only
     int32_t realtime;
     int32_t seek_by_bytes;
     bool infinite_buffer;
@@ -370,7 +371,7 @@ typedef struct Msg {
     char *str;                      // owned
     char *str2;                     // owned
     char *str3;                     // owned
-    PlayAudioConfig play_config;    // av_filtergraph points at str2
+    PlayAudioConfig play_config;    // av_filtergraph points at str2, http_headers at str3
     bool has_play_config;
     AuFade fade_in_override;
     bool has_fade_in_override;
