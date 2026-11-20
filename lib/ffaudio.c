@@ -810,7 +810,7 @@ static void housekeeping(AudioPlayer *ap) {
         if (t->ended) continue;
         lock_mixer(ap);
         const bool playing = t->started;
-        const double at = t->position;
+        const double at = t->play_clock;
         unlock_mixer(ap);
         if (!playing) continue;
         for (StreamMeta *m; (m = track_take_stream_meta(t, at));) {

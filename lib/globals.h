@@ -165,7 +165,7 @@ typedef struct FilterChain {
 
 // "Now playing" information read from a stream, waiting until playback reaches `position`
 typedef struct StreamMeta {
-    double position;            // seconds, the same time base as TrackState.position
+    double position;            // seconds of file time read since the start or the last seek (read_clock)
     char *title, *artist;       // UTF-8, owned; artist may be NULL
     struct StreamMeta *next;
 } StreamMeta;
@@ -247,6 +247,12 @@ typedef struct TrackState {
     StreamMeta *stream_meta;            // guarded by seek_mutex: read thread appends, control thread reports
     char *last_icy;                     // read thread: the last ICY packet seen
     char *last_meta;                    // read thread: "title\nartist" last queued, to skip repeats
+    // File time read and played since the start (or the last seek), for "now playing": timestamps can not be
+    // used for that, chained Ogg (FFmpeg < 7) and HLS discontinuities start them again from 0
+    double read_clock;                  // read thread: durations of the audio packets read
+    int64_t last_pkt_ts;                // read thread: for packets without a duration
+    double play_clock;                  // SDL callback: file time played
+    int clock_serial;                   // SDL callback: the serial play_clock counts for
     bool icy;                           // read thread: the server sends ICY metadata (icy-metaint)
     int32_t realtime;
     int32_t seek_by_bytes;

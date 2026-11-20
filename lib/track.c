@@ -136,8 +136,14 @@ static void push_icy_title(TrackState *t, const double position, const char *pac
 // After every audio packet: new ICY titles (checked a few times a second) and tags that changed inside the stream
 static void check_stream_metadata(TrackState *t, AVFormatContext *ic, const AVPacket *pkt) {
     AVStream *st = ic->streams[pkt->stream_index];
+    // Where this packet starts in the file time read so far; then count it
+    const double pos = t->read_clock;
     const int64_t ts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
-    const double pos = ts != AV_NOPTS_VALUE ? ts * av_q2d(st->time_base) : t->position;
+    double d = pkt->duration > 0 ? pkt->duration * av_q2d(st->time_base) : 0;
+    if (d <= 0 && ts != AV_NOPTS_VALUE && t->last_pkt_ts != AV_NOPTS_VALUE && ts > t->last_pkt_ts)
+        d = (ts - t->last_pkt_ts) * av_q2d(st->time_base);   // no duration: the gap to the previous packet
+    if (d > 0 && d < 10) t->read_clock += d;
+    t->last_pkt_ts = ts;
 
     if (t->icy) { // every packet: while the reader runs ahead, packets are far apart in reading time
         uint8_t *icy = NULL;
@@ -265,6 +271,8 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
 
     if (!(t->filename = av_strdup(filename))) goto fail;
     t->buffering_reported = -1;
+    t->clock_serial = -1;
+    t->last_pkt_ts = AV_NOPTS_VALUE;
     if ((t->network = au_is_network_url(filename))) {
         char ua[8];
         const AuNetworkConfig nc = network_config(ua, sizeof(ua));
@@ -725,6 +733,8 @@ static int read_thread(void *arg) {
                 free_stream_meta(t->stream_meta);
                 t->stream_meta = NULL;
                 SDL_UnlockMutex(t->seek_mutex);
+                t->read_clock = 0;   // the mixer starts its play_clock again with the new serial
+                t->last_pkt_ts = AV_NOPTS_VALUE;
                 t->demux_eof = false;
                 ff_post_track_msg(MSG_TRACK_SEEKED, t->handle, seek_pos / AV_TIME_BASE_DOUBLE);
             }
@@ -1261,6 +1271,10 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
             t->cur = f;
             t->cur_offset = 0;
             t->play_speed = f->speed > 0 ? f->speed : 1.0;
+            if (f->serial != t->clock_serial) { // the start, or the first frame after a seek
+                t->clock_serial = f->serial;
+                t->play_clock = 0;
+            }
         }
 
         const int available = t->cur->frame->nb_samples - t->cur_offset;
@@ -1271,6 +1285,7 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
         written += n;
         t->cur_offset += n;
         t->position += (double)n / rate * t->cur->speed;
+        t->play_clock += (double)n / rate * t->cur->speed;
 
         if (t->cur_offset >= t->cur->frame->nb_samples) {
             frame_queue_next(&t->sampq);

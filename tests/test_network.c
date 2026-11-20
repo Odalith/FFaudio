@@ -6,9 +6,7 @@
 #include "test_common.h"
 #include "http_server.h"
 #include "../lib/ffaudio_loudness.h"
-#ifndef _WIN32
-#include <limits.h>
-#endif
+
 
 static TsServer srv;
 
@@ -36,7 +34,9 @@ static void file_url(const char *name, char *out, const size_t size) {
     for (char *p = abs; *p; p++) if (*p == '\\') *p = '/';
     snprintf(out, size, "file:///%s", abs);
 #else
-    if (!realpath(fx(name), abs)) snprintf(abs, sizeof(abs), "%s", fx(name));
+    char *real = realpath(fx(name), NULL);   // a buffer smaller than PATH_MAX trips glibc's fortify checks
+    snprintf(abs, sizeof(abs), "%s", real ? real : fx(name));
+    free(real);
     snprintf(out, size, "file://%s", abs);
 #endif
 }
@@ -101,9 +101,12 @@ static void test_errors_and_timeouts(void) {
     play_and_wait(url("/status/404"), NULL, 1, 5000);
     CHECK(tc_snapshot().eof_error == 1);
 
+    // A closed port: Linux refuses at once, Windows retries the connection for a few seconds first
     char refused[64];
     snprintf(refused, sizeof(refused), "http://127.0.0.1:%d/files/s44_stereo.flac", ts_closed_port());
-    play_and_wait(refused, NULL, 2, 5000);
+    const uint32_t r0 = SDL_GetTicks();
+    play_and_wait(refused, NULL, 2, 20000);
+    printf("   refused connection: ended after %u ms\n", SDL_GetTicks() - r0);
     CHECK(tc_snapshot().eof_error == 2);
 
     // A server that never answers: the timeout ends the track
