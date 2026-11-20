@@ -169,10 +169,6 @@ AuMediaInfo *media_info_from_context(const AVFormatContext *ic, const int stream
     info->filename = av_strdup(filename ? filename : "");
     info->container = av_strdup(ic->iformat && ic->iformat->name ? ic->iformat->name : "");
     info->duration = ic->duration != AV_NOPTS_VALUE ? ic->duration / AV_TIME_BASE_DOUBLE : -1;
-    info->live = info->duration <= 0;
-    // HLS seeks through its playlist, everything else needs a seekable byte stream
-    info->seekable = !info->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
-                                     (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
     info->bit_rate = ic->bit_rate > 0 ? ic->bit_rate : 0;
 
     // Container tags first, stream tags (Ogg, Opus, some MP4) only where the container has none
@@ -196,6 +192,12 @@ AuMediaInfo *media_info_from_context(const AVFormatContext *ic, const int stream
         if (av_channel_layout_describe(&par->ch_layout, layout, sizeof(layout)) >= 0)
             info->channel_layout = av_strdup(layout);
     }
+    // After the stream's duration has filled in a missing one. Live = a network stream without an end, as the player
+    // treats it; a local file of unknown length still ends. HLS seeks through its playlist, everything else needs a
+    // seekable byte stream.
+    info->live = info->duration <= 0 && au_is_network_url(info->filename);
+    info->seekable = !info->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
+                                     (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
     if (!info->codec) info->codec = av_strdup("");
     if (!info->channel_layout) info->channel_layout = av_strdup("");
 

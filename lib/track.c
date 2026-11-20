@@ -286,7 +286,6 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
         t->max_buffer_s = nc.max_buffer_seconds;
         SDL_AtomicSet(&t->buffering, 1);   // nothing plays until the first buffer_seconds are in
     }
-    t->iformat = av_find_input_format(filename);
 
     if (config) {
         if (config->av_filtergraph && config->av_filtergraph[0] && !(t->filtergraph_str = av_strdup(config->av_filtergraph)))
@@ -396,7 +395,7 @@ void track_request_seek_percent(TrackState *t, const double percent) {
     wake_read_thread(t);
 }
 
-void track_update_gain(TrackState *t) {
+void track_update_gain(TrackState *t, const bool late) {
     AudioPlayer *ap = t->ap;
     SDL_LockMutex(ap->format_mutex);
     const AuReplayGainConfig cfg = ap->replaygain;
@@ -417,7 +416,7 @@ void track_update_gain(TrackState *t) {
         if (gain_cache_lookup(t->filename, &cached)) rg = cached;
     }
     const double db = replaygain_gain_db(&cfg, &rg);
-    SDL_AtomicSet(&t->gain_mb, (int)lrint(db * 100.0));
+    SDL_AtomicSet(&t->gain_mb, gain_pack((int)lrint(db * 100.0), late));
 }
 
 #define DEFAULT_MEASURE_WAIT_MS 500
@@ -636,7 +635,7 @@ static int read_thread(void *arg) {
 
     av_dict_set(&t->format_opts_n, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
     network_input_options(&t->format_opts_n, t->filename, t->http_headers);
-    ret = avformat_open_input(&ic, t->filename, t->iformat, &t->format_opts_n);
+    ret = avformat_open_input(&ic, t->filename, NULL, &t->format_opts_n); // probed: never chosen by the file's name
     if (ret < 0) {
         // avformat_open_input frees ic on failure
         ic = NULL;
@@ -671,6 +670,9 @@ static int read_thread(void *arg) {
     t->realtime = is_realtime(ic);
     t->infinite_buffer = t->realtime;
     t->live = t->network && (ic->duration == AV_NOPTS_VALUE || ic->duration <= 0);
+    // Positions count from the start of the file, like seeks and the duration: MPEG-TS (and so HLS) and some other
+    // containers start their timestamps later. Set before the decoder thread starts, which reads it.
+    t->pts_offset = ic->start_time != AV_NOPTS_VALUE ? ic->start_time / AV_TIME_BASE_DOUBLE : 0.0;
 
     if (t->start_time != AV_NOPTS_VALUE && seek_file(t, t->start_time) < 0)
         ff_log(AU_LOG_WARNING, "%s: could not seek to position %0.3f", t->filename, t->start_time / AV_TIME_BASE_DOUBLE);
@@ -691,7 +693,7 @@ static int read_thread(void *arg) {
         t->info = info;
         SDL_UnlockMutex(t->seek_mutex);
         wait_for_measurement(t, info);
-        track_update_gain(t);
+        track_update_gain(t, false);
     }
 
     if (st_index < 0 || stream_component_open(t, st_index) < 0 || t->audio_stream < 0) {
@@ -855,7 +857,7 @@ static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const
         av_frame_unref(frame);
         return AVERROR_EXIT;
     }
-    af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
+    af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb) - t->pts_offset;
     af->pos = -1;
     af->serial = serial;
     af->speed = t->speed_chain.graph ? t->speed_cur : 1.0;

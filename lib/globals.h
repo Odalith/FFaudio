@@ -177,6 +177,12 @@ typedef struct FilterCmd {
     struct FilterCmd *next;
 } FilterCmd;
 
+// TrackState.gain_mb holds the ReplayGain gain in 0.01 dB and whether a change to it ramps slowly (over 2 s instead of
+// 10 ms: a value that arrived after the track started). One atomic for both, so the flag can not outlive its value.
+static inline int gain_pack(const int centi_db, const bool slow) { return centi_db * 2 + (slow ? 1 : 0); }
+static inline int gain_centi_db(const int packed) { return (packed - (packed & 1)) / 2; }
+static inline bool gain_is_slow(const int packed) { return (packed & 1) != 0; }
+
 typedef struct TrackState {
     struct AudioPlayer *ap;
     int32_t handle;
@@ -190,13 +196,12 @@ typedef struct TrackState {
     bool has_replaygain_override;
     AuMediaInfo *info;                  // written by the read thread under seek_mutex before `opened` is set
 
-    // ReplayGain: target gain in millibels (any thread), ramped in the mixer
+    // ReplayGain: target gain (any thread, see gain_pack()), ramped in the mixer
     SDL_atomic_t gain_mb;
     float gain_cur;                     // SDL callback only
     bool gain_started;                  // SDL callback only
     float gain_seen;                    // SDL callback only: target the current ramp heads for
     float gain_step;                    // SDL callback only: per-sample change of the current ramp
-    SDL_atomic_t gain_slow;             // 1 = the next gain change arrived late: ramp over 2 s instead of 10 ms
 
     // ---- threads ----
     SDL_Thread *read_tid;
@@ -213,7 +218,6 @@ typedef struct TrackState {
 
     // ---- demux / decode (read + audio threads) ----
     AVFormatContext *ic;
-    const AVInputFormat *iformat;
     int32_t audio_stream;
     AVStream *audio_st;
     PacketQueue audio_queue;
@@ -238,6 +242,8 @@ typedef struct TrackState {
     bool network;
     double buffer_target_s, max_buffer_s;
     bool live;                          // read thread: no duration (internet radio, live HLS)
+    double pts_offset;                  // read thread, before the decoder starts: the container's start time (s),
+                                        // taken off frame timestamps so positions count from 0
     SDL_atomic_t buffering;             // 1 = waiting for data: the mixer takes nothing, the position holds
     SDL_atomic_t buffered_ms;           // read thread: audio queued, for on_buffering
     bool stalled;                       // SDL callback only: ran dry while playing; fades back in when data returns

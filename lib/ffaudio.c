@@ -415,7 +415,12 @@ static void cmd_skip(AudioPlayer *ap) {
 static void cmd_clear_next(AudioPlayer *ap) {
     lock_mixer(ap);
     TrackState *next = ap->mixer.next;
-    if (next) remove_from_mixer(ap, next);
+    if (next) {
+        remove_from_mixer(ap, next);
+        // Nothing is queued any more: the current track asks again near its end (only when something was removed,
+        // so a callback that clears an empty queue does not get asked again and again)
+        if (ap->mixer.current) ap->mixer.current->prepare_next_sent = false;
+    }
     unlock_mixer(ap);
     if (next) end_track(ap, next, END_SKIPPED);
     update_device_running(ap);
@@ -681,6 +686,7 @@ static void handle_track_msg(AudioPlayer *ap, const Msg *msg) {
             break;
         }
         case MSG_TRACK_SEEKED:
+            t->prepare_next_sent = false; // after a seek back, the end comes again
             note_add((Note){ .type = NOTE_RESTART, .handle = t->handle, .d = msg->d, .b1 = false,
                              .i = SDL_AtomicGet(&t->loops_remaining) });
             break;
@@ -888,8 +894,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
             for (int i = 0; i < ap->n_tracks; i++) {
                 TrackState *t = ap->tracks[i];
                 if (!t->ended && (!msg->str || strcmp(t->filename, msg->str) == 0)) {
-                    SDL_AtomicSet(&t->gain_slow, 1); // a value that arrives while playing fades in slowly
-                    track_update_gain(t);
+                    track_update_gain(t, true); // a value that arrives while playing fades in slowly
                 }
             }
             break;
@@ -899,7 +904,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
             SDL_UnlockMutex(ap->format_mutex);
             for (int i = 0; i < ap->n_tracks; i++)
                 if (!ap->tracks[i]->ended)
-                    track_update_gain(ap->tracks[i]);
+                    track_update_gain(ap->tracks[i], false);
             break;
         case CMD_GET_TRACK_INFO: {
             TrackState *t = track_for_handle(ap, msg->handle);
@@ -909,7 +914,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_GET_TRACK_GAIN: {
             TrackState *t = track_for_handle(ap, msg->handle);
             const bool known = t && !t->ended && SDL_AtomicGet(&t->opened);
-            if (known) *msg->out_double = SDL_AtomicGet(&t->gain_mb) / 100.0;
+            if (known) *msg->out_double = gain_centi_db(SDL_AtomicGet(&t->gain_mb)) / 100.0;
             finish_sync(msg, known ? AU_OK : AU_ERR_NOTHING_TO_DO);
             msg->done = NULL;
             break;
@@ -1588,8 +1593,17 @@ double au_get_audio_duration(void) {
 }
 
 void au_wait_loop(void) {
-    while (audio_player && !SDL_AtomicGet(&audio_player->shutting_down))
+    // au_shutdown() on another thread clears audio_player under the lifecycle lock before it frees the player, so a
+    // player read under that lock is still alive
+    SDL_mutex *lock = lifecycle_mutex();
+    for (;;) {
+        SDL_LockMutex(lock);
+        const AudioPlayer *ap = audio_player;
+        const bool done = !ap || SDL_AtomicGet((SDL_atomic_t *)&ap->shutting_down);
+        SDL_UnlockMutex(lock);
+        if (done) return;
         SDL_Delay(10);
+    }
 }
 
 const char *au_get_version(void) {

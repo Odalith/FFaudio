@@ -28,6 +28,19 @@
   setting), and does not queue an album again while it is queued or being measured; an urgent request moves it to
   the front.
 - A request made while `au_gain_scan_stop()` was running could leave the queue without workers for good.
+- Pausing faded out with `1 - curve(t)` instead of `curve(1 - t)`, the shape crossfades use and `ffaudio.h`
+  describes: equal-power pause fades dipped too early, and logarithmic and exponential ones had each other's shape.
+- After a measurement that did not change a track's gain, the next gain change (e.g. a new preamp) took 2 s
+  instead of 10 ms.
+- `on_prepare_next` comes again after the queued track was removed with `au_clear_next()` or after a seek back;
+  it used to come only once per track.
+- `au_wait_loop()` could read the player while `au_shutdown()` on another thread freed it.
+- `au_media_is_live()` is true only for network streams without a duration, as the player treats them; it was also
+  true for local files with an unknown length, and for files whose length only the audio stream gave.
+- A local file named like a demuxer (`mp3`, `hls`, ...) was opened with that demuxer instead of being probed.
+- Files whose timestamps start late (MPEG-TS and so HLS, which start at 1.4 s or more) reported positions that
+  included that start, while seeks and the duration count from 0: `au_get_audio_play_time()` was too large, end
+  crossfades and `on_prepare_next` came that much early, and a device change jumped ahead by it.
 
 ## 2.1.0 (unreleased)
 

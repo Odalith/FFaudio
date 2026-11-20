@@ -212,15 +212,15 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 // The track's ReplayGain gain: taken as it is with the first samples, then a linear ramp for every change (10 ms, or
 // 2 s when the value arrived after the track started, e.g. a measurement that missed measure_wait_ms)
 static float track_gain_step(Mixer *m, TrackState *t, float *target_out) {
-    const float target = powf(10.0f, (float)SDL_AtomicGet(&t->gain_mb) / 2000.0f);
+    const int packed = SDL_AtomicGet(&t->gain_mb);
+    const float target = powf(10.0f, (float)gain_centi_db(packed) / 2000.0f);
     if (!t->gain_started) {
         t->gain_cur = t->gain_seen = target;
         t->gain_step = 0;
         t->gain_started = true;
-        SDL_AtomicSet(&t->gain_slow, 0);
     }
     if (target != t->gain_seen) {
-        const bool slow = SDL_AtomicSet(&t->gain_slow, 0) != 0;
+        const bool slow = gain_is_slow(packed);
         const float frames = slow ? (float)(LATE_GAIN_RAMP_SECONDS * m->rate) : (float)FFMAX(1, m->vol_ramp_frames);
         t->gain_seen = target;
         t->gain_step = (target - t->gain_cur) / frames;
@@ -334,8 +334,11 @@ static void apply_master_gain(AudioPlayer *ap, const int frames) {
         else if (m->vol_gain > target) m->vol_gain = FFMAX(target, m->vol_gain - step);
 
         if (m->pause_fade.active) {
-            const float p = fade_curve_gain(&m->pause_fade.fade, (float)m->pause_fade.pos / (float)m->pause_fade.len);
-            m->pause_gain = m->pause_from + (m->pause_to - m->pause_from) * p;
+            // Down (pausing), the curve runs backwards like a crossfade's fade-out: curve(1 - t), not 1 - curve(t)
+            const float t = (float)m->pause_fade.pos / (float)m->pause_fade.len;
+            const float from = m->pause_from, to = m->pause_to;
+            m->pause_gain = to < from ? to + (from - to) * fade_curve_gain(&m->pause_fade.fade, 1.0f - t)
+                                      : from + (to - from) * fade_curve_gain(&m->pause_fade.fade, t);
             if (++m->pause_fade.pos >= m->pause_fade.len) {
                 m->pause_fade.active = false;
                 m->pause_gain = m->pause_to;
