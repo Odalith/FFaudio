@@ -27,6 +27,10 @@ The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.
   output format, and the settings as last set, also before the control thread has applied them). It replaces
   `au_get_current_handle()`, `au_get_audio_play_time()`, `au_get_audio_duration()`, `au_get_output_spec()`,
   `au_is_paused()`, `au_is_muted()`, `au_get_audio_volume()`, `au_get_playback_speed()` and `au_get_loop_count()`.
+- No function waits for the control thread any more. `au_track_info()` and `au_track_gain_db()` (were
+  `au_get_track_info()` and `au_get_track_gain_db()`) read what the track has published instead of asking the control
+  thread; they know a track from `AU_EVENT_TRACK_OPENED` (new: its duration and whether it is live or seekable) until
+  `AU_EVENT_TRACK_ENDED`. Calling the API from `on_event` is therefore always safe and never blocks the player.
 
 ### Fixed
 - In applications with a comma-decimal locale (`LC_NUMERIC` such as de_DE or fr_FR, which GTK applications set from

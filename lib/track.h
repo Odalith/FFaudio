@@ -45,8 +45,7 @@ void track_request_seek_percent(TrackState *t, double percent);
 // late: the value arrived while the track may already be playing (a measurement): a change ramps over 2 s
 void track_update_gain(TrackState *t, bool late);
 
-// Any thread: a copy of the track's media info, NULL before the file is open
-AuMediaInfo *track_copy_info(TrackState *t);
+
 
 // Any thread: replace the track's own filters (NULL = none); applied before the next decoded frame
 int track_set_filters(TrackState *t, const char *filters);

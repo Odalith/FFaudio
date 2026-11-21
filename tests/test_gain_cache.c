@@ -164,7 +164,7 @@ static void test_scan(void) {
 static double applied_gain(const int32_t handle) {
     double db = -999;
     for (int i = 0; i < 100; i++) { // the file has to be open before the gain is known
-        if (au_get_track_gain_db(handle, &db) == AU_OK) break;
+        if (au_track_gain_db(handle, &db) == AU_OK) break;
         tc_sleep_ms(10);
     }
     return db;

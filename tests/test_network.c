@@ -220,7 +220,7 @@ static void test_live_stream(void) {
     CHECK(TC_WAIT_FIELD(started, 1, 8000));
     tc_sleep_ms(1500);
     CHECK(tc_status().duration < 0);
-    AuMediaInfo *info = au_get_track_info(0);
+    AuMediaInfo *info = au_track_info(0);
     CHECK(info && au_media_is_live(info) && !au_media_is_seekable(info));
     au_media_info_free(info);
 
@@ -322,7 +322,7 @@ static void test_icy_now_playing(void) {
     for (int i = 0; i < 3 && i < e.meta_count; i++)
         CHECK(e.meta_pos[i] > starts[i] - 0.3 && e.meta_pos[i] < starts[i] + 1.0);              // heard, not read
 
-    AuMediaInfo *info = au_get_track_info(0);
+    AuMediaInfo *info = au_track_info(0);
     CHECK(info != NULL);
     if (info) {
         const char *station = au_media_tag(info, "icy-name"), *title = au_media_tag(info, "title");

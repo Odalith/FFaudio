@@ -376,8 +376,6 @@ typedef enum MsgType {
     CMD_SET_GLOBAL_FILTERS,
     CMD_SET_DOWNMIX,
     CMD_SET_REPLAYGAIN,
-    CMD_GET_TRACK_INFO,
-    CMD_GET_TRACK_GAIN,
     CMD_GAIN_CACHE_CHANGED,
     CMD_UPDATE_TRACK_FILTERS,
     CMD_FILTER_COMMAND,
@@ -404,16 +402,12 @@ typedef struct Msg {
     AuReplayGainConfig replaygain;
     AuReplayGainInfo replaygain_override;
     bool has_replaygain_override;
-    void **out_ptr;                 // synchronous queries
-    double *out_double;
     int64_t i64;
     double d;
     bool b;
     int32_t level;
     int64_t request;
-    // Synchronous commands
-    SDL_sem *done;
-    int32_t *result;
+    SDL_sem *done;                  // CMD_SHUTDOWN: posted when it is done
     struct Msg *next;
 } Msg;
 
@@ -446,6 +440,15 @@ static inline float atomic_get_float(SDL_atomic_t *a) {
     return v;
 }
 
+// What any thread may read about a track without waiting for the control thread (au_track_info(),
+// au_track_gain_db()), kept in AudioPlayer.pubs under pub_mutex. The mutex is never held while taking another lock.
+typedef struct TrackPub {
+    int32_t handle;
+    bool gain_known;                // the gain below is the one in use
+    double gain_db;
+    AuMediaInfo *info;              // own copy, NULL until the track is open
+} TrackPub;
+
 typedef struct AudioPlayer {
     // ---- configuration ----
     SDL_atomic_t volume;                // linear gain 0..1, a float (atomic_get_float())
@@ -460,6 +463,11 @@ typedef struct AudioPlayer {
     FadeCurve play_curve, skip_curve, stop_curve, pause_curve; // control thread: its curves, sampled when set
     bool use_soxr;
     int32_t filter_nbthreads;
+
+    // ---- published track state (TrackPub) ----
+    SDL_mutex *pub_mutex;
+    TrackPub *pubs;
+    int32_t n_pubs, cap_pubs;
 
     // ---- events ----
     AuEventFn on_event;                 // NULL = queued for au_poll_event() (lib/events.c)
@@ -527,5 +535,8 @@ typedef struct AudioPlayer {
 // Shared helpers implemented in ffaudio.c
 void ff_log(enum AU_LOG_LEVEL level, const char *fmt, ...);
 void ff_post_track_msg(MsgType type, int32_t handle, double d);
+// Publish a track's info (copied) or gain for au_track_info() / au_track_gain_db(); any thread
+void ff_publish_info(struct AudioPlayer *ap, int32_t handle, const AuMediaInfo *info);
+void ff_publish_gain(struct AudioPlayer *ap, int32_t handle, double gain_db);
 
 #endif //FFAUDIO_GLOBALS_H

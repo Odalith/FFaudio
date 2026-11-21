@@ -1,6 +1,6 @@
 /*
  * Metadata tests: au_probe() without a player, tags, track/disc numbers, ReplayGain / R128 parsing,
- * and au_get_track_info() for a playing track.
+ * and au_track_info() for a playing track.
  */
 #include "test_common.h"
 #include "../lib/ffaudio_loudness.h"
@@ -108,36 +108,42 @@ static void test_probe_untagged_and_bad(void) {
 
 static void test_track_info_while_playing(void) {
     REQUIRE(tc_init_player(0) == 0);
-    CHECK(au_get_track_info(0) == NULL); // nothing playing
+    CHECK(au_track_info(0) == NULL); // nothing playing
     const int32_t h = au_play(fx("rg_long.flac"), NULL);
-    tc_sleep_ms(500);
+    CHECK(TC_WAIT_FIELD(opened, 1, 5000));               // no waiting call: the event says when
+    TcEvents e = tc_snapshot();
+    CHECK(e.opened_with_info == 1 && fabs(e.opened_duration - 3.0) < 0.06);
+    CHECK(TC_WAIT_FIELD(started, 1, 5000));              // handle 0 is the audible track
 
-    AuMediaInfo *info = au_get_track_info(0);
+    AuMediaInfo *info = au_track_info(0);
     CHECK(info != NULL);
     if (info) {
         CHECK_TAG(info, "title", "Test Song");
         CHECK(fabs(au_media_duration(info) - 3.0) < 0.06);
         au_media_info_free(info);
     }
-    info = au_get_track_info(h);
+    info = au_track_info(h);
     CHECK(info != NULL);
     au_media_info_free(info);
-    CHECK(au_get_track_info(h + 1000) == NULL);
+    CHECK(au_track_info(h + 1000) == NULL);
 
     double gain = 99;
-    CHECK(au_get_track_gain_db(h, &gain) == AU_OK && gain == 0.0); // ReplayGain is off by default
+    CHECK(au_track_gain_db(h, &gain) == AU_OK && gain == 0.0); // ReplayGain is off by default
     const AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK };
     CHECK(au_set_replaygain(&rg) == AU_OK);
     tc_sleep_ms(100);
-    CHECK(au_get_track_gain_db(0, &gain) == AU_OK && fabs(gain + 6.0) < 0.01);
-    CHECK(au_get_track_gain_db(h + 1000, &gain) == AU_ERR_NOTHING_TO_DO);
+    CHECK(au_track_gain_db(0, &gain) == AU_OK && fabs(gain + 6.0) < 0.01);
+    CHECK(au_track_gain_db(h + 1000, &gain) == AU_ERR_NOTHING_TO_DO);
 
     const AuReplayGainConfig bad = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 40 };
     CHECK(au_set_replaygain(&bad) == AU_ERR_INVALID_ARGUMENT);
 
     au_stop();
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    CHECK(au_track_info(h) == NULL);                     // gone with the track
+    CHECK(au_track_gain_db(h, &gain) == AU_ERR_NOTHING_TO_DO);
     au_shutdown();
+    CHECK(au_track_info(0) == NULL && au_track_gain_db(0, &gain) == AU_ERR_NOT_INITIALIZED);
 }
 
 /* ---------- non-audio data must fail without running video decoders ---------- */

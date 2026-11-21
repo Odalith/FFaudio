@@ -68,6 +68,9 @@ typedef struct TcEvents {
     int device;
     int devices_changed;
     int device_failed;                 // AU_EVENT_DEVICE with ok = false
+    int opened;                        // AU_EVENT_TRACK_OPENED
+    int opened_with_info;              // ... where au_track_info() already had the track's details
+    double opened_duration;            // data.opened.duration of the last one
     int buffering_on, buffering_off;   // on_buffering transitions (progress calls not counted)
     int meta_count;                    // on_stream_metadata calls; the first 8 are kept, with the play time then
     char meta_title[8][96], meta_artist[8][96];
@@ -185,6 +188,17 @@ static void tc_event_cb(const AuEvent *e, void *ud) {
         case AU_EVENT_DEVICES_CHANGED:
             tc_bump(&tc_ev.devices_changed);
             break;
+        case AU_EVENT_TRACK_OPENED: {
+            AuMediaInfo *info = au_track_info(e->handle);   // the event promises it is there now
+            SDL_LockMutex(tc_mutex);
+            tc_ev.opened++;
+            if (info) tc_ev.opened_with_info++;
+            tc_ev.opened_duration = e->data.opened.duration;
+            SDL_CondBroadcast(tc_cond);
+            SDL_UnlockMutex(tc_mutex);
+            au_media_info_free(info);
+            break;
+        }
         case AU_EVENT_DEVICE:
             if (!e->data.device.ok) tc_bump(&tc_ev.device_failed);
             else tc_bump(&tc_ev.device);

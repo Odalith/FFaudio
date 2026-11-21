@@ -253,7 +253,7 @@ static void test_configure_and_stop(void) {
 static double gain_when_open(const int32_t handle) {
     double db = -999;
     for (int i = 0; i < 200; i++) {
-        if (au_get_track_gain_db(handle, &db) == AU_OK) break;
+        if (au_track_gain_db(handle, &db) == AU_OK) break;
         SDL_Delay(5);
     }
     return db;
@@ -287,7 +287,7 @@ static void test_player_measures_missing(void) {
     double later = -999;
     for (int i = 0; i < 100 && fabs(later - 5.0) > 0.1; i++) {
         tc_sleep_ms(20);
-        au_get_track_gain_db(h, &later);
+        au_track_gain_db(h, &later);
     }
     CHECK(fabs(later - 5.0) < 0.1);
 

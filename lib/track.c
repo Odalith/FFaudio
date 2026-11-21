@@ -464,6 +464,7 @@ void track_update_gain(TrackState *t, const bool late) {
     }
     const double db = replaygain_gain_db(&cfg, &rg);
     SDL_AtomicSet(&t->gain_mb, gain_pack((int)lrint(db * 100.0), late));
+    ff_publish_gain(ap, t->handle, gain_centi_db(SDL_AtomicGet(&t->gain_mb)) / 100.0);
 }
 
 #define DEFAULT_MEASURE_WAIT_MS 500
@@ -497,13 +498,6 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
         default:
             break;
     }
-}
-
-AuMediaInfo *track_copy_info(TrackState *t) {
-    SDL_LockMutex(t->seek_mutex);
-    AuMediaInfo *copy = media_info_copy(t->info);
-    SDL_UnlockMutex(t->seek_mutex);
-    return copy;
 }
 
 int track_set_filters(TrackState *t, const char *filters) {
@@ -851,6 +845,7 @@ static int open_track(TrackState *t) {
     SDL_LockMutex(t->seek_mutex);
     t->info = info;
     SDL_UnlockMutex(t->seek_mutex);
+    ff_publish_info(t->ap, t->handle, info);   // before MSG_TRACK_OPENED: AU_EVENT_TRACK_OPENED promises it
     wait_for_measurement(t, info);
     track_update_gain(t, false);
 
@@ -1395,6 +1390,7 @@ StreamMeta *track_take_stream_meta(TrackState *t, const double position) {
         if (t->info) {
             av_dict_set(&t->info->tags, "title", m->title, 0);
             av_dict_set(&t->info->tags, "artist", m->artist, 0);   // NULL removes it
+            ff_publish_info(t->ap, t->handle, t->info);
         }
     }
     else {

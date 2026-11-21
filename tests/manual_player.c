@@ -177,9 +177,9 @@ static void on_eof(bool skip, bool error, int32_t handle, void *ud) {
 static void on_started(int32_t handle, void *ud) {
     (void)ud;
     clear_queued_if(handle);
-    AuMediaInfo *info = au_get_track_info(handle);
+    AuMediaInfo *info = au_track_info(handle);
     double gain = 0;
-    const bool has_gain = au_get_track_gain_db(handle, &gain) == AU_OK && gain != 0;
+    const bool has_gain = au_track_gain_db(handle, &gain) == AU_OK && gain != 0;
     bool cached = false;
     if (info) {
         const char *artist = au_media_tag(info, "artist"), *title = au_media_tag(info, "title");

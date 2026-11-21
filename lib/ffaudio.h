@@ -80,6 +80,7 @@ extern "C" {
         AU_EVENT_LOG = 0,          // data.log: a message from the library
         AU_EVENT_DEVICE,           // data.device: the output device was opened (ok), or could not be (!ok)
         AU_EVENT_DEVICES_CHANGED,  // an output device was added or removed: au_list_devices() has the new list
+        AU_EVENT_TRACK_OPENED,     // data.opened: the track is open; au_track_info() has its details now
         AU_EVENT_TRACK_STARTED,    // the track became the audible one (start, gapless/crossfade transition, skip)
         AU_EVENT_TRACK_ENDED,      // data.ended: the track left the player; exactly once for every handle
         AU_EVENT_RESTARTED,        // data.restarted: the current track restarted, after a seek or a loop
@@ -107,6 +108,8 @@ extern "C" {
             // fell_back: the chosen device could not be opened, the system default was opened instead.
             // !ok: no device could be opened (name: the one asked for, NULL = the system default)
             struct { bool ok; bool fell_back; const char *name; int32_t sample_rate, channels; } device;
+            // duration: seconds, -1 = unknown; live: a stream with no end (no duration, no seeking)
+            struct { double duration; bool live, seekable; } opened;
             struct { AU_END reason; } ended;
             // position in seconds; from_loop: a loop started (loops_remaining after it), otherwise a seek
             struct { double position; bool from_loop; int32_t loops_remaining; } restarted;
@@ -407,9 +410,9 @@ extern "C" {
     // right away (with a short ramp) and to every later track.
     DLL_EXPORT int au_set_replaygain(const AuReplayGainConfig *config);
 
-    // The ReplayGain gain ffaudio applies to a track (handle 0 = the current track), in dB.
-    // AU_ERR_NOTHING_TO_DO when the track is unknown or not open yet.
-    DLL_EXPORT int au_get_track_gain_db(int32_t handle, double *out_gain_db);
+    // The ReplayGain gain ffaudio applies to a track (handle 0 = the current track), in dB. Never waits.
+    // AU_ERR_NOTHING_TO_DO when the track is unknown, has ended, or is not open yet (AU_EVENT_TRACK_OPENED).
+    DLL_EXPORT int au_track_gain_db(int32_t handle, double *out_db);
 
     //+-----------------------------------------------------+
     //| ReplayGain cache                                    |
@@ -480,9 +483,10 @@ extern "C" {
     // any thread; it blocks while the file is opened. Free the result with au_media_info_free().
     DLL_EXPORT AuMediaInfo *au_probe(const char *filename, int *out_error);
 
-    // Information about a playing or queued track (handle 0 = the current track); NULL when the track is
-    // unknown or not open yet (see AU_EVENT_DURATION). Free the result with au_media_info_free().
-    DLL_EXPORT AuMediaInfo *au_get_track_info(int32_t handle);
+    // Information about a queued or playing track (handle 0 = the current track), including "now playing" changes
+    // of a stream. Never waits. NULL when the track is unknown, has ended, or is not open yet
+    // (AU_EVENT_TRACK_OPENED). Free the result with au_media_info_free().
+    DLL_EXPORT AuMediaInfo *au_track_info(int32_t handle);
 
     DLL_EXPORT void au_media_info_free(AuMediaInfo *info);
 

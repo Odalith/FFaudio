@@ -232,7 +232,7 @@ static void on_started(int32_t handle, void *ud) {
     atomic_fetch_add(&n_started, 1);
     atomic_store(&last_started_at, elapsed_s());
     // An application looks at the track's details when it starts
-    AuMediaInfo *info = au_get_track_info(handle);
+    AuMediaInfo *info = au_track_info(handle);
     if (info) {
         const char *k, *v;
         for (int i = 0; au_media_tag_at(info, i, &k, &v); i++) {}
@@ -462,7 +462,7 @@ static void *analysis_thread(void *arg) {
     return NULL;
 }
 
-// The main loop calls blocking API functions (e.g. au_get_track_info): if one of them stops returning, that is a
+// The main loop calls API functions all the time (none of them should ever wait): if one stops returning, that is a
 // deadlock, and the watchdog says where it was before it aborts
 static void *watchdog_thread(void *arg) {
     (void)arg;
@@ -640,10 +640,10 @@ static void one_action(void) {
     }
     else if (r < 860) {
         ACTION("track_info");
-        AuMediaInfo *info = au_get_track_info(0);
+        AuMediaInfo *info = au_track_info(0);
         au_media_info_free(info);
         double g;
-        au_get_track_gain_db(0, &g);
+        au_track_gain_db(0, &g);
         (void)status();
     }
     else if (r < 870) {
