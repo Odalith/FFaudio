@@ -48,6 +48,9 @@
   audio thread throughout the fade; `custom_user` only has to live until that call has been processed.
 
 ### Fixed
+- With real SDL2 (as on Ubuntu and Debian; SDL3's sdl2-compat was not affected), a synchronous call from a callback
+  (`au_configure_audio_device()`, `au_get_track_info()`, `au_get_track_gain_db()`) hung the player for good: the
+  control thread did not recognise itself, so the call waited for the thread that was making it.
 - A track replaced with a fade too short for one sample, or before `au_configure_audio_device()` (two
   `au_play_audio()` calls were enough), was never ended: its threads and file stayed open until shutdown and its
   `on_eof` never came. Such fades are now cuts.

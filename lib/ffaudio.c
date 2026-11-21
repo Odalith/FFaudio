@@ -988,6 +988,11 @@ static void shutdown_tracks(AudioPlayer *ap) {
 static int control_thread(void *arg) {
     AudioPlayer *ap = arg;
     Msg *shutdown_msg = NULL;
+    // Recognising itself is what lets callbacks call the API inline. SDL2 sets the id SDL_GetThreadID() returns only
+    // when the thread runs, so au_initialize() usually read 0: every synchronous call from a callback then waited for
+    // the thread making it.
+    ap->control_thread_id = SDL_ThreadID();
+    SDL_SemPost(ap->started_sem);
 
     while (!shutdown_msg) {
         SDL_SemWaitTimeout(ap->wake_sem, ap->n_tracks || ap->n_dying ? CONTROL_PLAYING_MS : CONTROL_IDLE_MS);
@@ -1088,8 +1093,9 @@ int au_initialize(const InitializeConfig* config) {
     ap->format_cond = SDL_CreateCond();
     ap->status_mutex = SDL_CreateMutex();
     ap->ring_pool_mutex = SDL_CreateMutex();
+    ap->started_sem = SDL_CreateSemaphore(0);
     if (!ap->msg_mutex || !ap->wake_sem || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
-        !ap->ring_pool_mutex)
+        !ap->ring_pool_mutex || !ap->started_sem)
         goto fail_sync;
     publish_idle_status(ap);
 
@@ -1142,7 +1148,7 @@ int au_initialize(const InitializeConfig* config) {
         SDL_QuitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS);
         goto fail_sync;
     }
-    ap->control_thread_id = SDL_GetThreadID(ap->control_thread);
+    SDL_SemWait(ap->started_sem); // control_thread_id is set
 
     ff_log(AU_LOG_INFO, "ffaudio %s initialized (audio driver: %s, resampler: %s)", au_get_version(),
            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "none", ap->use_soxr ? "soxr" : "swr");
@@ -1155,6 +1161,7 @@ fail_sync:
     SDL_DestroyCond(ap->format_cond);
     SDL_DestroyMutex(ap->status_mutex);
     SDL_DestroyMutex(ap->ring_pool_mutex);
+    SDL_DestroySemaphore(ap->started_sem);
     av_free(ap);
     return AU_ERR_SDL;
 }
@@ -1208,6 +1215,7 @@ void au_shutdown(void) {
     SDL_DestroyMutex(ap->status_mutex);
     ring_storage_free_all(ap); // the tracks gave their storage back when they were destroyed
     SDL_DestroyMutex(ap->ring_pool_mutex);
+    SDL_DestroySemaphore(ap->started_sem);
     av_free(ap);
 
     avformat_network_deinit();
