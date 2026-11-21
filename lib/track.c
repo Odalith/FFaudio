@@ -27,6 +27,7 @@
 #include "track.h"
 #include "metadata.h"
 #include "probe.h"
+#include "numbers.h"
 #include "network.h"
 #include "gain_cache.h"
 #include "output.h"
@@ -732,6 +733,7 @@ static int local_get_packet(void *ctx, AVPacket *pkt, int *serial) {
 
 // Network streams: read ahead into the packet queue, so the worker keeps decoding while the connection stalls
 static int net_reader(void *arg) {
+    ff_thread_use_c_locale();
     TrackState *t = arg;
     AVFormatContext *ic = t->ic;
     AVPacket *pkt = av_packet_alloc();
@@ -874,6 +876,7 @@ static int open_track(TrackState *t) {
 
 // The track's thread: open, then decode (and for local files read) until the track is destroyed
 static int track_thread(void *arg) {
+    ff_thread_use_c_locale();
     TrackState *t = arg;
     if (open_track(t) < 0) {
         read_thread_fail(t);
@@ -1143,7 +1146,7 @@ static int apply_speed(TrackState *t, AVFrame *spd, AVFrame *tmp, const int seri
     const bool want = fabs(speed - 1.0) > 1e-6;
     if (want && t->speed_chain.graph && keep_pitch && t->speed_keep_pitch_cur) {
         char arg[32];
-        snprintf(arg, sizeof(arg), "%.9f", sqrt(speed));
+        ff_format_number(arg, sizeof(arg), sqrt(speed), 9, 'f');
         if (avfilter_graph_send_command(t->speed_chain.graph, SPEED_FILTER_1, "tempo", arg, NULL, 0, 0) >= 0 &&
             avfilter_graph_send_command(t->speed_chain.graph, SPEED_FILTER_2, "tempo", arg, NULL, 0, 0) >= 0) {
             // A new segment starts where the old one got to

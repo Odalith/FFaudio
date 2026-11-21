@@ -102,6 +102,8 @@ static void test_locale_independent(void) {
     AuFilterBuilder *fb = au_fb_create();
     CHECK(au_fb_add_volume_db(fb, -6.5) == AU_OK);
     CHECK_STR(au_fb_peek(fb), "volume=-6.5dB");
+    CHECK(au_validate_filtergraph(au_fb_peek(fb)) == AU_OK);   // FFmpeg reads it too (strtod: locale-dependent)
+    CHECK(au_validate_filtergraph("volume=0.5,atempo=1.25") == AU_OK);
     au_fb_free(fb);
     setlocale(LC_NUMERIC, "C");
 }

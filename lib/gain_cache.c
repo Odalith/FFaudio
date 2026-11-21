@@ -37,7 +37,6 @@
  */
 
 #include <errno.h>
-#include <locale.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #ifndef _WIN32
@@ -53,6 +52,7 @@
 
 #include "gain_cache.h"
 #include "once.h"
+#include "numbers.h"
 #include "ffaudio_loudness.h"
 #include "SDL2/SDL_atomic.h"
 #include "SDL2/SDL_filesystem.h"
@@ -221,36 +221,23 @@ static char *default_dir(void) {
 //| Record encoding                                     |
 //+-----------------------------------------------------+
 
-// "%.6f" with '.' whatever the C locale says
+// "%.6f" in the C locale, "-" when missing
 static void put_number(AVBPrint *bp, const bool has, const double v) {
     if (!has || !isfinite(v)) {
         av_bprint_chars(bp, '-', 1);
         return;
     }
     char tmp[64];
-    snprintf(tmp, sizeof(tmp), "%.6f", v);
-    const struct lconv *lc = localeconv();
-    const char dp = (lc && lc->decimal_point && lc->decimal_point[0]) ? lc->decimal_point[0] : '.';
-    for (char *c = tmp; *c; c++)
-        if (*c == dp) *c = '.';
-    av_bprintf(bp, "%s", tmp);
+    av_bprintf(bp, "%s", ff_format_number(tmp, sizeof(tmp), v, 6, 'f'));
 }
 
 static bool parse_number(const char *s, bool *has, double *v) {
     *has = false;
     *v = 0;
     if (!strcmp(s, "-")) return true;
-    double sign = 1, value = 0, scale = 0.1;
-    if (*s == '-' || *s == '+') { if (*s == '-') sign = -1; s++; }
-    bool digits = false;
-    while (*s >= '0' && *s <= '9') { value = value * 10 + (*s++ - '0'); digits = true; }
-    if (*s == '.') {
-        s++;
-        while (*s >= '0' && *s <= '9') { value += (*s++ - '0') * scale; scale *= 0.1; digits = true; }
-    }
-    if (*s || !digits) return false;
+    const char *end;
+    if (!ff_parse_number(s, &end, v, false) || *end) return false;
     *has = true;
-    *v = sign * value;
     return true;
 }
 

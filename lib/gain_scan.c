@@ -26,6 +26,7 @@
 
 #include "gain_cache.h"
 #include "once.h"
+#include "numbers.h"
 #include "loudness.h"
 #include "network.h"
 
@@ -393,6 +394,7 @@ end:
 }
 
 static int worker_main(void *arg) {
+    ff_thread_use_c_locale();
     const int index = (int)(intptr_t)arg;
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
     AuLoudnessScanner *scanner = au_loudness_scanner_create(NULL); // a few hundred KB, kept for every file

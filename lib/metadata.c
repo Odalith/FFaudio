@@ -20,6 +20,7 @@
 #include <ctype.h>
 #include "metadata.h"
 #include "probe.h"
+#include "numbers.h"
 #include "network.h"
 
 // R128 gains are relative to -23 LUFS, ReplayGain 2.0 to -18 LUFS
@@ -29,26 +30,11 @@
 //| Parsing helpers (locale independent)                |
 //+-----------------------------------------------------+
 
-// Parse a decimal number such as "-6.20 dB", "+3", "0.988". Returns false if there is no number.
+// A decimal number such as "-6.20 dB", "-6,20 dB" (some taggers write the locale's comma), "+3", "0.988"
 static bool parse_decimal(const char *s, double *out) {
     if (!s) return false;
     while (*s && isspace((unsigned char)*s)) s++;
-    double sign = 1.0;
-    if (*s == '+' || *s == '-') {
-        if (*s == '-') sign = -1.0;
-        s++;
-    }
-    double v = 0.0;
-    bool digits = false;
-    while (*s >= '0' && *s <= '9') { v = v * 10.0 + (*s - '0'); s++; digits = true; }
-    if (*s == '.' || *s == ',') {
-        s++;
-        double scale = 0.1;
-        while (*s >= '0' && *s <= '9') { v += (*s - '0') * scale; scale *= 0.1; s++; digits = true; }
-    }
-    if (!digits || !isfinite(v)) return false;
-    *out = sign * v;
-    return true;
+    return ff_parse_number(s, NULL, out, true);
 }
 
 // Parse "3", "3/12" into number and total (0 when missing)

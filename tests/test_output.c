@@ -3,6 +3,7 @@
  * sample by sample (gapless joins, crossfade length, fades, volume ramps, filters).
  */
 #include "test_common.h"
+#include <locale.h>
 #include <math.h>
 #ifndef _WIN32
 #include <sys/stat.h> // mkfifo
@@ -224,9 +225,9 @@ static void test_volume_ramp(void) {
     free(c.samples);
 }
 
-static void test_user_filter(void) {
-    // volume=0.5 halves the level: compare against the same file without the filter
-    start_capture("filter");
+// volume=0.5 halves the level: compare against the same file without the filter
+static void check_user_filter(const char *name) {
+    start_capture(name);
     const PlayAudioConfig plain = {0};
     const PlayAudioConfig halved = { .av_filtergraph = "volume=0.5" };
     au_play_audio(fx("join_a.flac"), &plain);
@@ -240,9 +241,45 @@ static void test_user_filter(void) {
     const size_t mid = first + (size_t)c.rate; // join point
     for (size_t i = first + c.rate / 10; i < mid - c.rate / 10; i++) p1 = fmaxf(p1, frame_peak(&c, i));
     for (size_t i = mid + c.rate / 10; i < last - c.rate / 10; i++) p2 = fmaxf(p2, frame_peak(&c, i));
-    printf("   filter: peak %.3f then %.3f\n", p1, p2);
-    CHECK(fabsf(p2 / p1 - 0.5f) < 0.02f);
+    printf("   %s: peak %.3f then %.3f\n", name, p1, p2);
+    CHECK(p1 > 0 && fabsf(p2 / p1 - 0.5f) < 0.02f);
     free(c.samples);
+}
+
+static void test_user_filter(void) {
+    check_user_filter("filter");
+}
+
+// An application with a comma-decimal locale (GTK applications set the user's): FFmpeg reads "0.5" with strtod(),
+// so the tracks' threads must not use that locale
+static void test_user_filter_comma_locale(void) {
+    const char *locales[] = { "de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "nl_NL.UTF-8" };
+    const char *set = NULL;
+    for (size_t i = 0; i < sizeof(locales) / sizeof(locales[0]) && !set; i++)
+        set = setlocale(LC_NUMERIC, locales[i]);
+    if (!set) {
+        printf("   (no comma-decimal locale installed, skipped)\n");
+        return;
+    }
+    CHECK(au_validate_filtergraph("volume=0.5") == AU_OK);   // parsed on this thread
+    check_user_filter("filter, comma locale");
+
+    // The downmix check (this thread) and a speed stage with "tempo=0.866025404" (the track's thread)
+    start_capture("speed, comma locale");
+    CHECK(au_set_downmix(AU_DOWNMIX_CUSTOM, "pan=stereo|c0=0.5*FL+0.5*FC|c1=0.5*FR+0.5*FC") == AU_OK);
+    CHECK(au_set_downmix(AU_DOWNMIX_FULL_LEVEL, NULL) == AU_OK);
+    CHECK(au_set_playback_speed(1.5, true) == AU_OK);
+    au_play_audio(fx("join_a.flac"), NULL);
+    CHECK(TC_WAIT_FIELD(eof, 1, 5000));
+    CHECK(tc_snapshot().eof_error == 0);
+    Capture c = stop_capture();
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const double seconds = (double)(last - first) / c.rate;
+    printf("   1 s at 1.5x: %.3f s audible\n", seconds);
+    CHECK(seconds > 0.6 && seconds < 0.75);
+    free(c.samples);
+    setlocale(LC_NUMERIC, "C");
 }
 
 // Audible length of a two-track transition, plus sanity checks shared by the crossfade tests
@@ -842,6 +879,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_fade_out_on_stop);
     RUN_TEST(test_volume_ramp);
     RUN_TEST(test_user_filter);
+    RUN_TEST(test_user_filter_comma_locale);
     RUN_TEST(test_crossfade_on_skip);
     RUN_TEST(test_crossfade_on_play);
     RUN_TEST(test_pause_fade);

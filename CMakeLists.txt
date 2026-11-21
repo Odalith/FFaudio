@@ -68,6 +68,8 @@ add_library(ffaudio
         lib/gain_scan.c
         lib/network.c
         lib/input.c
+        lib/numbers.c
+        lib/numbers.h
         lib/network.h
         lib/once.h
         lib/metadata.h

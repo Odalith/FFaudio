@@ -1,5 +1,16 @@
 # Changelog
 
+## 3.0.0 (unreleased)
+
+### Fixed
+- In applications with a comma-decimal locale (`LC_NUMERIC` such as de_DE or fr_FR, which GTK applications set from
+  the user's settings), filter strings with decimals failed: FFmpeg reads option values with `strtod()`, so
+  `volume=0.5`, the filter builder's strings, `au_set_downmix()` matrices and `au_validate_filtergraph()` were all
+  rejected, and a track with such a filter played silence. ffaudio's threads now use the C locale, and the calls that
+  parse filter strings on the application's thread switch to it while they do.
+- `au_probe()` now opens inputs like the player does: MPEG-TS programs announced late are found, and network inputs
+  get the reconnect settings.
+
 ## 2.1.0 (2026-11-20)
 
 ### Added

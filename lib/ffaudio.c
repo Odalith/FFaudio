@@ -39,6 +39,7 @@
 #include "metadata.h"
 #include "gain_cache.h"
 #include "once.h"
+#include "numbers.h"
 
 
 // The control thread sleeps until a message or a mixer event wakes it, or for this long: while tracks are loaded
@@ -986,6 +987,7 @@ static void shutdown_tracks(AudioPlayer *ap) {
 }
 
 static int control_thread(void *arg) {
+    ff_thread_use_c_locale();
     AudioPlayer *ap = arg;
     Msg *shutdown_msg = NULL;
     // Recognising itself is what lets callbacks call the API inline. SDL2 sets the id SDL_GetThreadID() returns only
@@ -1455,7 +1457,9 @@ int au_validate_filtergraph(const char *filters) {
         SDL_UnlockMutex(ap->format_mutex);
     }
     FilterChain c = {0};
+    const FfLocale saved = ff_c_locale_begin(); // parsed on the caller's thread
     const int ret = build_user_graph(&c, filters, NULL, rate, &layout, 0);
+    ff_c_locale_end(saved);
     free_filter_chain(&c);
     av_channel_layout_uninit(&layout);
     return ret < 0 ? AU_ERR_INVALID_ARGUMENT : AU_OK;

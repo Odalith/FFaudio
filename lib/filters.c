@@ -27,6 +27,7 @@
 #include <libavfilter/avfilter.h>
 
 #include "ffaudio_filters.h"
+#include "numbers.h"
 
 #define NAME_MAX_LEN 32
 
@@ -77,15 +78,9 @@ static int require(AuFilterBuilder *fb, const char *filter) {
     return AU_ERR_UNSUPPORTED;
 }
 
-// Locale independent "%.6g"
+// "%.6g" in the C locale, whatever the application set
 static const char *num(char out[32], const double v) {
-    snprintf(out, 32, "%.6g", v);
-    const struct lconv *lc = localeconv();
-    const char dp = (lc && lc->decimal_point && lc->decimal_point[0]) ? lc->decimal_point[0] : '.';
-    if (dp != '.')
-        for (char *p = out; *p; p++)
-            if (*p == dp) *p = '.';
-    return out;
+    return ff_format_number(out, 32, v, 6, 'g');
 }
 
 static bool in_range(const double v, const double lo, const double hi) {
@@ -371,37 +366,6 @@ int au_fb_add_parametric_eq(AuFilterBuilder *fb, const AuParametricEq *eq) {
     return finish(fb, add_parametric_eq(fb, eq));
 }
 
-// Locale independent decimal number ("-3.25", "+1e3", ".5"). Returns false when there is none.
-static bool parse_number(const char *p, const char **end, double *out) {
-    const char *s = p;
-    double sign = 1;
-    if (*s == '+' || *s == '-') { if (*s == '-') sign = -1; s++; }
-    double v = 0;
-    bool digits = false;
-    while (isdigit((unsigned char)*s)) { v = v * 10 + (*s - '0'); s++; digits = true; }
-    if (*s == '.') { // never ',': "1,000" must not become 1
-        double scale = 0.1;
-        const char *d = s + 1;
-        bool frac = false;
-        while (isdigit((unsigned char)*d)) { v += (*d - '0') * scale; scale /= 10; d++; frac = true; }
-        if (frac || digits) { s = d; digits = digits || frac; }
-    }
-    if (!digits) return false;
-    if (*s == 'e' || *s == 'E') {
-        const char *e = s + 1;
-        int esign = 1, ev = 0;
-        if (*e == '+' || *e == '-') { if (*e == '-') esign = -1; e++; }
-        if (isdigit((unsigned char)*e)) {
-            while (isdigit((unsigned char)*e)) { ev = ev * 10 + (*e - '0'); if (ev > 400) ev = 400; e++; }
-            v *= pow(10.0, esign * ev);
-            s = e;
-        }
-    }
-    *out = sign * v;
-    *end = s;
-    return true;
-}
-
 // Next whitespace-separated token of a line: [*p, return value)
 static const char *next_token(const char **p, const char *line_end) {
     while (*p < line_end && isspace((unsigned char)**p)) (*p)++;
@@ -420,7 +384,7 @@ static bool token_is(const char *tok, const char *tok_end, const char *word) {
 
 static bool token_number(const char *tok, const char *tok_end, double *out) {
     const char *end;
-    return tok < tok_end && parse_number(tok, &end, out) && end == tok_end;
+    return tok < tok_end && ff_parse_number(tok, &end, out, false) && end == tok_end; // never ',': "1,000" is not 1
 }
 
 #define PARSE_FAIL(...) do { if (error && error_size) snprintf(error, error_size, __VA_ARGS__); return AU_ERR_INVALID_ARGUMENT; } while (0)
