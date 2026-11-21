@@ -257,6 +257,7 @@ typedef struct TrackState {
     double play_clock;                  // SDL callback: file time played
     int clock_serial;                   // SDL callback: the serial play_clock counts for
     bool icy;                           // read thread: the server sends ICY metadata (icy-metaint)
+    double icy_next_check;              // read thread: read_clock of the next look at the ICY title
     bool demux_eof;                     // read thread only
 
     // ---- status published by the worker threads ----

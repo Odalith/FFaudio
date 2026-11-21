@@ -455,8 +455,7 @@ static int request(const char *const *paths, const int count, const bool urgent,
         if (all_done) return 0;
     }
 
-    char ua[8];
-    const bool measure_streams = network_config(ua, sizeof(ua)).measure_streams;
+    const bool measure_streams = network_config(NULL, 0).measure_streams;
     if (album && !measure_streams) {
         // Measuring would download whole files, and an album measured without them would be wrong
         for (int i = 0; i < count; i++)

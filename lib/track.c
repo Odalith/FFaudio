@@ -134,7 +134,10 @@ static void check_stream_metadata(TrackState *t, AVFormatContext *ic, const AVPa
     if (d > 0 && d < 10) t->read_clock += d;
     t->last_pkt_ts = ts;
 
-    if (t->icy) { // every packet: while the reader runs ahead, packets are far apart in reading time
+    // Every quarter second of file time (the position matters, not the reading time: the reader runs far ahead); the
+    // option is a copy, allocated on every call
+    if (t->icy && t->read_clock >= t->icy_next_check) {
+        t->icy_next_check = t->read_clock + 0.25;
         uint8_t *icy = NULL;
         if (av_opt_get(ic->pb, "icy_metadata_packet", AV_OPT_SEARCH_CHILDREN, &icy) >= 0 && icy && icy[0] &&
             (!t->last_icy || strcmp((char *)icy, t->last_icy) != 0)) {
@@ -270,8 +273,7 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     t->clock_serial = -1;
     t->last_pkt_ts = AV_NOPTS_VALUE;
     if ((t->network = au_is_network_url(filename))) {
-        char ua[8];
-        const AuNetworkConfig nc = network_config(ua, sizeof(ua));
+        const AuNetworkConfig nc = network_config(NULL, 0);
         t->buffer_target_s = nc.buffer_seconds;
         t->max_buffer_s = nc.max_buffer_seconds;
         SDL_AtomicSet(&t->buffering, 1);   // nothing plays until the first buffer_seconds are in
@@ -453,8 +455,7 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
     SDL_UnlockMutex(ap->format_mutex);
 
     if (cfg.mode == AU_REPLAYGAIN_OFF || !cfg.measure_missing || t->has_replaygain_override) return;
-    char ua[8];
-    if (au_is_network_url(t->filename) && !network_config(ua, sizeof(ua)).measure_streams) return; // a download
+    if (au_is_network_url(t->filename) && !network_config(NULL, 0).measure_streams) return; // a download
     const AuReplayGainInfo tags = au_media_replaygain(info);
     if (tags.has_track_gain || tags.has_album_gain) return;
     if (gain_cache_lookup(t->filename, NULL)) return;
@@ -654,6 +655,7 @@ static void process_seek_request(TrackState *t) {
     t->stream_meta = NULL;
     SDL_UnlockMutex(t->seek_mutex);
     t->read_clock = 0;   // the mixer starts its play_clock again with the new serial
+    t->icy_next_check = 0;
     t->last_pkt_ts = AV_NOPTS_VALUE;
     t->demux_eof = false;
     SDL_AtomicSet(&t->read_ended, 0);
