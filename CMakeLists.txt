@@ -67,6 +67,7 @@ add_library(ffaudio
         lib/gain_cache.h
         lib/gain_scan.c
         lib/network.c
+        lib/input.c
         lib/network.h
         lib/once.h
         lib/metadata.h

@@ -398,7 +398,6 @@ void track_destroy(TrackState *t) {
     SDL_DestroyMutex(t->ring_mutex);
     if (t->audio_queue.mutex) packet_queue_destroy(&t->audio_queue);
     av_channel_layout_uninit(&t->audio_filter_src.ch_layout);
-    av_dict_free(&t->format_opts_n);
     free_stream_meta(t->stream_meta);
     av_free(t->last_icy);
     av_free(t->last_meta);
@@ -550,36 +549,16 @@ static int queue_get_packet(void *ctx, AVPacket *pkt, int *serial) {
 // Open the decoder for the stream (no thread: the worker runs it)
 static int stream_component_open(TrackState *t, const int stream_index) {
     AVFormatContext *ic = t->ic;
-    AVDictionary *opts = NULL;
-    int ret;
-
-    if (stream_index < 0 || stream_index >= (int)ic->nb_streams)
-        return AVERROR(EINVAL);
-
-    AVCodecContext *avctx = avcodec_alloc_context3(NULL);
-    if (!avctx)
-        return AVERROR(ENOMEM);
-
-    if ((ret = avcodec_parameters_to_context(avctx, ic->streams[stream_index]->codecpar)) < 0)
-        goto fail;
-    avctx->pkt_timebase = ic->streams[stream_index]->time_base;
-
-    const AVCodec *codec = avcodec_find_decoder(avctx->codec_id);
-    if (!codec) {
-        ff_log(AU_LOG_WARNING, "No decoder could be found for codec %s", avcodec_get_name(avctx->codec_id));
-        ret = AVERROR(EINVAL);
-        goto fail;
-    }
-    avctx->codec_id = codec->id;
-
+    AVCodecContext *avctx = NULL;
     // One thread: audio decodes hundreds of times faster than real time, and "auto" gave e.g. the FLAC decoder a
     // frame thread per core (13 threads per track on 12 cores) for nothing
-    av_dict_set(&opts, "threads", "1", 0);
-
-    if ((ret = avcodec_open2(avctx, codec, &opts)) < 0)
-        goto fail;
-
-    ic->streams[stream_index]->discard = AVDISCARD_DEFAULT;
+    int ret = ff_open_decoder(ic->streams[stream_index], 1, &avctx);
+    if (ret < 0) {
+        if (ret == AVERROR_DECODER_NOT_FOUND)
+            ff_log(AU_LOG_WARNING, "No decoder could be found for codec %s",
+                   avcodec_get_name(ic->streams[stream_index]->codecpar->codec_id));
+        return ret;
+    }
 
     t->audio_filter_src.freq = avctx->sample_rate;
     if ((ret = av_channel_layout_copy(&t->audio_filter_src.ch_layout, &avctx->ch_layout)) < 0)
@@ -602,7 +581,6 @@ static int stream_component_open(TrackState *t, const int stream_index) {
 
 fail:
     avcodec_free_context(&avctx);
-    av_dict_free(&opts);
     return ret;
 }
 
@@ -833,43 +811,23 @@ static void read_thread_fail(TrackState *t) {
 
 // Open the input and the decoder, read the tags and publish the duration. < 0 = the track can not be played.
 static int open_track(TrackState *t) {
-    AudioPlayer *ap = t->ap;
-    AVFormatContext *ic = avformat_alloc_context();
-    int ret;
-    if (!ic) {
-        ff_log(AU_LOG_FATAL, "Could not allocate context.");
-        return AVERROR(ENOMEM);
-    }
-    ic->interrupt_callback.callback = decode_interrupt_cb;
-    ic->interrupt_callback.opaque = t;
-
-    av_dict_set(&t->format_opts_n, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
-    network_input_options(&t->format_opts_n, t->filename, t->http_headers);
-    ret = avformat_open_input(&ic, t->filename, NULL, &t->format_opts_n); // probed: never chosen by the file's name
+    const AVIOInterruptCB interrupt = { decode_interrupt_cb, t };
+    AVFormatContext *ic = NULL;
+    int st_index = -1;
+    FfOpenStep failed;
+    int ret = ff_open_audio_input(t->filename, t->http_headers, &interrupt, &ic, &st_index, &failed);
     if (ret < 0) {
-        // avformat_open_input frees ic on failure
-        if (!SDL_AtomicGet(&t->abort_request))
-            ff_log(AU_LOG_ERROR, "Could not open input '%s': %s", t->filename, av_err2str(ret));
+        if (!SDL_AtomicGet(&t->abort_request)) {
+            if (failed == FF_OPEN_NO_AUDIO)
+                ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
+            else if (failed == FF_OPEN_STREAM_INFO)
+                ff_log(AU_LOG_WARNING, "%s: could not find codec parameters", t->filename);
+            else
+                ff_log(AU_LOG_ERROR, "Could not open input '%s': %s", t->filename, av_err2str(ret));
+        }
         return ret;
     }
-    av_dict_set(&t->format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
     t->ic = ic;
-    network_after_open(ic, t->filename);
-
-    if (ff_input_lacks_audio(ic)) {
-        if (!SDL_AtomicGet(&t->abort_request))
-            ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
-        return AVERROR_STREAM_NOT_FOUND;
-    }
-
-    if (ap->find_stream_info) {
-        ret = avformat_find_stream_info(ic, NULL);
-        if (ret < 0) {
-            if (!SDL_AtomicGet(&t->abort_request))
-                ff_log(AU_LOG_WARNING, "%s: could not find codec parameters", t->filename);
-            return ret;
-        }
-    }
 
     if (ic->pb)
         ic->pb->eof_reached = 0; // FIXME hack, ffplay maybe should not use avio_feof() to test for the end
@@ -882,26 +840,19 @@ static int open_track(TrackState *t) {
     if (t->start_time != AV_NOPTS_VALUE && seek_file(t, t->start_time) < 0)
         ff_log(AU_LOG_WARNING, "%s: could not seek to position %0.3f", t->filename, t->start_time / AV_TIME_BASE_DOUBLE);
 
-    for (unsigned int i = 0; i < ic->nb_streams; i++)
-        ic->streams[i]->discard = AVDISCARD_ALL;
-
-    const int st_index = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-
     // Tags and the ReplayGain gain are ready before the decoder starts, so the first sample is already
     // at the right level
-    if (st_index >= 0) {
-        AuMediaInfo *info = media_info_from_context(ic, st_index, t->filename);
-        if (info && t->network) t->icy = add_icy_headers(ic, info);
-        ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
-        ic->streams[st_index]->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
-        SDL_LockMutex(t->seek_mutex);
-        t->info = info;
-        SDL_UnlockMutex(t->seek_mutex);
-        wait_for_measurement(t, info);
-        track_update_gain(t, false);
-    }
+    AuMediaInfo *info = media_info_from_context(ic, st_index, t->filename);
+    if (info && t->network) t->icy = add_icy_headers(ic, info);
+    ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
+    ic->streams[st_index]->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
+    SDL_LockMutex(t->seek_mutex);
+    t->info = info;
+    SDL_UnlockMutex(t->seek_mutex);
+    wait_for_measurement(t, info);
+    track_update_gain(t, false);
 
-    if (st_index < 0 || stream_component_open(t, st_index) < 0 || t->audio_stream < 0) {
+    if (stream_component_open(t, st_index) < 0 || t->audio_stream < 0) {
         if (!SDL_AtomicGet(&t->abort_request))
             ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
         return AVERROR_STREAM_NOT_FOUND;

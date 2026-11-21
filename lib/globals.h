@@ -231,7 +231,6 @@ typedef struct TrackState {
     bool speed_seg_open;                // audio thread only: speed_seg_in is known
     int32_t convert_rate;               // output rate the graphs were built for
     int32_t convert_channels;           // and its channel count
-    AVDictionary *format_opts_n;
     char *http_headers;                 // PlayAudioConfig.http_headers (owned), network streams only
     // Network tracks (set at creation): the read thread fills buffer_target_s before the mixer takes anything,
     // again after the mixer ran dry while playing, and reads ahead up to max_buffer_s
@@ -448,7 +447,6 @@ typedef struct AudioPlayer {
     FadeCurve play_curve, skip_curve, stop_curve, pause_curve; // control thread: its curves, sampled when set
     bool use_soxr;
     int32_t filter_nbthreads;
-    int32_t find_stream_info;
 
     // ---- callbacks ----
     void *user_data;

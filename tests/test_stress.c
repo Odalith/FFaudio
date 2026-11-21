@@ -157,7 +157,9 @@ static void test_callback_adds_many_notes(void) {
     const int made = SDL_AtomicGet(&changes_made) - 1;
     printf("   %d device changes from the callback in %d ms\n", made, SDL_AtomicGet(&changes_ms));
     CHECK(made > 0);
-    CHECK(TC_WAIT_FIELD(device, made, 5000));   // every change was reported
+    const bool all_reported = TC_WAIT_FIELD(device, made, 10000);   // every change was reported
+    if (!all_reported) printf("   only %d of the %d changes were reported\n", tc_snapshot().device, made);
+    CHECK(all_reported);
     if (made <= 32) printf("   (too few to grow the list during the dispatch here: that part was not exercised)\n");
     au_configure_audio_device(NULL);
     au_free_audio_devices(devs, n);

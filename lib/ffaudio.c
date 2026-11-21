@@ -1065,7 +1065,6 @@ int au_initialize(const InitializeConfig* config) {
     ap->downmix = AU_DOWNMIX_FULL_LEVEL;
     ap->speed = 1.0;
     ap->keep_pitch = true;
-    ap->find_stream_info = 1;
     ap->audio_device_index = -1;
     ap->use_default_device = true;
     ap->user_data = config->user_data;

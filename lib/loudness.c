@@ -484,38 +484,20 @@ static int measure_file(const AuLoudnessConfig *cfg, const AVIOInterruptCB *inte
     int ret;
 
     memset(m, 0, sizeof(*m));
-    if (!(ic = avformat_alloc_context())) { result = AU_ERR_NO_MEMORY; goto end; }
-    if (interrupt && interrupt->callback) ic->interrupt_callback = *interrupt;
-    AVDictionary *in_opts = NULL;
-    network_input_options(&in_opts, filename, NULL);
-    ret = avformat_open_input(&ic, filename, NULL, &in_opts); // frees ic on failure
-    av_dict_free(&in_opts);
-    if (ret < 0) goto end;
-    network_after_open(ic, filename);
-    if (ff_input_lacks_audio(ic)) goto end;
-    if (avformat_find_stream_info(ic, NULL) < 0) goto end;
+    int st_index = -1;
+    FfOpenStep failed;
+    if ((ret = ff_open_audio_input(filename, NULL, interrupt, &ic, &st_index, &failed)) < 0) {
+        if (ret == AVERROR(ENOMEM)) result = AU_ERR_NO_MEMORY;
+        goto end;
+    }
     if (au_is_network_url(filename) && (ic->duration == AV_NOPTS_VALUE || ic->duration <= 0)) {
         result = AU_ERR_UNSUPPORTED;   // a live stream: it never ends, so it can not be measured
         goto end;
     }
-    const int st_index = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-    if (st_index < 0) goto end;
-    AVStream *st = ic->streams[st_index];
-    for (unsigned int i = 0; i < ic->nb_streams; i++)
-        ic->streams[i]->discard = (int)i == st_index ? AVDISCARD_DEFAULT : AVDISCARD_ALL;
-
-    const AVCodec *codec = avcodec_find_decoder(st->codecpar->codec_id);
-    if (!codec || !(dec = avcodec_alloc_context3(codec))) goto end;
-    if (avcodec_parameters_to_context(dec, st->codecpar) < 0) goto end;
-    dec->pkt_timebase = st->time_base;
-    AVDictionary *opts = NULL;
     // At most 4 threads: decoding is a large part of the analysis for hi-res files (a 24/192 FLAC took 1.28 s with
     // one thread, 0.65 s with four, 0.62 s with "auto" = one per core plus one), so this keeps the speed of "auto"
     // without a thread per core for every file being measured
-    av_dict_set(&opts, "threads", "4", 0);
-    ret = avcodec_open2(dec, codec, &opts);
-    av_dict_free(&opts);
-    if (ret < 0) goto end;
+    if (ff_open_decoder(ic->streams[st_index], 4, &dec) < 0) goto end;
 
     if (!(pkt = av_packet_alloc()) || !(frame = av_frame_alloc())) { result = AU_ERR_NO_MEMORY; goto end; }
 

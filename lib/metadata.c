@@ -241,16 +241,9 @@ AuMediaInfo *au_probe(const char *filename, int *out_error) {
         if (out_error) *out_error = AU_ERR_INVALID_ARGUMENT;
         return NULL;
     }
-    AVDictionary *opts = NULL;
-    network_input_options(&opts, filename, NULL);
-    ret = avformat_open_input(&ic, filename, NULL, &opts);
-    av_dict_free(&opts);
-    if (ret < 0) goto end;
-    if (ff_input_lacks_audio(ic)) { ret = AVERROR_STREAM_NOT_FOUND; goto end; }
-    if ((ret = avformat_find_stream_info(ic, NULL)) < 0) goto end;
-
-    const int st = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-    if (st < 0) { ret = st; goto end; }
+    int st = -1;
+    FfOpenStep failed;
+    if ((ret = ff_open_audio_input(filename, NULL, NULL, &ic, &st, &failed)) < 0) goto end;
 
     info = media_info_from_context(ic, st, filename);
     ret = info ? 0 : AVERROR(ENOMEM);
