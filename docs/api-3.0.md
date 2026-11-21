@@ -1,4 +1,4 @@
-# ffaudio 3.0 API (draft for review)
+# ffaudio 3.0 API
 
 What the public headers become in 3.0.0. The decisions it follows (2026-11-21):
 
@@ -10,7 +10,8 @@ What the public headers become in 3.0.0. The decisions it follows (2026-11-21):
   snapshot. So every function may be called from `on_event`, except `au_shutdown()`.
 - **Full naming cleanup.** `Au`-prefixed types, short verbs, seconds for every time and position, volume as a float gain.
 
-Marked **[choice]**: details the decisions above leave open, which I filled in. Each says what the alternative is.
+Settled with the draft's review (2026-11-21): `au_queue()` for the next track, `au_init()` opens the device, a
+bounded poll queue, and the graphic EQ as one biquad per band.
 
 ## Conventions
 
@@ -46,9 +47,8 @@ void au_free_devices(char **devices, int count);
 int  au_get_device_name(char *buf, size_t size);
 ```
 
-- **[choice]** `au_init()` opens the device itself (`AuConfig.device`, default = system default). In 2.x, every
-  application called `au_configure_audio_device(NULL)` straight after `au_initialize()`. Alternative: keep a separate
-  call.
+- `au_init()` opens the device itself (`AuConfig.device`, default = system default). In 2.x, every application
+  called `au_configure_audio_device(NULL)` straight after `au_initialize()`.
 - The device index from `AudioDeviceConfig` is dropped: indexes change as devices come and go, and the name is what
   2.x already preferred.
 
@@ -79,8 +79,7 @@ void au_set_loop_count(int count);
 int  au_set_crossfade(const AuCrossfade *config);   // CrossfadeConfig renamed, same members
 ```
 
-- **[choice]** `au_queue()` instead of `au_next()`, the name in the question. `au_next()` reads like "skip to the next
-  track", which is `au_skip()`. Alternative: `au_next()` as agreed, or `au_set_next()` as in 2.x.
+- `au_queue()` rather than `au_next()`, which reads like "skip to the next track" (that is `au_skip()`).
 - A file that can not be opened still gets its handle; the track then ends with `AU_END_ERROR`.
 
 ## Status
@@ -153,9 +152,8 @@ bool au_wait_event(AuEvent *out, double timeout_seconds);  // for a thread that 
 - The union is named (`data`) because C99 has no anonymous unions. C# maps it with `StructLayout(Explicit)`.
 - Strings stay valid during the callback. With polling, they stay valid until the next `au_poll_event()` or
   `au_wait_event()`.
-- **[choice]** The poll queue holds 4096 events. When it is full, log events are dropped first, then the oldest of
-  the rest, and an `AU_EVENT_OVERFLOW` reports how many were dropped. Alternative: an unbounded queue, which grows
-  without limit if the application stops polling.
+- The poll queue holds 4096 events. When it is full, log events are dropped first, then the oldest of the rest, and
+  an `AU_EVENT_OVERFLOW` reports how many were dropped.
 - The background gain scan keeps its own callback (`AuGainScanConfig.on_cached`, on a worker thread), because it
   works without `au_init()`.
 
