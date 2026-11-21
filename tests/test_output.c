@@ -362,6 +362,29 @@ static float window_peak(const Capture *c, size_t first, double from_s, double t
     return p;
 }
 
+// Pausing fades out with the curve run backwards, curve(1 - t), as a crossfade's fade-out does: halfway through an
+// equal-power fade the level is cos(45 deg) = 0.71 of what it was (it used to be 1 - sin(45 deg) = 0.29)
+static void test_pause_fade_curve(void) {
+    start_capture("pausecurve");
+    const CrossfadeConfig xf = { .on_pause = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER } };
+    au_set_crossfade(&xf);
+    au_play_audio(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(1000);
+    au_pause_audio(true);
+    tc_sleep_ms(800);
+    au_stop_audio();
+    wait_until_idle(1, 3000);
+    Capture c = stop_capture();
+    size_t first, last;
+    audible_range(&c, &first, &last);   // a paused player outputs silence: the fade ends at the last audible frame
+    const float steady = steady_peak(&c, first, last);
+    const double mid_s = (double)(last - first) / c.rate - 0.2;
+    const float ratio = window_peak(&c, first, mid_s - 0.003, mid_s + 0.003) / steady;
+    printf("   pause fade: level %.3f of steady halfway\n", ratio);
+    CHECK(fabsf(ratio - 0.707f) < 0.05f);
+    free(c.samples);
+}
+
 static void test_live_filter_changes(void) {
     start_capture("livefilters");
     au_play_audio(fx("long_6s.flac"), NULL);
@@ -546,6 +569,36 @@ static int feed_fifo(void *arg) {
     return 0;
 }
 #endif
+
+// A late value that leaves the gain as it was (a measurement that agrees) must not make the next change slow: it used
+// to leave the 2 s ramp armed for whatever changed next, here a preamp change that should take 10 ms
+static void test_gain_change_after_unchanged_late_value(void) {
+    CHECK(au_gain_cache_set_file("") == AU_OK); // memory only
+    start_capture("late_unchanged");
+    au_set_audio_volume(100);
+    const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK }; // no tags, nothing cached: the fallback, 0 dB
+    CHECK(au_set_replaygain(&cfg) == AU_OK);
+    au_play_audio(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(800);
+    const AuReplayGainInfo same = { .has_track_gain = true, .track_gain_db = 0 };
+    CHECK(au_gain_cache_set(fx("long_6s.flac"), &same) == AU_OK);
+    tc_sleep_ms(300);
+    const AuReplayGainConfig quieter = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = -6 };
+    CHECK(au_set_replaygain(&quieter) == AU_OK);
+    tc_sleep_ms(1500);
+    au_stop_audio();
+    wait_until_idle(1, 3000);
+    Capture c = stop_capture();
+    au_gain_cache_remove(fx("long_6s.flac"));
+
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    // The preamp changed about 1.1 s in: 0.6 s later a 10 ms ramp is long done, a 2 s one under a third of the way
+    const float ratio = window_peak(&c, first, 1.7, 1.8) / steady_peak(&c, first, last);
+    printf("   level after the preamp change: %.3f (-6 dB = 0.501)\n", ratio);
+    CHECK(fabsf(ratio - 0.501f) < 0.03f);
+    free(c.samples);
+}
 
 static void test_replaygain_from_first_sample(void) {
     // The mixer runs for a track before its file is open (here: a FIFO nobody writes to for 300 ms). The gain
@@ -792,6 +845,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_crossfade_on_skip);
     RUN_TEST(test_crossfade_on_play);
     RUN_TEST(test_pause_fade);
+    RUN_TEST(test_pause_fade_curve);
     RUN_TEST(test_per_track_fade_override);
     RUN_TEST(test_short_tracks_stay_gapless);
     RUN_TEST(test_custom_curve);
@@ -801,6 +855,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_multichannel_routing);
     RUN_TEST(test_replaygain_levels);
     RUN_TEST(test_replaygain_from_first_sample);
+    RUN_TEST(test_gain_change_after_unchanged_late_value);
     RUN_TEST(test_replaygain_live_change);
     RUN_TEST(test_speed);
     RUN_TEST(test_speed_limits_and_position);

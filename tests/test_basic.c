@@ -112,6 +112,22 @@ static void test_seek(void) {
     CHECK(TC_WAIT_FIELD(eof, 1, 4000));
 }
 
+// A container whose timestamps start late (MPEG-TS: 1.4 s) reports positions from 0, like seeks and the duration;
+// they used to include the start time, so end crossfades and on_prepare_next came that much early
+static void test_position_of_late_start(void) {
+    au_play_audio(fx("start_offset.ts"), NULL);
+    tc_sleep_ms(400);
+    const double t = au_get_audio_play_time();
+    printf("   0.4 s in: play time %.3f\n", t);
+    CHECK(t >= 0 && t < 1.0);
+    au_seek_time(4000);
+    tc_sleep_ms(400);
+    const double t2 = au_get_audio_play_time();
+    printf("   after a seek to 4 s: play time %.3f\n", t2);
+    CHECK(t2 >= 3.8 && t2 < 4.9);
+    CHECK(TC_WAIT_FIELD(eof, 1, 4000));
+}
+
 static void test_stop(void) {
     au_play_audio(fx("long_6s.flac"), NULL);
     tc_sleep_ms(300);
@@ -188,6 +204,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_skip_to_next);
     RUN_TEST(test_pause_resume);
     RUN_TEST(test_seek);
+    RUN_TEST(test_position_of_late_start);
     RUN_TEST(test_stop);
     RUN_TEST(test_loop);
     RUN_TEST(test_speed_changes_are_not_loops);

@@ -72,6 +72,59 @@ static void test_device_name_and_no_spurious_changes(void) {
     au_shutdown();
 }
 
+// A fade too short for a single frame is a cut. The replaced track must still end and be reported; it used to be left
+// in no mixer slot with its threads running, and its on_eof never came.
+static void test_fade_without_frames_cuts(void) {
+    // No device yet: the mixer has no sample rate, so no fade can run
+    REQUIRE(tc_initialize(0, 0) == 0);
+    const CrossfadeConfig xf = { .on_play = { .seconds = 1.0, .curve = AU_FADE_LINEAR } };
+    CHECK(au_set_crossfade(&xf) == AU_OK);
+    const int32_t first = au_play_audio(fx("long_6s.flac"), NULL);
+    au_play_audio(fx("s44_stereo.flac"), NULL);
+    CHECK(TC_WAIT_FIELD(eof, 1, 2000));
+    TcEvents e = tc_snapshot();
+    CHECK(e.last_eof_handle == first && e.eof_skip == 1);
+    REQUIRE(au_configure_audio_device(NULL) == AU_OK);
+    CHECK(TC_WAIT_FIELD(eof, 2, 5000));   // the second track plays to its end
+    au_shutdown();
+
+    // Fades shorter than one sample, with a device
+    tc_reset_events();
+    REQUIRE(tc_init_player(0) == 0);
+    const AuFade tiny = { .seconds = 1e-6, .curve = AU_FADE_LINEAR };
+    const CrossfadeConfig xf2 = { .on_play = tiny, .on_skip = tiny, .on_stop = tiny };
+    CHECK(au_set_crossfade(&xf2) == AU_OK);
+    au_play_audio(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(200);
+    au_play_audio(fx("long_6s.flac"), NULL);   // play over a playing track
+    CHECK(TC_WAIT_FIELD(eof, 1, 2000));
+    au_set_next(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(200);
+    au_skip_to_next();
+    CHECK(TC_WAIT_FIELD(eof, 2, 2000));
+    tc_sleep_ms(200);
+    au_stop_audio();
+    CHECK(TC_WAIT_FIELD(eof, 3, 2000));
+    e = tc_snapshot();
+    CHECK(e.eof == 3 && e.eof_skip == 3 && e.eof_error == 0);
+    au_shutdown();
+}
+
+// ffaudio watches SDL's event queue for device changes but takes nothing from it: the application's events stay
+static void test_sdl_events_left_alone(void) {
+    REQUIRE(tc_init_player(0) == 0);
+    const Uint32 type = SDL_RegisterEvents(1);
+    REQUIRE(type != (Uint32)-1);
+    SDL_Event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = type;
+    REQUIRE(SDL_PushEvent(&ev) == 1);
+    au_play_audio(fx("s44_stereo.flac"), NULL);
+    tc_sleep_ms(300);   // dozens of control thread iterations
+    CHECK(SDL_PeepEvents(&ev, 1, SDL_GETEVENT, type, type) == 1);
+    au_shutdown();
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
     RUN_TEST(test_calls_before_init);
@@ -79,5 +132,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_shutdown_while_playing);
     RUN_TEST(test_reinit);
     RUN_TEST(test_device_name_and_no_spurious_changes);
+    RUN_TEST(test_fade_without_frames_cuts);
+    RUN_TEST(test_sdl_events_left_alone);
     return tc_finish("test_lifecycle");
 }

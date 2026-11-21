@@ -86,11 +86,12 @@ static void push_event(Mixer *m, const MixerEventType type, TrackState *t, const
 //| Transitions                                         |
 //+-----------------------------------------------------+
 
-void mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *incoming, const AuFade *fade) {
+bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *incoming, const AuFade *fade) {
     Mixer *m = &ap->mixer;
     const int64_t len = (fade && fade->seconds > 0 && m->rate > 0) ? (int64_t)(fade->seconds * m->rate) : 0;
+    if (len <= 0) return false; // shorter than a frame, or no device yet: the caller cuts
 
-    if (outgoing && len > 0) {
+    if (outgoing) {
         if (m->outgoing && m->outgoing != outgoing) {
             // Only one track can fade out at a time: the older one is cut
             m->outgoing->role = ROLE_NONE;
@@ -117,13 +118,12 @@ void mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *i
     m->in_fade.active = false;
     if (incoming) {
         incoming->role = ROLE_CURRENT;
-        if (len > 0) {
-            m->in_fade.active = true;
-            m->in_fade.pos = 0;
-            m->in_fade.len = len;
-            m->in_fade.fade = *fade;
-        }
+        m->in_fade.active = true;
+        m->in_fade.pos = 0;
+        m->in_fade.len = len;
+        m->in_fade.fade = *fade;
     }
+    return true;
 }
 
 void mixer_set_pause(AudioPlayer *ap, const bool paused, const AuFade *fade) {
@@ -198,8 +198,9 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 
     AuFade f = *fade;
     f.seconds = remaining; // end exactly when the current track does
-    m->current->fade_reason = END_NATURAL;
-    mixer_start_transition(ap, m->current, m->next, &f);
+    TrackState *cur = m->current;
+    if (mixer_start_transition(ap, cur, m->next, &f))
+        cur->fade_reason = END_NATURAL;
 }
 
 //+-----------------------------------------------------+
@@ -211,15 +212,15 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 // The track's ReplayGain gain: taken as it is with the first samples, then a linear ramp for every change (10 ms, or
 // 2 s when the value arrived after the track started, e.g. a measurement that missed measure_wait_ms)
 static float track_gain_step(Mixer *m, TrackState *t, float *target_out) {
-    const float target = powf(10.0f, (float)SDL_AtomicGet(&t->gain_mb) / 2000.0f);
+    const int packed = SDL_AtomicGet(&t->gain_mb);
+    const float target = powf(10.0f, (float)gain_centi_db(packed) / 2000.0f);
     if (!t->gain_started) {
         t->gain_cur = t->gain_seen = target;
         t->gain_step = 0;
         t->gain_started = true;
-        SDL_AtomicSet(&t->gain_slow, 0);
     }
     if (target != t->gain_seen) {
-        const bool slow = SDL_AtomicSet(&t->gain_slow, 0) != 0;
+        const bool slow = gain_is_slow(packed);
         const float frames = slow ? (float)(LATE_GAIN_RAMP_SECONDS * m->rate) : (float)FFMAX(1, m->vol_ramp_frames);
         t->gain_seen = target;
         t->gain_step = (target - t->gain_cur) / frames;
@@ -333,8 +334,11 @@ static void apply_master_gain(AudioPlayer *ap, const int frames) {
         else if (m->vol_gain > target) m->vol_gain = FFMAX(target, m->vol_gain - step);
 
         if (m->pause_fade.active) {
-            const float p = fade_curve_gain(&m->pause_fade.fade, (float)m->pause_fade.pos / (float)m->pause_fade.len);
-            m->pause_gain = m->pause_from + (m->pause_to - m->pause_from) * p;
+            // Down (pausing), the curve runs backwards like a crossfade's fade-out: curve(1 - t), not 1 - curve(t)
+            const float t = (float)m->pause_fade.pos / (float)m->pause_fade.len;
+            const float from = m->pause_from, to = m->pause_to;
+            m->pause_gain = to < from ? to + (from - to) * fade_curve_gain(&m->pause_fade.fade, 1.0f - t)
+                                      : from + (to - from) * fade_curve_gain(&m->pause_fade.fade, t);
             if (++m->pause_fade.pos >= m->pause_fade.len) {
                 m->pause_fade.active = false;
                 m->pause_gain = m->pause_to;
@@ -483,6 +487,7 @@ void output_set_running(AudioPlayer *ap, const bool running) {
 
 void output_close(AudioPlayer *ap) {
     if (ap->device_id) {
+        SDL_AtomicSet(&ap->open_device, 0);
         SDL_CloseAudioDevice(ap->device_id); // waits for a running callback
         ap->device_id = 0;
     }
@@ -584,6 +589,7 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
     }
 
     ap->device_id = id;
+    SDL_AtomicSet(&ap->open_device, (int)id);
     ap->obtained_spec = obtained;
     ap->device_running = false;
     ap->is_audio_device_initialized = true;

@@ -303,9 +303,13 @@ ffaudio, so values measured once are there in every later run.
 | Android, iOS, others | `SDL_GetPrefPath("ffaudio", "ffaudio")` + `replaygain.cache` |
 
 `au_gain_cache_set_file()` selects another file (or `""` for memory only). Every change is appended to the file
-right away as one line, so nothing is lost if the program crashes and several programs can use the file at the
-same time; it is read on first use, compacted when it has grown with superseded lines, and
-`au_gain_cache_reload()` picks up changes from other programs. The folder is only created on the first write.
+right away as one line, so nothing is lost if the program crashes; it is read on first use and compacted when it has
+grown with superseded lines. The folder is only created on the first write.
+
+Only one program should write to a cache file at a time. Compacting (and `au_gain_cache_clear()`) replaces the
+file, so changes another program writes at that moment can be lost; on Linux and macOS a program that has the file
+open goes on appending to the replaced copy. Programs that measure while running side by side should each use
+their own file. One after the other is fine, and `au_gain_cache_reload()` picks up what another program wrote.
 ffaudio never tracks, checks or modifies the media files: paths are plain strings, and keeping them current is up
 to the application (`au_gain_cache_foreach()` + `au_gain_cache_remove()` to drop entries for deleted files).
 

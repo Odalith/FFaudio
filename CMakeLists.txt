@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ffAudio VERSION 2.0.1 LANGUAGES C)
+project(ffAudio VERSION 2.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)

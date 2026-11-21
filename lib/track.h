@@ -36,7 +36,8 @@ void track_request_seek(TrackState *t, int64_t pos_us);
 void track_request_seek_percent(TrackState *t, double percent);
 
 // Any thread: recompute the ReplayGain gain from the current settings (no-op until the tags are known)
-void track_update_gain(TrackState *t);
+// late: the value arrived while the track may already be playing (a measurement): a change ramps over 2 s
+void track_update_gain(TrackState *t, bool late);
 
 // Any thread: a copy of the track's media info, NULL before the file is open
 AuMediaInfo *track_copy_info(TrackState *t);

@@ -20,9 +20,10 @@
  * Persistent ReplayGain cache: path -> AuReplayGainInfo.
  *
  * In memory it is a hash table behind one mutex. On disk it is an append-only text file in the platform's
- * per-user data directory: every change appends one line, so a change is a single small write, a crash can
- * not lose earlier entries, and several processes can append to the same file. The file is read on first
- * use and rewritten (compacted) when superseded lines pile up.
+ * per-user data directory: every change appends one line, so a change is a single small write and a crash can
+ * not lose earlier entries. The file is read on first use and rewritten (compacted) when superseded lines pile
+ * up. There is no locking: a compaction (or a clear) can lose what another process appends at the same time,
+ * so one process at a time should write to a file.
  *
  *   ffaudio-replaygain-cache 1
  *   S <tab> track_gain <tab> track_peak <tab> album_gain <tab> album_peak <tab> flags <tab> path     (set)
@@ -73,8 +74,14 @@ static FILE *append_file = NULL;
 static size_t file_lines = 0;           // records in the file, to decide when to compact
 
 static SDL_mutex *cache_mutex_ptr = NULL;
-static SDL_cond *cache_changed = NULL;   // broadcast when an entry is set (gain_cache_wait)
+static SDL_cond *cache_changed = NULL;   // broadcast when an entry is set or a measurement fails (gain_cache_wait)
 static FfOnce cache_mutex_once = FF_ONCE_INIT;
+
+// Paths whose measurement failed lately, for gain_cache_wait() (guarded by the cache mutex). A waiter that misses
+// one because more than RECENT_FAILURES failed in the meantime only waits until its timeout, as before.
+#define RECENT_FAILURES 8
+static char *recent_failures[RECENT_FAILURES];
+static unsigned failure_count = 0;      // failures so far; the newest is at (failure_count - 1) % RECENT_FAILURES
 
 static void create_cache_mutex(void) {
     cache_mutex_ptr = SDL_CreateMutex(); // SDL mutexes work without SDL_Init
@@ -620,23 +627,55 @@ int au_gain_cache_set(const char *path, const AuReplayGainInfo *rg) {
     return ret; // AU_ERR_FILE: kept in memory, but could not be written to the file
 }
 
-bool gain_cache_wait(const char *path, const int timeout_ms, SDL_atomic_t *abort) {
-    if (!path || !path[0]) return false;
+unsigned gain_cache_failure_mark(void) {
     SDL_mutex *m = cache_mutex();
-    if (!m) return false;
+    if (!m) return 0;
+    SDL_LockMutex(m);
+    const unsigned mark = failure_count;
+    SDL_UnlockMutex(m);
+    return mark;
+}
+
+void gain_cache_note_failure(const char *path) {
+    SDL_mutex *m = cache_mutex();
+    if (!m || !path) return;
+    char *copy = av_strdup(path);
+    if (!copy) return; // the waiter times out instead
+    SDL_LockMutex(m);
+    char **slot = &recent_failures[failure_count++ % RECENT_FAILURES];
+    av_free(*slot);
+    *slot = copy;
+    if (cache_changed) SDL_CondBroadcast(cache_changed);
+    SDL_UnlockMutex(m);
+}
+
+// cache mutex held
+static bool failed_since(const char *path, const unsigned mark) {
+    for (unsigned i = mark; i != failure_count; i++)
+        if (failure_count - i <= RECENT_FAILURES && !strcmp(recent_failures[i % RECENT_FAILURES], path))
+            return true;
+    return false;
+}
+
+GainWait gain_cache_wait(const char *path, const int timeout_ms, SDL_atomic_t *abort, const unsigned mark) {
+    if (!path || !path[0]) return GAIN_WAIT_FAILED;
+    SDL_mutex *m = cache_mutex();
+    if (!m) return GAIN_WAIT_FAILED;
     const Uint32 deadline = SDL_GetTicks() + (Uint32)(timeout_ms > 0 ? timeout_ms : 0);
-    bool found = false;
+    GainWait result;
     SDL_LockMutex(m);
     ensure_loaded();
     for (;;) {
         Entry **slot = find_slot(path, hash_path(path));
-        if ((found = slot && *slot)) break;
+        if (slot && *slot) { result = GAIN_WAIT_CACHED; break; }
+        if (failed_since(path, mark)) { result = GAIN_WAIT_FAILED; break; }
+        if (abort && SDL_AtomicGet(abort)) { result = GAIN_WAIT_ABORTED; break; }
         const Sint32 left = (Sint32)(deadline - SDL_GetTicks());
-        if (left <= 0 || (abort && SDL_AtomicGet(abort))) break;
+        if (left <= 0) { result = GAIN_WAIT_TIMEOUT; break; }
         SDL_CondWaitTimeout(cache_changed, m, (Uint32)(left < 20 ? left : 20)); // re-check abort regularly
     }
     SDL_UnlockMutex(m);
-    return found;
+    return result;
 }
 
 bool au_gain_cache_get(const char *path, AuReplayGainInfo *out) {

@@ -26,7 +26,7 @@
 
 #include "gain_cache.h"
 #include "once.h"
-#include "ffaudio_loudness.h"
+#include "loudness.h"
 #include "network.h"
 
 #define MAX_WORKERS 16
@@ -43,7 +43,7 @@ typedef struct Job {
 typedef struct Worker {
     SDL_Thread *thread;
     Job *job;                   // being measured
-    bool cancel;                // stop the current job
+    SDL_atomic_t cancel;        // 1 = stop the current job (read without the lock while measuring)
 } Worker;
 
 // Guarded by lock
@@ -54,7 +54,7 @@ static Job *head = NULL, *tail = NULL;
 static Worker workers[MAX_WORKERS];
 static AuGainScanConfig config;
 static int pending = 0;          // paths queued or being measured
-static bool stopping = false;
+static SDL_atomic_t stopping;    // 1 while au_gain_scan_stop() runs (read without the lock while measuring)
 
 // Files that could not be measured (not media, no audio stream, unreadable), with their size and modification
 // time: requests skip them until the file changes, instead of reading and failing again on every request.
@@ -161,6 +161,13 @@ static void job_free(Job *j) {
     av_free(j);
 }
 
+// A queued job that will not be measured: a player waiting for one of its paths stops waiting
+static void job_drop(Job *j) {
+    if (!j) return;
+    for (int i = 0; i < j->n; i++) gain_cache_note_failure(j->paths[i]);
+    job_free(j);
+}
+
 static bool job_has(const Job *j, const char *path) {
     for (int i = 0; i < j->n; i++)
         if (!strcmp(j->paths[i], path)) return true;
@@ -182,6 +189,24 @@ static Job *find_queued(const char *path, Job **prev_out) {
 static bool being_measured(const char *path) {
     for (int i = 0; i < MAX_WORKERS; i++)
         if (workers[i].job && job_has(workers[i].job, path)) return true;
+    return false;
+}
+
+// An album job with the same first track, queued (*queued_out, *prev_out set) or being measured
+static bool album_pending(const char *first, Job **queued_out, Job **prev_out) {
+    *queued_out = NULL;
+    for (int i = 0; i < MAX_WORKERS; i++) {
+        const Job *j = workers[i].job;
+        if (j && j->album && j->n && !strcmp(j->paths[0], first)) return true;
+    }
+    Job *prev = NULL;
+    for (Job *j = head; j; prev = j, j = j->next) {
+        if (j->album && j->n && !strcmp(j->paths[0], first)) {
+            *queued_out = j;
+            *prev_out = prev;
+            return true;
+        }
+    }
     return false;
 }
 
@@ -231,16 +256,18 @@ typedef struct ProgressCtx {
     int index;
 } ProgressCtx;
 
+static int interrupted(void *user) {
+    const ProgressCtx *ctx = user;
+    return SDL_AtomicGet(&workers[ctx->index].cancel) || SDL_AtomicGet(&stopping);
+}
+
 static bool keep_going(double fraction, void *user) {
     (void)fraction;
-    const ProgressCtx *ctx = user;
-    SDL_LockMutex(lock);
-    const bool go = !workers[ctx->index].cancel && !stopping;
-    SDL_UnlockMutex(lock);
-    return go;
+    return !interrupted(user);
 }
 
 static void notify(const AuGainScanConfig *cfg, const char *path, const int result, const AuReplayGainInfo *rg) {
+    if (result != AU_OK) gain_cache_note_failure(path); // a player waiting for this value stops waiting
     if (cfg->on_cached) cfg->on_cached(path, result, rg, cfg->user);
 }
 
@@ -248,13 +275,21 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
     ProgressCtx ctx = { .index = index };
     const AuLoudnessConfig lcfg = { .skip_true_peak = cfg->skip_true_peak, .progress = keep_going,
                                     .progress_user = &ctx };
+    const AVIOInterruptCB interrupt = { .callback = interrupted, .opaque = &ctx };
 
     if (!job->album) {
+        AuLoudnessScanner *one = au_loudness_scanner_create(&lcfg);
+        if (!one) {
+            for (int i = 0; i < job->n; i++) notify(cfg, job->paths[i], AU_ERR_NO_MEMORY, NULL);
+            return;
+        }
+        loudness_scanner_set_interrupt(one, &interrupt);
         for (int i = 0; i < job->n; i++) {
             const char *path = job->paths[i];
             if (au_gain_cache_get(path, NULL)) continue; // measured by someone else meanwhile
             AuLoudness l;
-            const int ret = au_loudness_analyze(path, &lcfg, &l);
+            au_loudness_scanner_reset(one);
+            const int ret = au_loudness_scan_file(one, path, &l);
             if (ret == AU_OK) {
                 const AuReplayGainInfo rg = au_loudness_to_replaygain(&l, NULL);
                 au_gain_cache_set(path, &rg);
@@ -263,14 +298,16 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
             else {
                 note_result(path, ret);
                 notify(cfg, path, ret, NULL);
-                if (ret == AU_ERR_CANCELLED) return;
+                if (ret == AU_ERR_CANCELLED) break;
             }
         }
+        au_loudness_scanner_free(one);
         return;
     }
 
     // Album: every track through one scanner, then store track + album values together
     AuLoudnessScanner *scanner = au_loudness_scanner_create(&lcfg);
+    loudness_scanner_set_interrupt(scanner, &interrupt);
     AuLoudness *tracks = av_calloc(job->n, sizeof(AuLoudness));
     int *results = av_calloc(job->n, sizeof(int));
     if (!scanner || !tracks || !results) {
@@ -310,14 +347,14 @@ static int worker_main(void *arg) {
     for (;;) {
         // The wanted count is read again after every wake-up: au_gain_scan_configure() may have lowered it
         // while this worker was idle, and it then waits for this thread to leave
-        while (!head && !stopping && index < wanted_workers())
+        while (!head && !SDL_AtomicGet(&stopping) && index < wanted_workers())
             SDL_CondWait(wake, lock);
-        if (stopping || index >= wanted_workers()) break;
+        if (SDL_AtomicGet(&stopping) || index >= wanted_workers()) break;
 
         Job *job = head;
         unlink_job(job, NULL);
         workers[index].job = job;
-        workers[index].cancel = false;
+        SDL_AtomicSet(&workers[index].cancel, 0);
         const AuGainScanConfig cfg = config;
         SDL_UnlockMutex(lock);
 
@@ -363,10 +400,34 @@ static int request(const char *const *paths, const int count, const bool urgent,
 
     char ua[8];
     const bool measure_streams = network_config(ua, sizeof(ua)).measure_streams;
+    if (album && !measure_streams) {
+        // Measuring would download whole files, and an album measured without them would be wrong
+        for (int i = 0; i < count; i++)
+            if (paths[i] && au_is_network_url(paths[i])) return 0;
+    }
     Job *job = job_new(album, from_player, count);
     if (!job) return AU_ERR_NO_MEMORY;
 
     SDL_LockMutex(lock);
+    if (SDL_AtomicGet(&stopping)) {
+        // au_gain_scan_stop() is waiting for the workers; new ones started now would never be joined
+        SDL_UnlockMutex(lock);
+        job_free(job);
+        return 0;
+    }
+    if (album && paths[0] && paths[0][0]) {
+        Job *queued = NULL, *prev = NULL;
+        if (album_pending(paths[0], &queued, &prev)) {
+            if (queued && urgent && queued != head) {
+                unlink_job(queued, prev);
+                pending -= queued->n;
+                push(queued, true);
+            }
+            SDL_UnlockMutex(lock);
+            job_free(job);
+            return 0;
+        }
+    }
     for (int i = 0; i < count; i++) {
         const char *path = paths[i];
         if (!path || !path[0] || job_has(job, path)) continue;
@@ -454,7 +515,7 @@ void au_gain_cache_cancel_requests(void) {
         if (!j->from_player) {
             unlink_job(j, prev);
             pending -= j->n;
-            job_free(j);
+            job_drop(j);
         }
         else {
             prev = j;
@@ -462,7 +523,7 @@ void au_gain_cache_cancel_requests(void) {
         j = next;
     }
     for (int i = 0; i < MAX_WORKERS; i++)
-        if (workers[i].job && !workers[i].job->from_player) workers[i].cancel = true;
+        if (workers[i].job && !workers[i].job->from_player) SDL_AtomicSet(&workers[i].cancel, 1);
     SDL_UnlockMutex(lock);
 }
 
@@ -479,15 +540,15 @@ void au_gain_scan_stop(void) {
     SDL_Thread *threads[MAX_WORKERS];
     int n = 0;
     SDL_LockMutex(lock);
-    stopping = true;
+    SDL_AtomicSet(&stopping, 1);
     while (head) {
         Job *j = head;
         unlink_job(j, NULL);
         pending -= j->n;
-        job_free(j);
+        job_drop(j);
     }
     for (int i = 0; i < MAX_WORKERS; i++) {
-        if (workers[i].job) workers[i].cancel = true;
+        if (workers[i].job) SDL_AtomicSet(&workers[i].cancel, 1);
         if (workers[i].thread) threads[n++] = workers[i].thread;
         workers[i].thread = NULL;
     }
@@ -497,7 +558,7 @@ void au_gain_scan_stop(void) {
     for (int i = 0; i < n; i++) SDL_WaitThread(threads[i], NULL);
 
     SDL_LockMutex(lock);
-    stopping = false;
+    SDL_AtomicSet(&stopping, 0);
     forget_all_failures();
     SDL_UnlockMutex(lock);
 }

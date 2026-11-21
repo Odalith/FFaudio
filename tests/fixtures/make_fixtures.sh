@@ -24,6 +24,8 @@ sine s44_stereo.m4a    220 1 44100 2 -c:a aac
 
 # Longer track for seek / pause / crossfade tests
 sine long_6s.flac      440 6 44100 2 -sample_fmt s16
+# MPEG-TS starts its timestamps at 1.4 s: positions must still count from 0
+sine start_offset.ts   440 6 44100 2 -c:a mp2 -f mpegts
 
 # Two whole-cycle 440 Hz tracks: played gaplessly they form one continuous sine
 sine join_a.flac       440 1 48000 2 -sample_fmt s16

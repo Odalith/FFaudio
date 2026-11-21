@@ -35,7 +35,7 @@
 #include "libavformat/avformat.h"
 #include "libswresample/swresample.h"
 
-#include "ffaudio_loudness.h"
+#include "loudness.h"
 #include "probe.h"
 #include "network.h"
 
@@ -54,6 +54,7 @@ typedef struct EnergyList {
 
 struct AuLoudnessScanner {
     AuLoudnessConfig config;
+    AVIOInterruptCB interrupt;  // loudness_scanner_set_interrupt(); no callback = none
     EnergyList blocks;          // gating block energies of every scanned track
     EnergyList short_term;      // short-term energies of every scanned track
     double sample_peak, true_peak, duration;
@@ -258,7 +259,10 @@ static int meter_init(Meter *m, const int rate, const AVChannelLayout *layout, c
 
     m->z = av_calloc(m->channels, sizeof(*m->z));
     m->weight = av_calloc(m->channels, sizeof(double));
-    if (!m->z || !m->weight) return AVERROR(ENOMEM);
+    if (!m->z || !m->weight) {
+        meter_free(m);
+        return AVERROR(ENOMEM);
+    }
     for (int c = 0; c < m->channels; c++)
         m->weight[c] = layout->order == AV_CHANNEL_ORDER_UNSPEC
                            ? 1.0 : channel_weight(av_channel_layout_channel_from_index(layout, c));
@@ -269,7 +273,10 @@ static int meter_init(Meter *m, const int rate, const AVChannelLayout *layout, c
     if (true_peak && m->tp_factor > 1) {
         int ret = swr_alloc_set_opts2(&m->tp, layout, AV_SAMPLE_FMT_FLTP, rate * m->tp_factor,
                                       layout, AV_SAMPLE_FMT_FLTP, rate, 0, NULL);
-        if (ret < 0 || (ret = swr_init(m->tp)) < 0) return ret;
+        if (ret < 0 || (ret = swr_init(m->tp)) < 0) {
+            meter_free(m);
+            return ret;
+        }
     }
     return 0;
 }
@@ -373,13 +380,14 @@ static int meter_process(Meter *m, const float *const *data, const int samples) 
 //+-----------------------------------------------------+
 
 // Decode `filename` into `m`. Returns 0, AU_ERR_* on failure.
-static int measure_file(const AuLoudnessConfig *cfg, const char *filename, Meter *m) {
+static int measure_file(const AuLoudnessConfig *cfg, const AVIOInterruptCB *interrupt, const char *filename,
+                        Meter *m) {
     AVFormatContext *ic = NULL;
     AVCodecContext *dec = NULL;
     AVPacket *pkt = NULL;
     AVFrame *frame = NULL;
     SwrContext *conv = NULL;
-    AVChannelLayout conv_in = {0}, layout = {0};
+    AVChannelLayout conv_src = {0}, conv_in = {0}, layout = {0}; // conv_src: the frames' layout as it came
     int conv_in_rate = 0, conv_in_fmt = -1;
     uint8_t **buf = NULL;
     int buf_samples = 0;
@@ -388,11 +396,14 @@ static int measure_file(const AuLoudnessConfig *cfg, const char *filename, Meter
     int ret;
 
     memset(m, 0, sizeof(*m));
+    if (!(ic = avformat_alloc_context())) { result = AU_ERR_NO_MEMORY; goto end; }
+    if (interrupt && interrupt->callback) ic->interrupt_callback = *interrupt;
     AVDictionary *in_opts = NULL;
     network_input_options(&in_opts, filename, NULL);
-    ret = avformat_open_input(&ic, filename, NULL, &in_opts);
+    ret = avformat_open_input(&ic, filename, NULL, &in_opts); // frees ic on failure
     av_dict_free(&in_opts);
     if (ret < 0) goto end;
+    network_after_open(ic, filename);
     if (ff_input_lacks_audio(ic)) goto end;
     if (avformat_find_stream_info(ic, NULL) < 0) goto end;
     if (au_is_network_url(filename) && (ic->duration == AV_NOPTS_VALUE || ic->duration <= 0)) {
@@ -428,6 +439,10 @@ static int measure_file(const AuLoudnessConfig *cfg, const char *filename, Meter
         if (!draining) {
             ret = av_read_frame(ic, pkt);
             if (ret < 0) {
+                // The end, or as far as a damaged file goes: what was decoded is measured. A failed read (a disk
+                // error, a transfer that broke off after its reconnects) is not the end of the file, and the result
+                // would be stored as its loudness, so it fails the measurement instead.
+                if (ic->pb && ic->pb->error < 0 && ic->pb->error != AVERROR_EOF) goto end;
                 draining = true;
                 ret = avcodec_send_packet(dec, NULL);
             }
@@ -455,10 +470,14 @@ static int measure_file(const AuLoudnessConfig *cfg, const char *filename, Meter
                 if (meter_init(m, frame->sample_rate, &layout, !cfg->skip_true_peak) < 0) goto end;
                 meter_ready = true;
             }
+            // Compared with the frames' own layout: an unspecified one is replaced for the converter, and
+            // comparing with that would rebuild the converter for every frame
             if (!conv || conv_in_rate != frame->sample_rate || conv_in_fmt != frame->format ||
-                av_channel_layout_compare(&conv_in, &frame->ch_layout)) {
+                av_channel_layout_compare(&conv_src, &frame->ch_layout)) {
                 swr_free(&conv);
                 av_channel_layout_uninit(&conv_in);
+                av_channel_layout_uninit(&conv_src);
+                if (av_channel_layout_copy(&conv_src, &frame->ch_layout) < 0) { result = AU_ERR_NO_MEMORY; goto end; }
                 if (frame->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC || !av_channel_layout_check(&frame->ch_layout))
                     av_channel_layout_default(&conv_in, frame->ch_layout.nb_channels);
                 else if (av_channel_layout_copy(&conv_in, &frame->ch_layout) < 0) { result = AU_ERR_NO_MEMORY; goto end; }
@@ -482,7 +501,10 @@ static int measure_file(const AuLoudnessConfig *cfg, const char *filename, Meter
             const int got = swr_convert(conv, buf, buf_samples, (const uint8_t **)frame->extended_data, frame->nb_samples);
             av_frame_unref(frame);
             if (got < 0) goto end;
-            if (got > 0 && meter_process(m, (const float *const *)buf, got) < 0) { result = AU_ERR_NO_MEMORY; goto end; }
+            if (got > 0 && (ret = meter_process(m, (const float *const *)buf, got)) < 0) {
+                result = ret == AVERROR(ENOMEM) ? AU_ERR_NO_MEMORY : AU_ERR_FILE;
+                goto end;
+            }
 
             if (cfg->progress && m->samples >= next_report) {
                 next_report = m->samples + m->rate; // about once per second of audio
@@ -516,9 +538,14 @@ done:
     result = AU_OK;
 
 end:
+    // Whatever failed while the interrupt was set (connecting, a read, a reconnect wait), it was a cancellation
+    if (result != AU_OK && result != AU_ERR_CANCELLED && interrupt && interrupt->callback &&
+        interrupt->callback(interrupt->opaque))
+        result = AU_ERR_CANCELLED;
     if (result != AU_OK && meter_ready) meter_free(m);
     if (buf) { av_freep(&buf[0]); av_freep(&buf); }
     swr_free(&conv);
+    av_channel_layout_uninit(&conv_src);
     av_channel_layout_uninit(&conv_in);
     av_channel_layout_uninit(&layout);
     av_frame_free(&frame);
@@ -536,6 +563,12 @@ AuLoudnessScanner *au_loudness_scanner_create(const AuLoudnessConfig *config) {
     AuLoudnessScanner *s = av_mallocz(sizeof(AuLoudnessScanner));
     if (s && config) s->config = *config;
     return s;
+}
+
+void loudness_scanner_set_interrupt(AuLoudnessScanner *s, const AVIOInterruptCB *interrupt) {
+    if (!s) return;
+    if (interrupt) s->interrupt = *interrupt;
+    else memset(&s->interrupt, 0, sizeof(s->interrupt));
 }
 
 void au_loudness_scanner_reset(AuLoudnessScanner *s) {
@@ -560,7 +593,7 @@ int au_loudness_scan_file(AuLoudnessScanner *s, const char *filename, AuLoudness
     if (!s || !filename || !filename[0]) return AU_ERR_INVALID_ARGUMENT;
 
     Meter m;
-    const int ret = measure_file(&s->config, filename, &m);
+    const int ret = measure_file(&s->config, &s->interrupt, filename, &m);
     if (ret != AU_OK) return ret;
 
     const double duration = (double)m.samples / m.rate;

@@ -223,7 +223,8 @@ static void tc_sleep_ms(uint32_t ms) { SDL_Delay(ms); }
 // Output channel count for the next tc_init_player*() call (0 = device default)
 static int tc_output_channels = 0;
 
-static int tc_init_player_cfg(int loop_count, double prepare_next_seconds) {
+// The player without an audio device (tc_init_player_cfg also opens the default one)
+static int tc_initialize(int loop_count, double prepare_next_seconds) {
     const InitializeConfig config = {
         .app_name = "ffaudio-tests",
         .output_channels = tc_output_channels,
@@ -241,7 +242,11 @@ static int tc_init_player_cfg(int loop_count, double prepare_next_seconds) {
         .on_buffering = tc_buffering_cb,
         .on_stream_metadata = tc_stream_metadata_cb,
     };
-    const int ret = au_initialize(&config);
+    return au_initialize(&config);
+}
+
+static int tc_init_player_cfg(int loop_count, double prepare_next_seconds) {
+    const int ret = tc_initialize(loop_count, prepare_next_seconds);
     if (ret != 0) return ret;
     return au_configure_audio_device(NULL);
 }

@@ -230,6 +230,12 @@ static void wait_ms(TrackState *t, int ms) {
     SDL_UnlockMutex(t->wait_mutex);
 }
 
+static void wake_read_thread(TrackState *t) {
+    SDL_LockMutex(t->wait_mutex);
+    SDL_CondSignal(t->continue_read_thread);
+    SDL_UnlockMutex(t->wait_mutex);
+}
+
 double track_start_position(const TrackState *t) {
     return t->start_time != AV_NOPTS_VALUE ? t->start_time / AV_TIME_BASE_DOUBLE : 0.0;
 }
@@ -280,7 +286,6 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
         t->max_buffer_s = nc.max_buffer_seconds;
         SDL_AtomicSet(&t->buffering, 1);   // nothing plays until the first buffer_seconds are in
     }
-    t->iformat = av_find_input_format(filename);
 
     if (config) {
         if (config->av_filtergraph && config->av_filtergraph[0] && !(t->filtergraph_str = av_strdup(config->av_filtergraph)))
@@ -337,11 +342,11 @@ void track_destroy(TrackState *t) {
         SDL_AtomicSet(&t->abort_request, 1);
         packet_queue_abort(&t->audio_queue);
         if (t->sampq.mutex) frame_queue_signal(&t->sampq);
-        if (t->wait_mutex && t->continue_read_thread) {
-            SDL_LockMutex(t->wait_mutex);
-            SDL_CondSignal(t->continue_read_thread);
-            SDL_UnlockMutex(t->wait_mutex);
-        }
+        if (t->wait_mutex && t->continue_read_thread) wake_read_thread(t);
+        // A decoder waiting for an output device (ensure_convert_graph) sees the abort now instead of after 100 ms
+        SDL_LockMutex(t->ap->format_mutex);
+        SDL_CondBroadcast(t->ap->format_cond);
+        SDL_UnlockMutex(t->ap->format_mutex);
         // The read thread stops the decoder thread and closes the input before it returns
         SDL_WaitThread(t->read_tid, NULL);
         t->read_tid = NULL;
@@ -379,10 +384,7 @@ void track_request_seek(TrackState *t, int64_t pos_us) {
     t->seek_req = true;
     t->pending_seek_percent = -1;
     SDL_UnlockMutex(t->seek_mutex);
-
-    SDL_LockMutex(t->wait_mutex);
-    SDL_CondSignal(t->continue_read_thread);
-    SDL_UnlockMutex(t->wait_mutex);
+    wake_read_thread(t);
 }
 
 void track_request_seek_percent(TrackState *t, const double percent) {
@@ -390,9 +392,10 @@ void track_request_seek_percent(TrackState *t, const double percent) {
     SDL_LockMutex(t->seek_mutex);
     t->pending_seek_percent = percent;
     SDL_UnlockMutex(t->seek_mutex);
+    wake_read_thread(t);
 }
 
-void track_update_gain(TrackState *t) {
+void track_update_gain(TrackState *t, const bool late) {
     AudioPlayer *ap = t->ap;
     SDL_LockMutex(ap->format_mutex);
     const AuReplayGainConfig cfg = ap->replaygain;
@@ -413,7 +416,7 @@ void track_update_gain(TrackState *t) {
         if (gain_cache_lookup(t->filename, &cached)) rg = cached;
     }
     const double db = replaygain_gain_db(&cfg, &rg);
-    SDL_AtomicSet(&t->gain_mb, (int)lrint(db * 100.0));
+    SDL_AtomicSet(&t->gain_mb, gain_pack((int)lrint(db * 100.0), late));
 }
 
 #define DEFAULT_MEASURE_WAIT_MS 500
@@ -433,12 +436,21 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
     if (tags.has_track_gain || tags.has_album_gain) return;
     if (gain_cache_lookup(t->filename, NULL)) return;
 
+    const unsigned failures = gain_cache_failure_mark();
     if (!gain_scan_request_for_player(t->filename)) return; // could not be measured before
     const int wait_ms = cfg.measure_wait_ms == 0 ? DEFAULT_MEASURE_WAIT_MS : cfg.measure_wait_ms;
-    if (wait_ms > 0 && !gain_cache_wait(t->filename, wait_ms, &t->abort_request) &&
-        !SDL_AtomicGet(&t->abort_request))
-        ff_log(AU_LOG_INFO, "'%s' starts before its loudness is measured; the gain follows when it is ready",
-               t->filename);
+    if (wait_ms <= 0) return;
+    switch (gain_cache_wait(t->filename, wait_ms, &t->abort_request, failures)) {
+        case GAIN_WAIT_TIMEOUT:
+            ff_log(AU_LOG_INFO, "'%s' starts before its loudness is measured; the gain follows when it is ready",
+                   t->filename);
+            break;
+        case GAIN_WAIT_FAILED:
+            ff_log(AU_LOG_INFO, "'%s' could not be measured; it plays at the fallback gain", t->filename);
+            break;
+        default:
+            break;
+    }
 }
 
 AuMediaInfo *track_copy_info(TrackState *t) {
@@ -564,12 +576,19 @@ static int seek_file(TrackState *t, int64_t pos_us) {
     return avformat_seek_file(ic, -1, INT64_MIN, target, INT64_MAX, 0);
 }
 
+// One more loop to play? Takes it from the count in one step: au_set_loop_count() can store a new count at any time,
+// and a separate read and decrement could turn its 0 into -1 (loop forever)
+static bool take_loop(TrackState *t) {
+    for (;;) {
+        const int loops = SDL_AtomicGet(&t->loops_remaining);
+        if (loops <= 0) return loops < 0;
+        if (SDL_AtomicCAS(&t->loops_remaining, loops, loops - 1)) return true;
+    }
+}
+
 // Demuxer reached the end of what should be played. Returns true when the track keeps going (looping).
 static bool handle_demux_end(TrackState *t, AVPacket *pkt) {
-    int loops = SDL_AtomicGet(&t->loops_remaining);
-    if (loops != 0 && !SDL_AtomicGet(&t->had_error)) {
-        if (loops > 0)
-            SDL_AtomicAdd(&t->loops_remaining, -1);
+    if (!SDL_AtomicGet(&t->had_error) && take_loop(t)) {
         // Seek back without flushing the queues so the loop is gapless; the mixer reports the restart when it
         // is heard (it only reports backward jumps of the timestamps that match a counted loop)
         if (seek_file(t, t->start_time != AV_NOPTS_VALUE ? t->start_time : 0) >= 0) {
@@ -616,7 +635,7 @@ static int read_thread(void *arg) {
 
     av_dict_set(&t->format_opts_n, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
     network_input_options(&t->format_opts_n, t->filename, t->http_headers);
-    ret = avformat_open_input(&ic, t->filename, t->iformat, &t->format_opts_n);
+    ret = avformat_open_input(&ic, t->filename, NULL, &t->format_opts_n); // probed: never chosen by the file's name
     if (ret < 0) {
         // avformat_open_input frees ic on failure
         ic = NULL;
@@ -651,6 +670,9 @@ static int read_thread(void *arg) {
     t->realtime = is_realtime(ic);
     t->infinite_buffer = t->realtime;
     t->live = t->network && (ic->duration == AV_NOPTS_VALUE || ic->duration <= 0);
+    // Positions count from the start of the file, like seeks and the duration: MPEG-TS (and so HLS) and some other
+    // containers start their timestamps later. Set before the decoder thread starts, which reads it.
+    t->pts_offset = ic->start_time != AV_NOPTS_VALUE ? ic->start_time / AV_TIME_BASE_DOUBLE : 0.0;
 
     if (t->start_time != AV_NOPTS_VALUE && seek_file(t, t->start_time) < 0)
         ff_log(AU_LOG_WARNING, "%s: could not seek to position %0.3f", t->filename, t->start_time / AV_TIME_BASE_DOUBLE);
@@ -671,7 +693,7 @@ static int read_thread(void *arg) {
         t->info = info;
         SDL_UnlockMutex(t->seek_mutex);
         wait_for_measurement(t, info);
-        track_update_gain(t);
+        track_update_gain(t, false);
     }
 
     if (st_index < 0 || stream_component_open(t, st_index) < 0 || t->audio_stream < 0) {
@@ -835,7 +857,7 @@ static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const
         av_frame_unref(frame);
         return AVERROR_EXIT;
     }
-    af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb);
+    af->pts = (frame->pts == AV_NOPTS_VALUE) ? NAN : frame->pts * av_q2d(tb) - t->pts_offset;
     af->pos = -1;
     af->serial = serial;
     af->speed = t->speed_chain.graph ? t->speed_cur : 1.0;
@@ -1237,9 +1259,12 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
 
     while (written < frames) {
         if (!t->cur) {
+            // The end marker is read before the queue: the decoder sets it after pushing its last frames, so an empty
+            // queue after a set marker really is the end (read the other way round, those frames could be cut)
+            const bool ended = SDL_AtomicGet(&t->eos_serial) == serial;
             Frame *f = frame_queue_peek_nb(&t->sampq);
             if (!f) {
-                if (SDL_AtomicGet(&t->eos_serial) == serial)
+                if (ended)
                     *eos = true;
                 else if (t->network && t->started) {
                     // The network fell behind: wait for buffer_seconds of data instead of stuttering

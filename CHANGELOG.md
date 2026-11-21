@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.1.0 (unreleased)
+## 2.1.0 (2026-11-20)
 
 ### Added
 - Network streams: `http://` and `https://` URLs in `au_play_audio()`, `au_set_next()`, `au_probe()` and loudness
@@ -19,9 +19,56 @@
   httpproxy, so playlists (HLS or otherwise) can not reach other protocols or local files.
 - Release archives: FFmpeg with the network protocols and the HLS demuxer; https through the system's GnuTLS
   on Linux and schannel on Windows.
+- ReplayGain measurement of network files only with `AuNetworkConfig.measure_streams` (measuring downloads the
+  whole file; albums with a network track are skipped without it). Such measurements stop right away on
+  `au_gain_scan_stop()` and `au_gain_cache_cancel_requests()`, also while connecting or waiting to reconnect.
 - The readme's "Memory use" covers streaming on Linux: with glibc's default settings, the read-ahead buffers make a
   long-running player grow (240 MB after 2 hours in the soak test, still rising); fixed malloc thresholds
   (`GLIBC_TUNABLES` or `mallopt()`) kept it flat at about 80 MB.
+
+### Fixed
+- With real SDL2 (as on Ubuntu and Debian; SDL3's sdl2-compat was not affected), a synchronous call from a callback
+  (`au_configure_audio_device()`, `au_get_track_info()`, `au_get_track_gain_db()`) hung the player for good: the
+  control thread did not recognise itself, so the call waited for the thread that was making it.
+- A track replaced with a fade too short for one sample, or before `au_configure_audio_device()` (two
+  `au_play_audio()` calls were enough), was never ended: its threads and file stayed open until shutdown and its
+  `on_eof` never came. Such fades are now cuts.
+- ffaudio emptied SDL's event queue, so applications that also use SDL lost their keyboard, mouse and window
+  events. It now only watches for audio device events and leaves the queue alone; it pumps the queue only when
+  SDL video is not initialized (with video, the application's event loop does it).
+- A callback that caused many notifications at once (e.g. changing the device from `on_eof`) could make ffaudio free
+  memory it had already freed.
+- Rare races: the last frames of a track could be cut when they arrived just as the mixer found the queue empty, and
+  `au_set_loop_count(0)` at the moment a loop started could turn into looping forever.
+- Tracks are destroyed without waiting up to 100 ms for a decoder that waits for an output device, and
+  `au_seek_percent()` on a track still opening is picked up at once.
+- Measuring a file whose read failed partway (a disk error, or a download that broke off) returned
+  the loudness of the part that was read, and the scan queue stored it as the file's. It now fails with
+  `AU_ERR_FILE`.
+- Measuring a file with an unspecified channel layout (e.g. a WAV without a channel mask) rebuilt the sample
+  converter for every decoded frame.
+- A track waiting for its measurement (`measure_missing`) starts as soon as the measurement fails or is cancelled,
+  instead of after `measure_wait_ms`.
+- `au_gain_cache_request_album()` does not queue an album again while it is queued or being measured; an urgent
+  request moves it to the front.
+- A request made while `au_gain_scan_stop()` was running could leave the queue without workers for good.
+- Pausing faded out with `1 - curve(t)` instead of `curve(1 - t)`, the shape crossfades use and `ffaudio.h`
+  describes: equal-power pause fades dipped too early, and logarithmic and exponential ones had each other's shape.
+- After a measurement that did not change a track's gain, the next gain change (e.g. a new preamp) took 2 s
+  instead of 10 ms.
+- `on_prepare_next` comes again after the queued track was removed with `au_clear_next()` or after a seek back;
+  it used to come only once per track.
+- `au_wait_loop()` could read the player while `au_shutdown()` on another thread freed it.
+- `au_media_is_live()` is true only for network streams without a duration, as the player treats them; it was also
+  true for local files with an unknown length, and for files whose length only the audio stream gave.
+- A local file named like a demuxer (`mp3`, `hls`, ...) was opened with that demuxer instead of being probed.
+- Files whose timestamps start late (MPEG-TS and so HLS, which start at 1.4 s or more) reported positions that
+  included that start, while seeks and the duration count from 0: `au_get_audio_play_time()` was too large, end
+  crossfades and `on_prepare_next` came that much early, and a device change jumped ahead by it.
+
+### Documentation
+- The ReplayGain cache file is not safe to write from several programs at the same time, as the readme said:
+  compacting replaces the file and can lose another writer's changes. One writer at a time.
 
 ## 2.0.1 (2026-11-20)
 
