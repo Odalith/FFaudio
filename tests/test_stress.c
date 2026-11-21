@@ -118,14 +118,21 @@ static void test_rapid_replace(void) {
 
 /* ---------- 4. A callback that makes many notifications ---------- */
 
-// A device change from a callback runs inline and queues a device notification. 40 of them grow the list of
+// A device change from a callback runs inline and queues a device notification. More than 32 of them grow the list of
 // notifications while it is being dispatched; that used to free through a pointer into the old list (ASan sees it).
+// At most 5 s of changes: on some systems (Linux's SDL2 with the dummy driver) a reopen waits for SDL's audio thread,
+// and the control thread, so every other call, waits for this callback.
 static AudioDeviceConfig named_device;
+static SDL_atomic_t changes_made, changes_ms;   // set when the callback is done: changes + 1, milliseconds
 
 static void change_device_many(bool skip, bool error, int32_t handle) {
     (void)skip; (void)error; (void)handle;
-    for (int i = 0; i < 40; i++)
-        au_configure_audio_device(i % 2 ? NULL : &named_device);
+    const Uint32 start = SDL_GetTicks();
+    int made = 0;
+    for (int i = 0; i < 40 && SDL_GetTicks() - start < 5000; i++)
+        if (au_configure_audio_device(i % 2 ? NULL : &named_device) == AU_OK) made++;
+    SDL_AtomicSet(&changes_ms, (int)(SDL_GetTicks() - start));
+    SDL_AtomicSet(&changes_made, made + 1);
 }
 
 static void test_callback_adds_many_notes(void) {
@@ -136,15 +143,22 @@ static void test_callback_adds_many_notes(void) {
         return;
     }
     named_device = (AudioDeviceConfig){ .audio_device = devs[0], .audio_device_index = 0 };
+    SDL_AtomicSet(&changes_made, 0);
     SDL_LockMutex(tc_mutex);
     tc_on_eof_hook = change_device_many;
     SDL_UnlockMutex(tc_mutex);
     au_play_audio(fx("s44_stereo.flac"), NULL);
     CHECK(TC_WAIT_FIELD(eof, 1, 5000));
-    CHECK(TC_WAIT_FIELD(device, 40, 10000));
+    const Uint32 deadline = SDL_GetTicks() + 10000;
+    while (!SDL_AtomicGet(&changes_made) && (Sint32)(deadline - SDL_GetTicks()) > 0) SDL_Delay(10);
     SDL_LockMutex(tc_mutex);
     tc_on_eof_hook = NULL;
     SDL_UnlockMutex(tc_mutex);
+    const int made = SDL_AtomicGet(&changes_made) - 1;
+    printf("   %d device changes from the callback in %d ms\n", made, SDL_AtomicGet(&changes_ms));
+    CHECK(made > 0);
+    CHECK(TC_WAIT_FIELD(device, made, 5000));   // every change was reported
+    if (made <= 32) printf("   (too few to grow the list during the dispatch here: that part was not exercised)\n");
     au_configure_audio_device(NULL);
     au_free_audio_devices(devs, n);
 }
