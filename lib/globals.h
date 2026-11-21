@@ -470,7 +470,8 @@ typedef struct AudioPlayer {
 
     // ---- control thread ----
     SDL_Thread *control_thread;
-    SDL_threadID control_thread_id;
+    SDL_threadID control_thread_id;     // set by the control thread itself before au_initialize() returns
+    SDL_sem *started_sem;               // au_initialize() waits on it for control_thread_id
     SDL_atomic_t shutting_down;
     SDL_mutex *msg_mutex;
     SDL_cond *msg_cond;
