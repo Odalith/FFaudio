@@ -745,7 +745,7 @@ static void test_speed(void) {
     CHECK(fabs(r.seconds - 2.0) < 0.1);
     CHECK(fabs(r.frequency - 440) < 5);
 
-    CHECK(au_initialize(NULL) != AU_OK); // (no player: the setter below must refuse)
+    CHECK(au_init(NULL) != AU_OK); // (no player: the setter below must refuse)
     CHECK(au_set_playback_speed(2.0, true) == AU_ERR_NOT_INITIALIZED);
 }
 

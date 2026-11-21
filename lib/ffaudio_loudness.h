@@ -22,7 +22,7 @@
  * Measures files and returns the values; it never modifies them. Store the results in your own library
  * database and pass them to playback with PlayAudioConfig.replaygain (see au_loudness_to_replaygain()).
  *
- * - No au_initialize() needed, and it does not affect playback: scan while music plays.
+ * - No au_init() needed, and it does not affect playback: scan while music plays.
  * - A scanner is used by one thread at a time; run several scanners in parallel to scan faster.
  * - Album values: scan every track of the album with the same scanner, then call au_loudness_album().
  *
@@ -113,10 +113,10 @@ extern "C" {
     // paths that are cached, queued or being measured are skipped, so it is fine to re-send a playlist window
     // whenever the position changes:
     //
-    //   on_track_started: au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
+    //   AU_EVENT_TRACK_STARTED: au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
     //
     // With AuReplayGainConfig.measure_missing the player also measures a starting track that has no value at
-    // all, and holds its start for up to measure_wait_ms. Works without au_initialize(); paths are only read.
+    // all, and holds its start for up to measure_wait_ms. Works without au_init(); paths are only read.
 
     typedef enum AU_SCAN_PRIORITY {
         AU_SCAN_PREFETCH = 0,     // in request order, after urgent work

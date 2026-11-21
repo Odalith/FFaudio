@@ -26,9 +26,9 @@ static void sleep_ms(const int ms) {
 
 static atomic_int ended; // 1 = end of file, 2 = error
 
-static void on_eof(bool skip, bool error, int32_t handle, void *ud) {
-    (void)skip; (void)handle; (void)ud;
-    atomic_store(&ended, error ? 2 : 1);
+static void on_event(const AuEvent *e, void *ud) {
+    (void)ud;
+    if (e->type == AU_EVENT_TRACK_ENDED) atomic_store(&ended, e->data.ended.reason == AU_END_ERROR ? 2 : 1);
 }
 
 int main(int argc, char **argv) {
@@ -49,8 +49,8 @@ int main(int argc, char **argv) {
     }
     printf("loudness %.2f LUFS, true peak %.2f dBTP\n", l.integrated_lufs, 20 * log10(l.true_peak));
 
-    const InitializeConfig cfg = { .on_eof = on_eof };
-    if (au_initialize(&cfg) != AU_OK || au_configure_audio_device(NULL) != AU_OK) {
+    const AuConfig cfg = { .on_event = on_event };
+    if (au_init(&cfg) != AU_OK) {
         fprintf(stderr, "could not initialize the player\n");
         return 1;
     }

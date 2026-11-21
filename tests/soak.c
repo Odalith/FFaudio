@@ -266,7 +266,7 @@ static void on_devices_changed(void *ud) {
     (void)ud;
     int n = 0;
     char **devs = NULL;
-    if (au_get_audio_devices(&n, &devs) == AU_OK) au_free_audio_devices(devs, n);
+    if ((devs = au_list_devices(&n))) au_free_devices(devs, n);
 }
 
 //+-----------------------------------------------------+
@@ -389,21 +389,37 @@ static void play_random(const bool queue) {
 
 static const char *cache_file = "soak-replaygain.cache";
 
+static void on_event(const AuEvent *e, void *ud) {
+    switch (e->type) {
+        case AU_EVENT_LOG: on_log(e->data.log.message, e->data.log.request, e->data.log.level, ud); break;
+        case AU_EVENT_TRACK_ENDED:
+            on_eof(e->data.ended.reason == AU_END_SKIPPED, e->data.ended.reason == AU_END_ERROR, e->handle, ud);
+            break;
+        case AU_EVENT_RESTARTED:
+            on_restart(e->handle, e->data.restarted.position, e->data.restarted.from_loop,
+                       e->data.restarted.loops_remaining, ud);
+            break;
+        case AU_EVENT_PREPARE_NEXT: on_prepare_next(e->handle, ud); break;
+        case AU_EVENT_TRACK_STARTED: on_started(e->handle, ud); break;
+        case AU_EVENT_DEVICES_CHANGED: on_devices_changed(ud); break;
+        case AU_EVENT_BUFFERING:
+            on_buffering(e->handle, e->data.buffering.active, e->data.buffering.buffered_seconds, ud);
+            break;
+        case AU_EVENT_STREAM_METADATA:
+            on_stream_metadata(e->handle, e->data.metadata.title, e->data.metadata.artist, ud);
+            break;
+        default: break;
+    }
+}
+
 static void init_player(void) {
-    const InitializeConfig config = {
+    const AuConfig config = {
         .app_name = "ffaudio soak",
-        .initial_volume = 30,
+        .volume = 0.3f,
         .prepare_next_seconds = rnd_real(2, 15),
-        .on_log = on_log,
-        .on_eof = on_eof,
-        .on_restart = on_restart,
-        .on_prepare_next = on_prepare_next,
-        .on_track_started = on_started,
-        .on_audio_devices_changed = on_devices_changed,
-        .on_buffering = on_buffering,
-        .on_stream_metadata = on_stream_metadata,
+        .on_event = on_event,
     };
-    if (au_initialize(&config) != AU_OK || au_configure_audio_device(NULL) != AU_OK) {
+    if (au_init(&config) != AU_OK) {
         fprintf(stderr, "could not start the player\n");
         exit(1);
     }
@@ -627,7 +643,7 @@ static void one_action(void) {
         ACTION("devices");
         on_devices_changed(NULL);
         char name[256];
-        au_get_audio_device_name(name, sizeof(name));
+        au_get_device_name(name, sizeof(name));
     }
     else if (r < 880) {
         ACTION("burst");  // many changes at once, faster than any track can start

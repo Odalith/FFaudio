@@ -36,7 +36,6 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "delegates.h"
 
 #define FFAUDIO_VERSION_MAJOR 2
 #define FFAUDIO_VERSION_MINOR 1
@@ -61,6 +60,76 @@ extern "C" {
         AU_ERR_CANCELLED = -10,
         AU_ERR_UNSUPPORTED = -11,       // not available in this build (e.g. an FFmpeg filter that was not compiled in)
     } AU_RESULT;
+
+    typedef enum AU_LOG_LEVEL {
+        AU_LOG_INFO = 0,
+        AU_LOG_WARNING = 1,
+        AU_LOG_ERROR = 2,
+        AU_LOG_FATAL = 3,
+    } AU_LOG_LEVEL;
+
+    //+-----------------------------------------------------+
+    //| Events                                              |
+    //+-----------------------------------------------------+
+    // Everything the player reports comes as an AuEvent: to AuConfig.on_event on ffaudio's control thread, or, when
+    // on_event is NULL, queued for au_poll_event() / au_wait_event() on a thread of the application's choosing.
+    // No function waits for the control thread, so every function may be called from on_event (except
+    // au_shutdown()); what such a call changes is reported by later events.
+
+    typedef enum AU_EVENT {
+        AU_EVENT_LOG = 0,          // data.log: a message from the library
+        AU_EVENT_DEVICE,           // data.device: the output device was opened (ok), or could not be (!ok)
+        AU_EVENT_DEVICES_CHANGED,  // an output device was added or removed: au_list_devices() has the new list
+        AU_EVENT_TRACK_STARTED,    // the track became the audible one (start, gapless/crossfade transition, skip)
+        AU_EVENT_TRACK_ENDED,      // data.ended: the track left the player; exactly once for every handle
+        AU_EVENT_RESTARTED,        // data.restarted: the current track restarted, after a seek or a loop
+        AU_EVENT_DURATION,         // data.duration: the duration of the track became known or changed
+        AU_EVENT_PREPARE_NEXT,     // the current track nears its end and nothing is queued (also when a queued
+                                   // track fails to open): a good moment for au_set_next()
+        AU_EVENT_BUFFERING,        // data.buffering: a network track waits for data, or plays again
+        AU_EVENT_STREAM_METADATA,  // data.metadata: the stream's "now playing" changed, when that part is heard
+        AU_EVENT_OVERFLOW,         // au_poll_event() only: data.overflow.dropped events were dropped (queue full)
+    } AU_EVENT;
+
+    typedef enum AU_END {
+        AU_END_FINISHED = 0,       // played to the end
+        AU_END_SKIPPED,            // replaced, skipped, cleared or stopped
+        AU_END_ERROR,              // could not be opened, or decoding failed
+    } AU_END;
+
+    typedef struct AuEvent {
+        AU_EVENT type;
+        int32_t handle;            // the track the event is about; 0 for player-wide events
+        union {
+            // request: the number of API calls made when it was logged
+            struct { AU_LOG_LEVEL level; const char *message; int64_t request; } log;
+            // name: the device now in use (for the system default, what it resolves to when SDL can tell);
+            // fell_back: the chosen device could not be opened, the system default was opened instead.
+            // !ok: no device could be opened (name: the one asked for, NULL = the system default)
+            struct { bool ok; bool fell_back; const char *name; int32_t sample_rate, channels; } device;
+            struct { AU_END reason; } ended;
+            // position in seconds; from_loop: a loop started (loops_remaining after it), otherwise a seek
+            struct { double position; bool from_loop; int32_t loops_remaining; } restarted;
+            struct { double seconds; } duration;
+            // active: waiting for data (the position holds); about every 500 ms while it lasts, with what is queued
+            struct { bool active; double buffered_seconds; } buffering;
+            // Icecast "Artist - Title" is split at " - "; artist is NULL when there is none
+            struct { const char *title, *artist; } metadata;
+            struct { int32_t dropped; } overflow;
+        } data;
+    } AuEvent;
+
+    // Strings in the event are valid until the callback returns
+    typedef void (*AuEventFn)(const AuEvent *event, void *user_data);
+
+    // The oldest queued event, when AuConfig.on_event is NULL. false = none. Its strings are valid until the next
+    // au_poll_event() / au_wait_event() call or au_shutdown(). The queue holds 4096 events; when it is full, log events are dropped
+    // first, then the oldest, and the next poll returns AU_EVENT_OVERFLOW with the number dropped.
+    DLL_EXPORT bool au_poll_event(AuEvent *out);
+
+    // au_poll_event() that waits up to timeout_seconds (< 0 = no limit) for an event, for a thread that only handles
+    // events. false on timeout, and once au_shutdown() has been called.
+    DLL_EXPORT bool au_wait_event(AuEvent *out, double timeout_seconds);
 
     //+-----------------------------------------------------+
     //| Fades and crossfades                                |
@@ -145,32 +214,21 @@ extern "C" {
     //| Configuration structs                               |
     //+-----------------------------------------------------+
 
-    typedef struct InitializeConfig {
-        const char* app_name;
-        int initial_volume;                  // 0..100, values < 0 mean 100
-        int initial_loop_count;              // -1 for infinite, 0 for none
-        // Seconds before the end of the current track at which on_prepare_next fires. 0 = 10 seconds.
+    typedef struct AuConfig {
+        const char *app_name;                // shown by the system's sound settings
+        float volume;                        // linear gain 0..1; < 0 means 1
+        int loop_count;                      // -1 for infinite, 0 for none
+        // Seconds before the end of the current track at which AU_EVENT_PREPARE_NEXT comes. 0 = 10 seconds.
         double prepare_next_seconds;
         // Output format overrides; 0 = use what the device prefers. SDL converts when the device differs.
         int output_channels;                 // 1..8, e.g. 2 to always mix down to stereo
         int output_sample_rate;              // 8000..384000 Hz
-        void *user_data;                     // passed to every callback
-        NotifyOfLog on_log;
-        NotifyOfEndOfFile on_eof;
-        NotifyOfRestart on_restart;
-        NotifyOfDurationUpdate on_duration_update;
-        NotifyOfPrepareNext on_prepare_next;
-        NotifyOfTrackStarted on_track_started;
-        NotifyOfAudioDeviceUpdate on_audio_device_update;
-        NotifyOfAudioDevicesChanged on_audio_devices_changed;
-        NotifyOfBuffering on_buffering;
-        NotifyOfStreamMetadata on_stream_metadata;
-    } InitializeConfig;
-
-    typedef struct AudioDeviceConfig {
-        const char* audio_device;    // Device name, see au_get_audio_devices()
-        int audio_device_index;      // Index in the enumerated list; see au_get_audio_devices()
-    } AudioDeviceConfig;
+        // The output device to open (a name from au_list_devices()); NULL = the system default, followed when it
+        // changes. au_set_device() switches later.
+        const char *device;
+        AuEventFn on_event;                  // NULL = queue events for au_poll_event()
+        void *user_data;                     // passed to on_event
+    } AuConfig;
 
     typedef struct PlayAudioConfig {
         // Optional; Seek this many seconds before starting playback. <= 0 == plays from the start
@@ -198,30 +256,30 @@ extern "C" {
     //| Lifetime                                            |
     //+-----------------------------------------------------+
 
-    // Call this before anything else.
-    DLL_EXPORT int au_initialize(const InitializeConfig* config);
+    // Start the player and open the output device (AuConfig.device); AU_EVENT_DEVICE reports the result. Tracks
+    // can be started right away: they wait for the device.
+    DLL_EXPORT int au_init(const AuConfig *config);
 
-    // Stops playback and frees everything. Must not be called from a callback.
-    // au_initialize() may be called again afterwards.
+    // Stops playback and frees everything. Not from on_event. au_init() may be called again afterwards.
     DLL_EXPORT void au_shutdown(void);
 
-    // To be called after au_initialize(); Pass NULL to use (and follow) the system default device.
-    // Blocks until the device is open. Tracks can be started before this; they wait for the device.
-    DLL_EXPORT int au_configure_audio_device(const AudioDeviceConfig* custom_config);
+    // Switch the output device: a name from au_list_devices(), or NULL for the system default (followed when it
+    // changes). Returns at once; AU_EVENT_DEVICE reports the result. A chosen device that can not be opened, or that
+    // disappears later, falls back to the system default (fell_back). Choosing the device in use does nothing.
+    DLL_EXPORT int au_set_device(const char *name);
 
-    // List the user's audio devices. Free the list with au_free_audio_devices().
-    DLL_EXPORT int au_get_audio_devices(int *out_total, char ***out_devices);
+    // The names of the output devices, *count of them; NULL when there are none. Free with au_free_devices().
+    DLL_EXPORT char **au_list_devices(int *count);
 
-    // Free a list from au_get_audio_devices() (NULL is fine). Use this rather than free(): on Windows the
-    // application and ffaudio can use different C runtimes (e.g. MSVC with /MT), and free() on memory that
-    // ffaudio allocated then corrupts the heap.
-    DLL_EXPORT void au_free_audio_devices(char **devices, int total);
+    // Free a list from au_list_devices() (NULL is fine). Use this rather than free(): on Windows the application and
+    // ffaudio can use different C runtimes (e.g. MSVC with /MT), and free() on memory that ffaudio allocated then
+    // corrupts the heap.
+    DLL_EXPORT void au_free_devices(char **devices, int count);
 
-    // Name of the output device in use (for the system default, the device it currently resolves to when SDL
-    // can tell, otherwise "System default"). "" when no device is open. Returns the length, or
-    // AU_ERR_INVALID_ARGUMENT if buf is too small. With au_configure_audio_device(NULL) playback follows the
-    // system default device; a chosen device that disappears falls back to the default.
-    DLL_EXPORT int au_get_audio_device_name(char *buf, size_t size);
+    // Name of the output device in use (for the system default, the device it currently resolves to when SDL can
+    // tell, otherwise "System default"). "" when no device is open. Returns the length, or AU_ERR_INVALID_ARGUMENT
+    // if buf is too small.
+    DLL_EXPORT int au_get_device_name(char *buf, size_t size);
 
     // The output format every track is converted to (float32 internally).
     DLL_EXPORT int au_get_output_spec(int *out_sample_rate, int *out_channels);
@@ -291,7 +349,7 @@ extern "C" {
     } AuNetworkConfig;
 
     // Settings for every network stream (player, au_probe(), loudness analysis); NULL restores the defaults. Can be
-    // called at any time, also before au_initialize(); tracks that are already open keep their settings.
+    // called at any time, also before au_init(); tracks that are already open keep their settings.
     DLL_EXPORT int au_set_network(const AuNetworkConfig *config);
 
     // true for http(s):// and other URLs with a scheme other than file://
@@ -366,7 +424,7 @@ extern "C" {
     //   others:    SDL_GetPrefPath("ffaudio", "ffaudio") + replaygain.cache (Android, iOS, ...)
     // Each change is appended to the file right away (one small write), and the file is read on first use. Several
     // processes can share the file: writes take a lock (a ".lock" file next to it), so none are lost.
-    // Works without au_initialize() and survives au_shutdown().
+    // Works without au_init() and survives au_shutdown().
     // Media files are never touched.
     //
     // When a track starts, ffaudio looks up its path (exactly as passed to au_play_audio()/au_set_next()) and
@@ -374,7 +432,7 @@ extern "C" {
     // Setting or removing an entry also updates tracks that are already queued or playing (with a short ramp),
     // so values can arrive after the track was queued:
     //
-    //   on_prepare_next: path = next song; au_set_next(path, NULL);
+    //   AU_EVENT_PREPARE_NEXT: path = next song; au_set_next(path, NULL);
     //                    if (!au_gain_cache_get(path, NULL)) start a scan in a worker thread
     //   worker thread:   au_gain_cache_scan(path, NULL, NULL);   // measures and stores; applied right away
     //
@@ -419,12 +477,12 @@ extern "C" {
 
     typedef struct AuMediaInfo AuMediaInfo;
 
-    // Read the tags and format of a file without playing it. Works without au_initialize() and from
+    // Read the tags and format of a file without playing it. Works without au_init() and from
     // any thread; it blocks while the file is opened. Free the result with au_media_info_free().
     DLL_EXPORT AuMediaInfo *au_probe(const char *filename, int *out_error);
 
     // Information about a playing or queued track (handle 0 = the current track); NULL when the track is
-    // unknown or not open yet (see on_duration_update). Free the result with au_media_info_free().
+    // unknown or not open yet (see AU_EVENT_DURATION). Free the result with au_media_info_free().
     DLL_EXPORT AuMediaInfo *au_get_track_info(int32_t handle);
 
     DLL_EXPORT void au_media_info_free(AuMediaInfo *info);
@@ -495,7 +553,7 @@ extern "C" {
     DLL_EXPORT const char *au_get_version(void);
 
     // Free memory ffaudio returns without a dedicated free function, such as au_fb_build() strings. Like
-    // au_free_audio_devices(), it frees with ffaudio's own C runtime (see there).
+    // au_free_devices(), it frees with ffaudio's own C runtime (see there).
     DLL_EXPORT void au_free(void *ptr);
 
 #ifdef __cplusplus

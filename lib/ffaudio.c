@@ -40,6 +40,7 @@
 #include "gain_cache.h"
 #include "once.h"
 #include "numbers.h"
+#include "events.h"
 
 
 // The control thread sleeps until a message or a mixer event wakes it, or for this long: while tracks are loaded
@@ -124,7 +125,7 @@ void ff_post_track_msg(const MsgType type, const int32_t handle, const double d)
 
 void ff_log(const enum AU_LOG_LEVEL level, const char *fmt, ...) {
     AudioPlayer *ap = audio_player;
-    if (!fmt || !ap || !ap->notify_of_log_callback) return;
+    if (!fmt || !ap) return;
 
     va_list args;
     va_start(args, fmt);
@@ -150,19 +151,10 @@ void ff_log(const enum AU_LOG_LEVEL level, const char *fmt, ...) {
 //| Notifications (user callbacks)                      |
 //+-----------------------------------------------------+
 
-typedef enum NoteType {
-    NOTE_LOG, NOTE_EOF, NOTE_RESTART, NOTE_DURATION, NOTE_PREPARE_NEXT, NOTE_TRACK_STARTED, NOTE_DEVICE,
-    NOTE_DEVICES_CHANGED, NOTE_BUFFERING, NOTE_STREAM_METADATA,
-} NoteType;
-
+// An event and the strings it owns (s1: log message, device name or title; s2: artist)
 typedef struct Note {
-    NoteType type;
-    int32_t handle;
-    double d;
-    bool b1, b2;
-    int32_t i;
-    int64_t request;
-    char *text, *text2;
+    AuEvent ev;
+    char *s1, *s2;
 } Note;
 
 typedef struct NoteList {
@@ -172,62 +164,44 @@ typedef struct NoteList {
 
 static NoteList notes;  // control thread only
 
-static void note_add(const Note n) {
+static void note_add_owned(const AuEvent ev, char *s1, char *s2) {
     if (notes.n == notes.cap) {
         const int cap = notes.cap ? notes.cap * 2 : 32;
         Note *items = av_realloc_array(notes.items, cap, sizeof(Note));
-        if (!items) { av_free(n.text); av_free(n.text2); return; }
+        if (!items) { av_free(s1); av_free(s2); return; }
         notes.items = items;
         notes.cap = cap;
     }
-    notes.items[notes.n++] = n;
+    notes.items[notes.n++] = (Note){ .ev = ev, .s1 = s1, .s2 = s2 };
+}
+
+static void note_add(const AuEvent ev) {
+    note_add_owned(ev, NULL, NULL);
 }
 
 static void dispatch_notes(AudioPlayer *ap) {
-    void *ud = ap->user_data;
-    // Each note is copied out before its callback: a callback can run API calls inline that add notes and move the
-    // array. Notes added meanwhile are dispatched in this same pass.
+    // Each note is copied out before it is delivered: the list may grow meanwhile (notes added during this pass are
+    // delivered in it too)
     for (int i = 0; i < notes.n; i++) {
-        const Note n = notes.items[i];
+        Note n = notes.items[i];
         if (!SDL_AtomicGet(&ap->shutting_down)) {
-            switch (n.type) {
-                case NOTE_LOG:
-                    if (ap->notify_of_log_callback) ap->notify_of_log_callback(n.text, n.request, (enum AU_LOG_LEVEL)n.i, ud);
-                    break;
-                case NOTE_EOF:
-                    if (ap->notify_of_eof_callback) ap->notify_of_eof_callback(n.b1, n.b2, n.handle, ud);
-                    break;
-                case NOTE_RESTART:
-                    if (ap->notify_of_restart_callback) ap->notify_of_restart_callback(n.handle, n.d, n.b1, n.i, ud);
-                    break;
-                case NOTE_DURATION:
-                    if (ap->notify_of_duration_update_callback) ap->notify_of_duration_update_callback(n.handle, n.d, ud);
-                    break;
-                case NOTE_PREPARE_NEXT:
-                    if (ap->notify_of_prepare_next_callback) ap->notify_of_prepare_next_callback(n.handle, ud);
-                    break;
-                case NOTE_TRACK_STARTED:
-                    if (ap->notify_of_track_started_callback) ap->notify_of_track_started_callback(n.handle, ud);
-                    break;
-                case NOTE_STREAM_METADATA:
-                    if (ap->notify_of_stream_metadata_callback)
-                        ap->notify_of_stream_metadata_callback(n.handle, n.text, n.text2, ud);
-                    break;
-                case NOTE_BUFFERING:
-                    if (ap->notify_of_buffering_callback) ap->notify_of_buffering_callback(n.handle, n.b1, n.d, ud);
-                    break;
-                case NOTE_DEVICES_CHANGED:
-                    if (ap->notify_of_audio_devices_changed_callback) ap->notify_of_audio_devices_changed_callback(ud);
-                    break;
-                case NOTE_DEVICE:
-                    if (ap->notify_of_audio_device_update_callback) ap->notify_of_audio_device_update_callback(n.i, (int32_t)n.d, ud);
-                    break;
+            switch (n.ev.type) {
+                case AU_EVENT_LOG:             n.ev.data.log.message = n.s1; break;
+                case AU_EVENT_DEVICE:          n.ev.data.device.name = n.s1; break;
+                case AU_EVENT_STREAM_METADATA: n.ev.data.metadata.title = n.s1; n.ev.data.metadata.artist = n.s2; break;
+                default: break;
             }
+            if (ap->on_event) ap->on_event(&n.ev, ap->user_data);
+            else events_push(&n.ev);
         }
-        av_free(n.text);
-        av_free(n.text2);
+        av_free(n.s1);
+        av_free(n.s2);
     }
     notes.n = 0;
+}
+
+static AU_END end_reason(const TrackEndReason r) {
+    return r == END_SKIPPED ? AU_END_SKIPPED : r == END_ERROR ? AU_END_ERROR : AU_END_FINISHED;
 }
 
 //+-----------------------------------------------------+
@@ -269,7 +243,7 @@ static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
     if (reason == END_NATURAL && SDL_AtomicGet(&t->had_error))
         reason = END_ERROR;
     t->ended = true;
-    note_add((Note){ .type = NOTE_EOF, .handle = t->handle, .b1 = reason == END_SKIPPED, .b2 = reason == END_ERROR });
+    note_add((AuEvent){ .type = AU_EVENT_TRACK_ENDED, .handle = t->handle, .data.ended.reason = end_reason(reason) });
     (void)ap;
 }
 
@@ -368,7 +342,7 @@ static TrackState *create_track(AudioPlayer *ap, const Msg *msg) {
     if (!t || !registry_add(ap, t)) {
         if (t) track_destroy(t);
         ff_log(AU_LOG_FATAL, "Failed to create a track for '%s'", msg->str);
-        note_add((Note){ .type = NOTE_EOF, .handle = msg->handle, .b1 = false, .b2 = true });
+        note_add((AuEvent){ .type = AU_EVENT_TRACK_ENDED, .handle = msg->handle, .data.ended.reason = AU_END_ERROR });
         return NULL;
     }
     return t;
@@ -606,10 +580,12 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
     output_close(ap);
 
     int ret = output_open(ap, use_default, name, index);
+    bool fell_back = false;
     if (ret < 0 && !use_default) {
         ff_log(AU_LOG_ERROR, "Failed to open audio device '%s', trying the default device", name ? name : "?");
         ret = output_open(ap, true, NULL, -1);
         if (ret >= 0) {
+            fell_back = true;
             ap->use_default_device = true;
             av_freep(&ap->audio_device_name);
             ap->audio_device_index = -1;
@@ -617,6 +593,8 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
     }
     if (ret < 0) {
         ff_log(AU_LOG_ERROR, "Failed to open the default audio device");
+        note_add_owned((AuEvent){ .type = AU_EVENT_DEVICE, .data.device = { .ok = false } },
+                       name && !use_default ? av_strdup(name) : NULL, NULL);
         return ret;
     }
 
@@ -638,28 +616,29 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
         }
     }
 
-    note_add((Note){ .type = NOTE_DEVICE, .i = m->channels, .d = m->rate });
+    note_add_owned((AuEvent){ .type = AU_EVENT_DEVICE,
+                              .data.device = { .ok = true, .fell_back = fell_back, .sample_rate = m->rate,
+                                               .channels = m->channels } },
+                   av_strdup(ap->device_in_use ? ap->device_in_use : ""), NULL);
     update_device_running(ap);
     return AU_OK;
 }
 
+// msg->str: the device's name, NULL = the system default
 static int cmd_configure_device(AudioPlayer *ap, const Msg *msg) {
-    const bool use_default = !msg->has_device;
-    if (!use_default && (!msg->device.audio_device || msg->device.audio_device_index < 0))
-        return AU_ERR_INVALID_ARGUMENT;
-
+    const bool use_default = !msg->str;
     if (ap->device_id) {
         if (use_default && ap->use_default_device)
             return AU_ERR_NOTHING_TO_DO;
         if (!use_default && !ap->use_default_device && ap->audio_device_name &&
-            strcmp(ap->audio_device_name, msg->device.audio_device) == 0)
+            strcmp(ap->audio_device_name, msg->str) == 0)
             return AU_ERR_NOTHING_TO_DO;
     }
 
     av_freep(&ap->audio_device_name);
     ap->use_default_device = use_default;
-    ap->audio_device_index = use_default ? -1 : msg->device.audio_device_index;
-    if (!use_default && !(ap->audio_device_name = av_strdup(msg->device.audio_device)))
+    ap->audio_device_index = -1;
+    if (!use_default && !(ap->audio_device_name = av_strdup(msg->str)))
         return AU_ERR_NO_MEMORY;
 
     return reopen_output(ap, use_default, ap->audio_device_name, ap->audio_device_index);
@@ -685,7 +664,7 @@ static void msg_track_failed(AudioPlayer *ap, TrackState *t) {
 
     // Give the application a chance to queue something else
     if ((was_next || was_current) && !have_next)
-        note_add((Note){ .type = NOTE_PREPARE_NEXT, .handle = cur ? cur->handle : 0 });
+        note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = cur ? cur->handle : 0 });
     update_device_running(ap);
 }
 
@@ -695,7 +674,7 @@ static void report_duration(TrackState *t) {
     if (!t->duration_reported || fabs(d - t->reported_duration) > 0.01) {
         t->duration_reported = true;
         t->reported_duration = d;
-        note_add((Note){ .type = NOTE_DURATION, .handle = t->handle, .d = d });
+        note_add((AuEvent){ .type = AU_EVENT_DURATION, .handle = t->handle, .data.duration.seconds = d });
     }
 }
 
@@ -717,14 +696,14 @@ static void handle_track_msg(AudioPlayer *ap, const Msg *msg) {
             unlock_mixer(ap);
             if (is_current_alone && !t->prepare_next_sent && SDL_AtomicGet(&t->loops_remaining) == 0) {
                 t->prepare_next_sent = true;
-                note_add((Note){ .type = NOTE_PREPARE_NEXT, .handle = t->handle });
+                note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = t->handle });
             }
             break;
         }
         case MSG_TRACK_SEEKED:
             t->prepare_next_sent = false; // after a seek back, the end comes again
-            note_add((Note){ .type = NOTE_RESTART, .handle = t->handle, .d = msg->d, .b1 = false,
-                             .i = SDL_AtomicGet(&t->loops_remaining) });
+            note_add((AuEvent){ .type = AU_EVENT_RESTARTED, .handle = t->handle,
+                                .data.restarted = { msg->d, false, SDL_AtomicGet(&t->loops_remaining) } });
             break;
         default:
             break;
@@ -747,11 +726,11 @@ static void process_mixer_events(AudioPlayer *ap) {
         if (t->ended) continue;
         switch (e->type) {
             case MIX_EV_TRACK_STARTED:
-                note_add((Note){ .type = NOTE_TRACK_STARTED, .handle = t->handle });
+                note_add((AuEvent){ .type = AU_EVENT_TRACK_STARTED, .handle = t->handle });
                 break;
             case MIX_EV_TRACK_LOOPED:
-                note_add((Note){ .type = NOTE_RESTART, .handle = t->handle, .d = e->position, .b1 = true,
-                                 .i = SDL_AtomicGet(&t->loops_remaining) });
+                note_add((AuEvent){ .type = AU_EVENT_RESTARTED, .handle = t->handle,
+                                    .data.restarted = { e->position, true, SDL_AtomicGet(&t->loops_remaining) } });
                 break;
             case MIX_EV_TRACK_ENDED:
                 end_track(ap, t, END_NATURAL);
@@ -815,7 +794,7 @@ static void check_device_list(AudioPlayer *ap) {
     ap->n_known_devices = n;
     if (had_list) {
         ff_log(AU_LOG_INFO, "Audio output devices changed (%d now)", n);
-        note_add((Note){ .type = NOTE_DEVICES_CHANGED });
+        note_add((AuEvent){ .type = AU_EVENT_DEVICES_CHANGED });
     }
 }
 
@@ -849,7 +828,7 @@ static void housekeeping(AudioPlayer *ap) {
         SDL_UnlockMutex(ap->format_mutex);
         if (end >= 0 && (end - pos) / speed <= lead) { // lead is wall clock time
             cur->prepare_next_sent = true;
-            note_add((Note){ .type = NOTE_PREPARE_NEXT, .handle = cur->handle });
+            note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = cur->handle });
         }
     }
 
@@ -863,7 +842,7 @@ static void housekeeping(AudioPlayer *ap) {
         unlock_mixer(ap);
         if (!playing) continue;
         for (StreamMeta *m; (m = track_take_stream_meta(t, at));) {
-            note_add((Note){ .type = NOTE_STREAM_METADATA, .handle = t->handle, .text = m->title, .text2 = m->artist });
+            note_add_owned((AuEvent){ .type = AU_EVENT_STREAM_METADATA, .handle = t->handle }, m->title, m->artist);
             m->title = m->artist = NULL;   // owned by the note now
             track_free_stream_meta(m);
         }
@@ -876,8 +855,8 @@ static void housekeeping(AudioPlayer *ap) {
         if (t->ended || !t->network) continue;
         const int b = SDL_AtomicGet(&t->buffering);
         if (b != t->buffering_reported || (b && now - t->buffering_note_ticks >= 500)) {
-            note_add((Note){ .type = NOTE_BUFFERING, .handle = t->handle, .b1 = b != 0,
-                             .d = SDL_AtomicGet(&t->buffered_ms) / 1000.0 });
+            note_add((AuEvent){ .type = AU_EVENT_BUFFERING, .handle = t->handle,
+                                .data.buffering = { b != 0, SDL_AtomicGet(&t->buffered_ms) / 1000.0 } });
             t->buffering_reported = b;
             t->buffering_note_ticks = now;
         }
@@ -957,7 +936,8 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         }
         case CMD_SHUTDOWN:         return false;
         case MSG_LOG:
-            note_add((Note){ .type = NOTE_LOG, .text = msg->str, .i = msg->level, .request = msg->request });
+            note_add_owned((AuEvent){ .type = AU_EVENT_LOG,
+                                      .data.log = { (AU_LOG_LEVEL)msg->level, NULL, msg->request } }, msg->str, NULL);
             msg->str = NULL;
             break;
         case MSG_TRACK_OPENED:
@@ -1049,15 +1029,23 @@ static int control_thread(void *arg) {
 //| Public API: lifetime                                |
 //+-----------------------------------------------------+
 
-int au_initialize(const InitializeConfig* config) {
+// A log message before the control thread runs (au_init() failing): straight to the application
+static void early_log(const AuConfig *config, const char *message) {
+    const AuEvent e = { .type = AU_EVENT_LOG, .data.log = { AU_LOG_FATAL, message, 0 } };
+    if (config->on_event) config->on_event(&e, config->user_data);
+    else events_push(&e);
+}
+
+int au_init(const AuConfig *config) {
     if (!config) return AU_ERR_INVALID_ARGUMENT;
     if (audio_player) return AU_ERR_ALREADY_INITIALIZED;
 
     AudioPlayer *ap = av_mallocz(sizeof(AudioPlayer));
     if (!ap) return AU_ERR_NO_MEMORY;
 
-    SDL_AtomicSet(&ap->volume, config->initial_volume >= 0 ? FFMIN(config->initial_volume, 100) : 100);
-    SDL_AtomicSet(&ap->loop_count, config->initial_loop_count);
+    const float volume = config->volume < 0 || !isfinite(config->volume) ? 1.0f : fminf(config->volume, 1.0f);
+    SDL_AtomicSet(&ap->volume, (int)lrintf(volume * 100.0f));
+    SDL_AtomicSet(&ap->loop_count, config->loop_count);
     ap->prepare_next_seconds = config->prepare_next_seconds > 0 ? config->prepare_next_seconds : DEFAULT_PREPARE_NEXT_SECONDS;
     if (config->output_channels < 0 || config->output_channels > 8 ||
         (config->output_sample_rate != 0 && (config->output_sample_rate < 8000 || config->output_sample_rate > 384000))) {
@@ -1072,16 +1060,8 @@ int au_initialize(const InitializeConfig* config) {
     ap->audio_device_index = -1;
     ap->use_default_device = true;
     ap->user_data = config->user_data;
-    ap->notify_of_log_callback = config->on_log;
-    ap->notify_of_eof_callback = config->on_eof;
-    ap->notify_of_restart_callback = config->on_restart;
-    ap->notify_of_duration_update_callback = config->on_duration_update;
-    ap->notify_of_prepare_next_callback = config->on_prepare_next;
-    ap->notify_of_track_started_callback = config->on_track_started;
-    ap->notify_of_audio_device_update_callback = config->on_audio_device_update;
-    ap->notify_of_audio_devices_changed_callback = config->on_audio_devices_changed;
-    ap->notify_of_buffering_callback = config->on_buffering;
-    ap->notify_of_stream_metadata_callback = config->on_stream_metadata;
+    ap->on_event = config->on_event;
+    events_open();
     ap->audio_target.fmt = AV_SAMPLE_FMT_NONE;
     ap->mixer.pause_gain = 1.0f;
     ap->mixer.pause_to = 1.0f;
@@ -1119,7 +1099,7 @@ int au_initialize(const InitializeConfig* config) {
     SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
 
     if (SDL_InitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) {
-        if (config->on_log) config->on_log(SDL_GetError(), 0, AU_LOG_FATAL, config->user_data);
+        early_log(config, SDL_GetError());
         goto fail_sync;
     }
     SDL_AddEventWatch(device_event_watch, ap);
@@ -1136,7 +1116,7 @@ int au_initialize(const InitializeConfig* config) {
     SDL_UnlockMutex(lock);
     ap->control_thread = SDL_CreateThread(control_thread, "ffa_control", ap);
     if (!ap->control_thread) {
-        if (config->on_log) config->on_log(SDL_GetError(), 0, AU_LOG_FATAL, config->user_data);
+        early_log(config, SDL_GetError());
         SDL_LockMutex(lock);
         audio_player = NULL;
         SDL_UnlockMutex(lock);
@@ -1152,6 +1132,7 @@ int au_initialize(const InitializeConfig* config) {
         goto fail_sync;
     }
     SDL_SemWait(ap->started_sem); // control_thread_id is set
+    au_set_device(config->device);   // AU_EVENT_DEVICE reports how it went
 
     ff_log(AU_LOG_INFO, "ffaudio %s initialized (audio driver: %s, resampler: %s)", au_get_version(),
            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "none", ap->use_soxr ? "soxr" : "swr");
@@ -1223,6 +1204,7 @@ void au_shutdown(void) {
 
     avformat_network_deinit();
     SDL_QuitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS);
+    events_close();
 }
 
 // Posts a message and waits for its result, or runs it inline when called from a callback
@@ -1244,58 +1226,48 @@ static int run_sync(AudioPlayer *ap, Msg *m) {
     return result;
 }
 
-int au_configure_audio_device(const AudioDeviceConfig* custom_config) {
+int au_set_device(const char *name) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
+    if (name && !name[0]) return AU_ERR_INVALID_ARGUMENT;
     SDL_AtomicIncRef(&ap->request_count);
 
     Msg *m = msg_new(CMD_CONFIGURE_DEVICE);
     if (!m) return AU_ERR_NO_MEMORY;
-    if (custom_config) {
-        if (!custom_config->audio_device || custom_config->audio_device_index < 0) {
-            msg_free(m);
-            return AU_ERR_INVALID_ARGUMENT;
-        }
-        m->has_device = true;
-        if (!(m->str = av_strdup(custom_config->audio_device))) { msg_free(m); return AU_ERR_NO_MEMORY; }
-        m->device.audio_device = m->str;
-        m->device.audio_device_index = custom_config->audio_device_index;
-    }
-    return run_sync(ap, m);
+    if (name && !(m->str = av_strdup(name))) { msg_free(m); return AU_ERR_NO_MEMORY; }
+    msg_post(ap, m);
+    return AU_OK;
 }
 
-int au_get_audio_devices(int *out_total, char ***out_devices) {
-    if (!out_total || !out_devices) return AU_ERR_INVALID_ARGUMENT;
-    *out_total = 0;
-    *out_devices = NULL;
-    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+char **au_list_devices(int *count) {
+    if (count) *count = 0;
+    if (!count || !audio_player) return NULL;
 
-    const int count = SDL_GetNumAudioDevices(0);
-    if (count <= 0) return count == 0 ? AU_OK : AU_ERR_SDL;
+    const int n = SDL_GetNumAudioDevices(0);
+    if (n <= 0) return NULL;
 
-    char **devices = calloc((size_t)count, sizeof(char *));
-    if (!devices) return AU_ERR_NO_MEMORY;
+    char **devices = calloc((size_t)n, sizeof(char *));
+    if (!devices) return NULL;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < n; i++) {
         const char *name = SDL_GetAudioDeviceName(i, 0);
         if (!name || !(devices[i] = strdup(name))) {
             for (int j = 0; j < i; j++) free(devices[j]);
             free(devices);
-            return AU_ERR_SDL;
+            return NULL;
         }
     }
-    *out_total = count;
-    *out_devices = devices;
-    return AU_OK;
+    *count = n;
+    return devices;
 }
 
-void au_free_audio_devices(char **devices, const int total) {
+void au_free_devices(char **devices, const int total) {
     if (!devices) return;
     for (int i = 0; i < total; i++) free(devices[i]);
     free(devices);
 }
 
-int au_get_audio_device_name(char *buf, const size_t size) {
+int au_get_device_name(char *buf, const size_t size) {
     AudioPlayer *ap = audio_player;
     if (!buf || !size) return AU_ERR_INVALID_ARGUMENT;
     if (!ap) return AU_ERR_NOT_INITIALIZED;

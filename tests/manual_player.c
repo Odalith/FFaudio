@@ -248,9 +248,9 @@ static void on_devices_changed(void *ud) {
     int n = 0;
     char **devs = NULL;
     printf("  output devices changed:\n");
-    if (au_get_audio_devices(&n, &devs) == AU_OK) {
+    if ((devs = au_list_devices(&n))) {
         for (int i = 0; i < n; i++) printf("    %d: %s\n", i, devs[i]);
-        au_free_audio_devices(devs, n);
+        au_free_devices(devs, n);
     }
 }
 
@@ -461,6 +461,40 @@ static void on_stream_metadata(int32_t handle, const char *title, const char *ar
     printf("> #%d now playing: %s%s%s\n", handle, artist ? artist : "", artist ? " - " : "", title ? title : "");
 }
 
+static void on_device(int32_t channels, int32_t rate, void *ud);
+
+static void on_event(const AuEvent *e, void *ud) {
+    switch (e->type) {
+        case AU_EVENT_LOG: on_log(e->data.log.message, e->data.log.request, e->data.log.level, ud); break;
+        case AU_EVENT_TRACK_ENDED:
+            on_eof(e->data.ended.reason == AU_END_SKIPPED, e->data.ended.reason == AU_END_ERROR, e->handle, ud);
+            break;
+        case AU_EVENT_RESTARTED:
+            on_restart(e->handle, e->data.restarted.position, e->data.restarted.from_loop,
+                       e->data.restarted.loops_remaining, ud);
+            break;
+        case AU_EVENT_PREPARE_NEXT: on_prepare_next(e->handle, ud); break;
+        case AU_EVENT_TRACK_STARTED: on_started(e->handle, ud); break;
+        case AU_EVENT_DURATION: on_duration(e->handle, e->data.duration.seconds, ud); break;
+        case AU_EVENT_DEVICE:
+            if (e->data.device.ok) {
+                printf("  device: %s%s\n", e->data.device.name ? e->data.device.name : "?",
+                       e->data.device.fell_back ? " (the chosen one failed: system default)" : "");
+                on_device(e->data.device.channels, e->data.device.sample_rate, ud);
+            }
+            else printf("  no output device could be opened\n");
+            break;
+        case AU_EVENT_DEVICES_CHANGED: on_devices_changed(ud); break;
+        case AU_EVENT_BUFFERING:
+            on_buffering(e->handle, e->data.buffering.active, e->data.buffering.buffered_seconds, ud);
+            break;
+        case AU_EVENT_STREAM_METADATA:
+            on_stream_metadata(e->handle, e->data.metadata.title, e->data.metadata.artist, ud);
+            break;
+        default: break;
+    }
+}
+
 static void on_device(int32_t channels, int32_t rate, void *ud) {
     (void)ud;
     printf("  output: %d Hz, %d channels\n", rate, channels);
@@ -527,30 +561,18 @@ int main(int argc, char **argv) {
         }
     }
 
-    const InitializeConfig config = {
+    const AuConfig config = {
         .app_name = "ffaudio manual player",
-        .initial_volume = 60,
+        .volume = 0.6f,
         .output_channels = channels,
-        .on_log = on_log,
-        .on_eof = on_eof,
-        .on_restart = on_restart,
-        .on_prepare_next = on_prepare_next,
-        .on_track_started = on_started,
-        .on_duration_update = on_duration,
-        .on_audio_device_update = on_device,
-        .on_audio_devices_changed = on_devices_changed,
-        .on_buffering = on_buffering,
-        .on_stream_metadata = on_stream_metadata,
+        .on_event = on_event,
     };
-    if (au_initialize(&config) != AU_OK) return 1;
+    if (au_init(&config) != AU_OK) return 1;
 
     int n = 0;
-    char **devs = NULL;
-    if (au_get_audio_devices(&n, &devs) == AU_OK) {
-        for (int i = 0; i < n; i++) printf("device %d: %s\n", i, devs[i]);
-        au_free_audio_devices(devs, n);
-    }
-    au_configure_audio_device(NULL);
+    char **devs = au_list_devices(&n);
+    for (int i = 0; i < n; i++) printf("device %d: %s\n", i, devs[i]);
+    au_free_devices(devs, n);
 
     if (replaygain) {
         const AuReplayGainConfig rg = {

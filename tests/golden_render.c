@@ -66,6 +66,17 @@ static void on_log(const char *message, int64_t request, enum AU_LOG_LEVEL level
     if (level >= AU_LOG_WARNING) fprintf(stderr, "[ffaudio %d] %s\n", (int)level, message);
 }
 
+static void on_event(const AuEvent *e, void *user) {
+    switch (e->type) {
+        case AU_EVENT_LOG: on_log(e->data.log.message, e->data.log.request, e->data.log.level, user); break;
+        case AU_EVENT_TRACK_ENDED:
+            on_eof(e->data.ended.reason == AU_END_SKIPPED, e->data.ended.reason == AU_END_ERROR, e->handle, user);
+            break;
+        case AU_EVENT_PREPARE_NEXT: on_prepare_next(e->handle, user); break;
+        default: break;
+    }
+}
+
 static void set_env(const char *name, const char *value) {
 #ifdef _WIN32
     char buf[1200];
@@ -133,17 +144,15 @@ int main(int argc, char **argv) {
     for (int i = 0; i < N_ITEMS; i++) snprintf(paths[i], sizeof(paths[i]), "%s/%s", argv[1], playlist[i].file);
 
     au_gain_cache_set_file(""); // memory only: no values from (or for) the user's cache
-    const InitializeConfig config = {
+    const AuConfig config = {
         .app_name = "ffaudio-golden",
-        .initial_volume = 100,
+        .volume = 1.0f,
         .prepare_next_seconds = 4,
         .output_channels = CHANNELS,
         .output_sample_rate = RATE,
-        .on_log = on_log,
-        .on_eof = on_eof,
-        .on_prepare_next = on_prepare_next,
+        .on_event = on_event,
     };
-    if (au_initialize(&config) != AU_OK || au_configure_audio_device(NULL) != AU_OK) {
+    if (au_init(&config) != AU_OK) {
         fprintf(stderr, "could not start the player\n");
         return 2;
     }

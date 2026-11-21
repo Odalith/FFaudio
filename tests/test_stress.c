@@ -116,53 +116,65 @@ static void test_rapid_replace(void) {
     au_stop_audio();
 }
 
-/* ---------- 4. A callback that makes many notifications ---------- */
+/* ---------- 4. Many device changes from a callback ---------- */
 
-// A device change from a callback runs inline and queues a device notification. More than 32 of them grow the list of
-// notifications while it is being dispatched; that used to free through a pointer into the old list (ASan sees it).
-// At most 5 s of changes: on some systems (Linux's SDL2 with the dummy driver) a reopen waits for SDL's audio thread,
-// and the control thread, so every other call, waits for this callback.
-static AudioDeviceConfig named_device;
-static SDL_atomic_t changes_made, changes_ms;   // set when the callback is done: changes + 1, milliseconds
+// 40 device changes queued from inside an event callback: nothing waits for the control thread, so they are queued and
+// done one after another once the callback has returned. Every real change is reported, and the player still plays.
+// (In 2.x they ran inline, and more than 32 notifications added during a dispatch used to free through a pointer into
+// the old list; ASan saw it.)
+static char *named_device;
+static SDL_atomic_t own_handle, hook_ran;   // only this test's track: a previous test's track may end late
 
 static void change_device_many(bool skip, bool error, int32_t handle) {
-    (void)skip; (void)error; (void)handle;
-    const Uint32 start = SDL_GetTicks();
-    int made = 0;
-    for (int i = 0; i < 40 && SDL_GetTicks() - start < 5000; i++)
-        if (au_configure_audio_device(i % 2 ? NULL : &named_device) == AU_OK) made++;
-    SDL_AtomicSet(&changes_ms, (int)(SDL_GetTicks() - start));
-    SDL_AtomicSet(&changes_made, made + 1);
+    (void)skip; (void)error;
+    if (handle != SDL_AtomicGet(&own_handle)) return;
+    for (int i = 0; i < 40; i++)
+        CHECK(au_set_device(i % 2 ? NULL : named_device) == AU_OK);
+    SDL_AtomicSet(&hook_ran, 1);
 }
 
-static void test_callback_adds_many_notes(void) {
+static void test_callback_changes_device_often(void) {
     int n = 0;
-    char **devs = NULL;
-    if (au_get_audio_devices(&n, &devs) != AU_OK || n < 1) {
+    char **devs = au_list_devices(&n);
+    if (n < 1) {
         printf("   no named output device: skipped\n");
         return;
     }
-    named_device = (AudioDeviceConfig){ .audio_device = devs[0], .audio_device_index = 0 };
-    SDL_AtomicSet(&changes_made, 0);
+    named_device = devs[0];
+    SDL_AtomicSet(&own_handle, -1);
+    SDL_AtomicSet(&hook_ran, 0);
     SDL_LockMutex(tc_mutex);
     tc_on_eof_hook = change_device_many;
     SDL_UnlockMutex(tc_mutex);
-    au_play_audio(fx("s44_stereo.flac"), NULL);
-    CHECK(TC_WAIT_FIELD(eof, 1, 5000));
-    const Uint32 deadline = SDL_GetTicks() + 10000;
-    while (!SDL_AtomicGet(&changes_made) && (Sint32)(deadline - SDL_GetTicks()) > 0) SDL_Delay(10);
+    const int before = tc_snapshot().device;
+    const Uint32 t0 = SDL_GetTicks();
+    SDL_AtomicSet(&own_handle, au_play_audio(fx("s44_stereo.flac"), NULL));   // plays for a second: set in time
+    while (!SDL_AtomicGet(&hook_ran) && SDL_GetTicks() - t0 < 5000) SDL_Delay(10);
+    CHECK(SDL_AtomicGet(&hook_ran));
     SDL_LockMutex(tc_mutex);
     tc_on_eof_hook = NULL;
     SDL_UnlockMutex(tc_mutex);
-    const int made = SDL_AtomicGet(&changes_made) - 1;
-    printf("   %d device changes from the callback in %d ms\n", made, SDL_AtomicGet(&changes_ms));
-    CHECK(made > 0);
-    const bool all_reported = TC_WAIT_FIELD(device, made, 10000);   // every change was reported
-    if (!all_reported) printf("   only %d of the %d changes were reported\n", tc_snapshot().device, made);
-    CHECK(all_reported);
-    if (made <= 32) printf("   (too few to grow the list during the dispatch here: that part was not exercised)\n");
-    au_configure_audio_device(NULL);
-    au_free_audio_devices(devs, n);
+    // The changes are done in order: wait for the first report, then until they stop coming (a reopen takes ~100 ms,
+    // more under the sanitizers)
+    CHECK(TC_WAIT_FIELD(device, before + 1, 10000));
+    int seen = -1;
+    for (int quiet = 0; quiet < 10 && SDL_GetTicks() - t0 < 30000; ) {
+        const int now = tc_snapshot().device;
+        quiet = now == seen ? quiet + 1 : 0;
+        seen = now;
+        SDL_Delay(100);
+    }
+    const int reported = seen - before;
+    printf("   %d device changes reported in %u ms\n", reported, SDL_GetTicks() - t0);
+    CHECK(reported >= 1 && reported <= 40);
+    CHECK(tc_snapshot().device_failed == 0);
+    // Still plays
+    const int ended = tc_snapshot().eof, errors = tc_snapshot().eof_error;
+    au_play_audio(fx("s44_stereo.flac"), NULL);
+    CHECK(TC_WAIT_FIELD(eof, ended + 1, 5000));
+    CHECK(tc_snapshot().eof_error == errors);
+    au_set_device(NULL);
+    au_free_devices(devs, n);
 }
 
 int main(int argc, char **argv) {
@@ -178,7 +190,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_rapid_replace);
     RUN_TEST(test_callback_driven_playlist);
     RUN_TEST(test_random_ops);
-    RUN_TEST(test_callback_adds_many_notes);
+    RUN_TEST(test_callback_changes_device_often);
 
     au_shutdown();
     return tc_finish("test_stress");

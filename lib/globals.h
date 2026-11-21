@@ -400,8 +400,6 @@ typedef struct Msg {
     AuFade fade_in_override;
     bool has_fade_in_override;
     CrossfadeConfig crossfade;
-    AudioDeviceConfig device;       // audio_device points at str
-    bool has_device;
     AuReplayGainConfig replaygain;
     AuReplayGainInfo replaygain_override;
     bool has_replaygain_override;
@@ -446,23 +444,14 @@ typedef struct AudioPlayer {
     bool use_soxr;
     int32_t filter_nbthreads;
 
-    // ---- callbacks ----
+    // ---- events ----
+    AuEventFn on_event;                 // NULL = queued for au_poll_event() (lib/events.c)
     void *user_data;
-    NotifyOfLog notify_of_log_callback;
-    NotifyOfEndOfFile notify_of_eof_callback;
-    NotifyOfRestart notify_of_restart_callback;
-    NotifyOfDurationUpdate notify_of_duration_update_callback;
-    NotifyOfPrepareNext notify_of_prepare_next_callback;
-    NotifyOfTrackStarted notify_of_track_started_callback;
-    NotifyOfAudioDeviceUpdate notify_of_audio_device_update_callback;
-    NotifyOfAudioDevicesChanged notify_of_audio_devices_changed_callback;
-    NotifyOfBuffering notify_of_buffering_callback;
-    NotifyOfStreamMetadata notify_of_stream_metadata_callback;
 
     // ---- control thread ----
     SDL_Thread *control_thread;
-    SDL_threadID control_thread_id;     // set by the control thread itself before au_initialize() returns
-    SDL_sem *started_sem;               // au_initialize() waits on it for control_thread_id
+    SDL_threadID control_thread_id;     // set by the control thread itself before au_init() returns
+    SDL_sem *started_sem;               // au_init() waits on it for control_thread_id
     SDL_atomic_t shutting_down;
     SDL_mutex *msg_mutex;
     SDL_sem *wake_sem;                  // posted for every message and by the mixer when it raises an event

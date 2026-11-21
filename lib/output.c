@@ -616,7 +616,7 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
         }
     }
 
-    // A forced channel count / rate (InitializeConfig) wins over the device's preference; SDL converts
+    // A forced channel count / rate (AuConfig) wins over the device's preference; SDL converts
     const bool force_channels = ap->output_channels > 0;
     const bool force_rate = ap->output_sample_rate > 0;
     wanted.freq = force_rate ? ap->output_sample_rate : (preferred.freq > 0 ? preferred.freq : 48000);

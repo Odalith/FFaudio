@@ -61,6 +61,7 @@ typedef struct TcEvents {
     int duration;
     int device;
     int devices_changed;
+    int device_failed;                 // AU_EVENT_DEVICE with ok = false
     int buffering_on, buffering_off;   // on_buffering transitions (progress calls not counted)
     int meta_count;                    // on_stream_metadata calls; the first 8 are kept, with the play time then
     char meta_title[8][96], meta_artist[8][96];
@@ -89,98 +90,102 @@ static void tc_bump(int *field) {
     SDL_UnlockMutex(tc_mutex);
 }
 
-static void tc_log_cb(const char *message, int64_t request, enum AU_LOG_LEVEL level, void *ud) {
-    (void)request; (void)ud;
-    if (level >= AU_LOG_ERROR) tc_bump(&tc_ev.log_error);
-    if (tc_verbose || level >= AU_LOG_ERROR)
-        fprintf(stderr, "[ffaudio %d] %s\n", (int)level, message ? message : "(null)");
+static void tc_on_log(const AuEvent *e) {
+    const char *message = e->data.log.message;
+    if (e->data.log.level >= AU_LOG_ERROR) tc_bump(&tc_ev.log_error);
+    if (tc_verbose || e->data.log.level >= AU_LOG_ERROR)
+        fprintf(stderr, "[ffaudio %d] %s\n", (int)e->data.log.level, message ? message : "(null)");
 }
 
-static void tc_eof_cb(bool is_eof_from_skip, bool is_from_error, int32_t handle, void *ud) {
-    (void)ud;
+static void tc_on_ended(const AuEvent *e) {
+    const bool skip = e->data.ended.reason == AU_END_SKIPPED, error = e->data.ended.reason == AU_END_ERROR;
     SDL_LockMutex(tc_mutex);
     tc_ev.eof++;
-    if (is_from_error) tc_ev.eof_error++;
-    if (is_eof_from_skip) tc_ev.eof_skip++;
-    tc_ev.last_eof_handle = handle;
+    if (error) tc_ev.eof_error++;
+    if (skip) tc_ev.eof_skip++;
+    tc_ev.last_eof_handle = e->handle;
     SDL_CondBroadcast(tc_cond);
-    SDL_UnlockMutex(tc_mutex);
-    if (tc_verbose)
-        fprintf(stderr, "EOF handle=%d skip=%d error=%d\n", handle, is_eof_from_skip, is_from_error);
-    SDL_LockMutex(tc_mutex);
     void (*eof_hook)(bool, bool, int32_t) = tc_on_eof_hook;
     SDL_UnlockMutex(tc_mutex);
-    if (eof_hook) eof_hook(is_eof_from_skip, is_from_error, handle);
+    if (tc_verbose) fprintf(stderr, "ENDED handle=%d skip=%d error=%d\n", e->handle, skip, error);
+    if (eof_hook) eof_hook(skip, error, e->handle);
 }
 
-static void tc_restart_cb(int32_t handle, double position, bool is_from_looping, int32_t remaining, void *ud) {
-    (void)handle; (void)remaining; (void)ud;
-    if (tc_verbose) fprintf(stderr, "RESTART handle=%d pos=%.3f loop=%d\n", handle, position, is_from_looping);
-    if (is_from_looping) tc_bump(&tc_ev.restart_loop);
-    tc_bump(&tc_ev.restart);
-}
-
-static void tc_prepare_next_cb(int32_t handle, void *ud) {
-    (void)handle; (void)ud;
-    if (tc_verbose) fprintf(stderr, "PREPARE_NEXT current=%d\n", handle);
-    tc_bump(&tc_ev.prepare_next);
-    SDL_LockMutex(tc_mutex);
-    void (*prep_hook)(void) = tc_on_prepare_next_hook;
-    SDL_UnlockMutex(tc_mutex);
-    if (prep_hook) prep_hook();
-}
-
-static void tc_started_cb(int32_t handle, void *ud) {
-    (void)ud;
-    if (tc_verbose) fprintf(stderr, "STARTED handle=%d\n", handle);
-    SDL_LockMutex(tc_mutex);
-    tc_ev.started++;
-    tc_ev.last_started_handle = handle;
-    SDL_CondBroadcast(tc_cond);
-    SDL_UnlockMutex(tc_mutex);
-}
-
-static void tc_duration_cb(int32_t handle, double duration, void *ud) {
-    (void)handle; (void)ud;
-    SDL_LockMutex(tc_mutex);
-    tc_ev.duration++;
-    tc_ev.last_duration = duration;
-    SDL_CondBroadcast(tc_cond);
-    SDL_UnlockMutex(tc_mutex);
-}
-
-static void tc_buffering_cb(int32_t handle, bool buffering, double seconds, void *ud) {
-    (void)handle; (void)seconds; (void)ud;
-    SDL_LockMutex(tc_mutex);
-    if (buffering != tc_last_buffering) {
-        if (buffering) tc_ev.buffering_on++;
-        else tc_ev.buffering_off++;
-        tc_last_buffering = buffering;
-    }
-    SDL_UnlockMutex(tc_mutex);
-}
-
-static void tc_stream_metadata_cb(int32_t handle, const char *title, const char *artist, void *ud) {
-    (void)handle; (void)ud;
+static void tc_on_stream_metadata(const AuEvent *e) {
     const double pos = au_get_audio_play_time();
     SDL_LockMutex(tc_mutex);
     const int i = tc_ev.meta_count++;
     if (i < 8) {
-        snprintf(tc_ev.meta_title[i], sizeof(tc_ev.meta_title[i]), "%s", title ? title : "");
-        snprintf(tc_ev.meta_artist[i], sizeof(tc_ev.meta_artist[i]), "%s", artist ? artist : "");
+        snprintf(tc_ev.meta_title[i], sizeof(tc_ev.meta_title[i]), "%s", e->data.metadata.title ? e->data.metadata.title : "");
+        snprintf(tc_ev.meta_artist[i], sizeof(tc_ev.meta_artist[i]), "%s", e->data.metadata.artist ? e->data.metadata.artist : "");
         tc_ev.meta_pos[i] = pos;
     }
+    SDL_CondBroadcast(tc_cond);
     SDL_UnlockMutex(tc_mutex);
 }
 
-static void tc_devices_changed_cb(void *ud) {
+// Every event of the players the tests start (on ffaudio's control thread)
+static void tc_event_cb(const AuEvent *e, void *ud) {
     (void)ud;
-    tc_bump(&tc_ev.devices_changed);
-}
-
-static void tc_device_cb(int32_t channels, int32_t rate, void *ud) {
-    (void)channels; (void)rate; (void)ud;
-    tc_bump(&tc_ev.device);
+    switch (e->type) {
+        case AU_EVENT_LOG:
+            tc_on_log(e);
+            break;
+        case AU_EVENT_TRACK_ENDED:
+            tc_on_ended(e);
+            break;
+        case AU_EVENT_RESTARTED:
+            if (tc_verbose) fprintf(stderr, "RESTART handle=%d pos=%.3f loop=%d\n", e->handle,
+                                    e->data.restarted.position, e->data.restarted.from_loop);
+            if (e->data.restarted.from_loop) tc_bump(&tc_ev.restart_loop);
+            tc_bump(&tc_ev.restart);
+            break;
+        case AU_EVENT_PREPARE_NEXT: {
+            if (tc_verbose) fprintf(stderr, "PREPARE_NEXT current=%d\n", e->handle);
+            tc_bump(&tc_ev.prepare_next);
+            SDL_LockMutex(tc_mutex);
+            void (*prep_hook)(void) = tc_on_prepare_next_hook;
+            SDL_UnlockMutex(tc_mutex);
+            if (prep_hook) prep_hook();
+            break;
+        }
+        case AU_EVENT_TRACK_STARTED:
+            if (tc_verbose) fprintf(stderr, "STARTED handle=%d\n", e->handle);
+            SDL_LockMutex(tc_mutex);
+            tc_ev.started++;
+            tc_ev.last_started_handle = e->handle;
+            SDL_CondBroadcast(tc_cond);
+            SDL_UnlockMutex(tc_mutex);
+            break;
+        case AU_EVENT_DURATION:
+            SDL_LockMutex(tc_mutex);
+            tc_ev.duration++;
+            tc_ev.last_duration = e->data.duration.seconds;
+            SDL_CondBroadcast(tc_cond);
+            SDL_UnlockMutex(tc_mutex);
+            break;
+        case AU_EVENT_BUFFERING:
+            SDL_LockMutex(tc_mutex);
+            if (e->data.buffering.active != tc_last_buffering) {
+                if (e->data.buffering.active) tc_ev.buffering_on++;
+                else tc_ev.buffering_off++;
+                tc_last_buffering = e->data.buffering.active;
+            }
+            SDL_UnlockMutex(tc_mutex);
+            break;
+        case AU_EVENT_STREAM_METADATA:
+            tc_on_stream_metadata(e);
+            break;
+        case AU_EVENT_DEVICES_CHANGED:
+            tc_bump(&tc_ev.devices_changed);
+            break;
+        case AU_EVENT_DEVICE:
+            if (!e->data.device.ok) tc_bump(&tc_ev.device_failed);
+            else tc_bump(&tc_ev.device);
+            break;
+        default:
+            break;
+    }
 }
 
 static TcEvents tc_snapshot(void) {
@@ -223,32 +228,25 @@ static void tc_sleep_ms(uint32_t ms) { SDL_Delay(ms); }
 // Output channel count for the next tc_init_player*() call (0 = device default)
 static int tc_output_channels = 0;
 
-// The player without an audio device (tc_init_player_cfg also opens the default one)
+// Start a player; it opens the system default device (AU_EVENT_DEVICE)
 static int tc_initialize(int loop_count, double prepare_next_seconds) {
-    const InitializeConfig config = {
+    const AuConfig config = {
         .app_name = "ffaudio-tests",
         .output_channels = tc_output_channels,
-        .initial_volume = 50,
-        .initial_loop_count = loop_count,
+        .volume = 0.5f,
+        .loop_count = loop_count,
         .prepare_next_seconds = prepare_next_seconds,
-        .on_log = tc_log_cb,
-        .on_eof = tc_eof_cb,
-        .on_restart = tc_restart_cb,
-        .on_duration_update = tc_duration_cb,
-        .on_prepare_next = tc_prepare_next_cb,
-        .on_track_started = tc_started_cb,
-        .on_audio_device_update = tc_device_cb,
-        .on_audio_devices_changed = tc_devices_changed_cb,
-        .on_buffering = tc_buffering_cb,
-        .on_stream_metadata = tc_stream_metadata_cb,
+        .on_event = tc_event_cb,
     };
-    return au_initialize(&config);
+    return au_init(&config);
 }
 
+// A player with its device open: waits for the first AU_EVENT_DEVICE (the tests count from a known state)
 static int tc_init_player_cfg(int loop_count, double prepare_next_seconds) {
     const int ret = tc_initialize(loop_count, prepare_next_seconds);
     if (ret != 0) return ret;
-    return au_configure_audio_device(NULL);
+    if (!TC_WAIT_FIELD(device, 1, 5000)) return AU_ERR_DEVICE;
+    return AU_OK;
 }
 
 static int tc_init_player(int loop_count) {

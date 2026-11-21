@@ -2,6 +2,22 @@
 
 ## 3.0.0 (unreleased)
 
+The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.x.
+
+### Changed
+- Events: one `AuEvent` (a type, the track's handle and a union) replaces the ten callbacks. It goes to
+  `AuConfig.on_event` on ffaudio's control thread, or, without a callback, into a queue for `au_poll_event()` /
+  `au_wait_event()` on the application's own thread (4096 events; log events are dropped first when it is full, and
+  `AU_EVENT_OVERFLOW` says how many). A track's end is `AU_EVENT_TRACK_ENDED` with `AU_END_FINISHED`, `_SKIPPED` or
+  `_ERROR`.
+- `au_init(&AuConfig)` replaces `au_initialize()` and opens the output device itself (`AuConfig.device`, NULL = the
+  system default). `au_set_device(name)` replaces `au_configure_audio_device()` and returns at once; the result comes
+  as `AU_EVENT_DEVICE` (opened, or not; `fell_back` when the chosen device failed and the default was opened). The
+  device index is gone: indexes change as devices come and go. `au_list_devices()`, `au_free_devices()` and
+  `au_get_device_name()` replace `au_get_audio_devices()`, `au_free_audio_devices()` and `au_get_audio_device_name()`.
+- `AuConfig.volume` is a linear gain 0..1 (was `initial_volume` 0..100); `loop_count` was `initial_loop_count`.
+- `delegates.h` is gone; everything is in `ffaudio.h`.
+
 ### Fixed
 - In applications with a comma-decimal locale (`LC_NUMERIC` such as de_DE or fr_FR, which GTK applications set from
   the user's settings), filter strings with decimals failed: FFmpeg reads option values with `strtod()`, so
