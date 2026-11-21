@@ -138,12 +138,12 @@ static void test_two_threads(void) {
 }
 
 int main(void) {
-    if (SDL_Init(0) != 0) return 2;
+    // No SDL_Init(): threads work without it. With real SDL2 on Linux, SDL_Init() + SDL_Quit() leaves libdbus's
+    // allocations unreferenced, which ASan reports as leaks.
     printf("-- test_single_thread\n");
     test_single_thread();
     printf("-- test_two_threads\n");
     test_two_threads();
-    SDL_Quit();
     if (failures) {
         fprintf(stderr, "test_ring: %d check(s) failed\n", failures);
         return 1;
