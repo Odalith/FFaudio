@@ -123,6 +123,27 @@ static void push_icy_title(TrackState *t, const double position, const char *pac
 }
 
 // After every audio packet: new ICY titles (checked a few times a second) and tags that changed inside the stream
+// Containers that may start their timestamps again (FFmpeg's AVFMT_TS_DISCONT: Ogg, MPEG-TS, HLS) do so at every part
+// of a chained Ogg stream, which is how Ogg radio changes songs. A jump back with no seek or loop continues where the
+// previous packet ended instead, so the position does not go back to 0 with every song.
+static void continue_timestamps(TrackState *t, const AVFormatContext *ic, AVPacket *pkt) {
+    if (!(ic->iformat->flags & AVFMT_TS_DISCONT)) return;
+    const AVStream *st = ic->streams[pkt->stream_index];
+    const int64_t ts = pkt->pts != AV_NOPTS_VALUE ? pkt->pts : pkt->dts;
+    if (ts == AV_NOPTS_VALUE) return;
+    const int64_t tolerance = av_rescale_q(AV_TIME_BASE / 2, AV_TIME_BASE_Q, st->time_base);
+    if (t->ts_next != AV_NOPTS_VALUE && ts + t->ts_shift < t->ts_next - tolerance)
+        t->ts_shift = t->ts_next - ts;
+    if (pkt->pts != AV_NOPTS_VALUE) pkt->pts += t->ts_shift;
+    if (pkt->dts != AV_NOPTS_VALUE) pkt->dts += t->ts_shift;
+    t->ts_next = ts + t->ts_shift + (pkt->duration > 0 ? pkt->duration : 0);
+}
+
+static void reset_timestamps(TrackState *t) {
+    t->ts_shift = 0;
+    t->ts_next = AV_NOPTS_VALUE;
+}
+
 static void check_stream_metadata(TrackState *t, AVFormatContext *ic, const AVPacket *pkt) {
     AVStream *st = ic->streams[pkt->stream_index];
     // Where this packet starts in the file time read so far; then count it
@@ -272,6 +293,7 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     t->buffering_reported = -1;
     t->clock_serial = -1;
     t->last_pkt_ts = AV_NOPTS_VALUE;
+    reset_timestamps(t);
     if ((t->network = au_is_network_url(filename))) {
         const AuNetworkConfig nc = network_config(NULL, 0);
         t->buffer_target_s = nc.buffer_seconds;
@@ -611,6 +633,7 @@ static DemuxEnd handle_demux_end(TrackState *t) {
     if (!SDL_AtomicGet(&t->had_error) && take_loop(t)) {
         if (seek_file(t, t->start_time != AV_NOPTS_VALUE ? t->start_time : 0) >= 0) {
             SDL_AtomicAdd(&t->loops_started, 1);
+            reset_timestamps(t); // the jump back of a loop is meant
             return DEMUX_LOOPED;
         }
         ff_log(AU_LOG_WARNING, "%s: could not seek back to loop", t->filename);
@@ -657,6 +680,7 @@ static void process_seek_request(TrackState *t) {
     t->read_clock = 0;   // the mixer starts its play_clock again with the new serial
     t->icy_next_check = 0;
     t->last_pkt_ts = AV_NOPTS_VALUE;
+    reset_timestamps(t);
     t->demux_eof = false;
     SDL_AtomicSet(&t->read_ended, 0);
     t->read_errors = 0;
@@ -714,6 +738,7 @@ static int local_get_packet(void *ctx, AVPacket *pkt, int *serial) {
             av_packet_unref(pkt);
             continue;
         }
+        continue_timestamps(t, ic, pkt);
         if (!within_play_range(t, pkt)) {
             av_packet_unref(pkt);
             if (handle_demux_end(t) == DEMUX_LOOPED) continue;
@@ -784,6 +809,7 @@ static int net_reader(void *arg) {
             av_packet_unref(pkt);
             continue;
         }
+        continue_timestamps(t, ic, pkt);
         if (!within_play_range(t, pkt)) {
             av_packet_unref(pkt);
             if (handle_demux_end(t) == DEMUX_ENDED)

@@ -254,6 +254,7 @@ typedef struct TrackState {
     // used for that, chained Ogg (FFmpeg < 7) and HLS discontinuities start them again from 0
     double read_clock;                  // read thread: durations of the audio packets read
     int64_t last_pkt_ts;                // read thread: for packets without a duration
+    int64_t ts_shift, ts_next;          // read thread: continue_timestamps() (stream time base)
     double play_clock;                  // SDL callback: file time played
     int clock_serial;                   // SDL callback: the serial play_clock counts for
     bool icy;                           // read thread: the server sends ICY metadata (icy-metaint)

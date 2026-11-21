@@ -48,6 +48,9 @@
   audio thread throughout the fade; `custom_user` only has to live until that call has been processed.
 
 ### Fixed
+- The position of a chained Ogg stream (how Ogg radio changes songs) went back to 0 at every new part, whose
+  timestamps start again; it now goes on. The same applies to the other containers FFmpeg marks as having timestamp
+  jumps (MPEG-TS, HLS). Seeks and loops still go back.
 - With real SDL2 (as on Ubuntu and Debian; SDL3's sdl2-compat was not affected), a synchronous call from a callback
   (`au_configure_audio_device()`, `au_get_track_info()`, `au_get_track_gain_db()`) hung the player for good: the
   control thread did not recognise itself, so the call waited for the thread that was making it.

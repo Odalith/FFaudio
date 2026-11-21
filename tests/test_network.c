@@ -406,9 +406,19 @@ static void test_no_analysis_of_live_streams(void) {
 }
 
 static void test_ogg_now_playing(void) {
-    // A chained Ogg stream changes its tags when the next part starts (2 s in)
+    // A chained Ogg stream changes its tags when the next part starts (2 s in). Its timestamps start again at 0 there;
+    // the position must go on (it went back to 0, and the change was reported at whatever position was read first)
     au_play_audio(url("/files/chained.ogg"), NULL);
-    CHECK(TC_WAIT_FIELD(eof, 1, 10000));
+    double furthest = -1;
+    const Uint32 t0 = SDL_GetTicks();
+    while (!tc_snapshot().eof && SDL_GetTicks() - t0 < 10000) {
+        const double pos = au_get_audio_play_time();
+        if (pos > furthest) furthest = pos;
+        SDL_Delay(10);
+    }
+    CHECK(tc_snapshot().eof == 1);
+    printf("   furthest position: %.2f s of 4\n", furthest);
+    CHECK(furthest > 3.5);
     const TcEvents e = tc_snapshot();
     for (int i = 0; i < e.meta_count && i < 8; i++)
         printf("   now playing at %.2f s: \"%s\" by \"%s\"\n", e.meta_pos[i], e.meta_title[i], e.meta_artist[i]);
