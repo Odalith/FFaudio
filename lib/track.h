@@ -26,8 +26,14 @@
 // Control thread: allocate a track and start its read thread. NULL on allocation failure.
 TrackState *track_create(AudioPlayer *ap, int32_t handle, const char *filename, const PlayAudioConfig *config);
 
-// Control thread: stop the track's threads and free it. The track must not be in a mixer slot.
+// Control thread: stop the track's threads and free it. The track must not be in a mixer slot. Waits for the threads.
 void track_destroy(TrackState *t);
+
+// The same in two steps, so the control thread never waits for a worker (one stuck in a DNS lookup can take seconds):
+// track_stop() asks the threads to end; once track_stopped() is true, track_destroy() frees the track at once.
+// The worker posts MSG_TRACK_EXITED when it is done.
+void track_stop(TrackState *t);
+bool track_stopped(TrackState *t);
 
 // Control thread: seek to an absolute file position (AV_TIME_BASE units)
 void track_request_seek(TrackState *t, int64_t pos_us);
@@ -62,7 +68,14 @@ double track_start_position(const TrackState *t);
 int track_pull(TrackState *t, float *dst, int frames, int rate, int channels, bool *eos, bool *looped);
 
 // SDL callback: whether decoded audio is waiting to be played
-bool track_has_audio(TrackState *t);
+bool track_has_audio(TrackState *t, int rate, int channels);
+
+// SDL callback: drop audio the mixer can not play (from before a seek, or for another output format)
+void track_drop_stale(TrackState *t, int rate, int channels);
+
+// Ring storage pool (AudioPlayer.ring_pool): give a buffer back, or free all at shutdown
+void ring_storage_give(AudioPlayer *ap, float *buf, size_t floats);
+void ring_storage_free_all(AudioPlayer *ap);
 
 // Control thread: take the first queued "now playing" entry at or before `position` (NULL when none), and put its
 // title/artist into the track's info. Free the result with track_free_stream_meta().

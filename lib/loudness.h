@@ -10,4 +10,7 @@
 // the measuring thread and must be quick. NULL (the default) = only the progress callback cancels.
 void loudness_scanner_set_interrupt(AuLoudnessScanner *s, const AVIOInterruptCB *interrupt);
 
+// Change a scanner's settings (a worker reuses one scanner for every file)
+void loudness_scanner_configure(AuLoudnessScanner *s, const AuLoudnessConfig *config);
+
 #endif //FFAUDIO_LOUDNESS_INTERNAL_H

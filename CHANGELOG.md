@@ -26,7 +26,31 @@
   long-running player grow (240 MB after 2 hours in the soak test, still rising); fixed malloc thresholds
   (`GLIBC_TUNABLES` or `mallopt()`) kept it flat at about 80 MB.
 
+### Changed
+- The audio callback no longer takes locks, frees memory or wakes other threads: decoded audio reaches the mixer
+  through a lock-free ring per track, and the mixer computes gains per 64-frame block. Seeking a paused or queued
+  track no longer leaves it to start with a gap.
+- One thread per local track instead of two (network streams keep their reader thread): it reads, decodes and
+  filters, waits for events instead of polling every 10 ms, and stops at the end of a file instead of reading it again
+  100 times a second until the track is removed.
+- The control thread sleeps until a command or a mixer event needs it (or 50 ms while tracks are loaded, 500 ms when
+  idle) instead of waking every 5 ms, and never waits for a track's thread to end: one stuck in a DNS lookup used to
+  hold up every command and callback. With the change above, a player playing one track wakes about 47 times a
+  second instead of 341 (24 instead of 223 when idle), with 4 threads instead of 5.
+- Loudness measurement keeps gating and short-term blocks in histograms (0.01 LU bins with exact energy sums)
+  instead of lists of every block: the memory no longer grows with the length, and an album is the sum of its tracks.
+  The true peak comes from a polyphase interpolator run on the decoded audio instead of a second resampler: scans are
+  about a third faster (8.0 s -> 5.0 s for a mixed set of files). Integrated loudness and gains are unchanged;
+  true peaks can differ by about 0.1 dB, within EBU Tech 3341's tolerance. Peaks now include the LFE channel, which
+  is played and can clip.
+- Custom fade curves (`AuFade.custom`) are sampled at 257 points when the fade is set up (`au_set_crossfade()`, or
+  queueing a track with `PlayAudioConfig.fade_in`), on ffaudio's control thread, instead of being called on the
+  audio thread throughout the fade; `custom_user` only has to live until that call has been processed.
+
 ### Fixed
+- The position of a chained Ogg stream (how Ogg radio changes songs) went back to 0 at every new part, whose
+  timestamps start again; it now goes on. The same applies to the other containers FFmpeg marks as having timestamp
+  jumps (MPEG-TS, HLS). Seeks and loops still go back.
 - With real SDL2 (as on Ubuntu and Debian; SDL3's sdl2-compat was not affected), a synchronous call from a callback
   (`au_configure_audio_device()`, `au_get_track_info()`, `au_get_track_gain_db()`) hung the player for good: the
   control thread did not recognise itself, so the call waited for the thread that was making it.
@@ -52,6 +76,9 @@
 - `au_gain_cache_request_album()` does not queue an album again while it is queued or being measured; an urgent
   request moves it to the front.
 - A request made while `au_gain_scan_stop()` was running could leave the queue without workers for good.
+- The files of one `au_gain_cache_request()` were measured by a single worker, whatever `AuGainScanConfig.threads`
+  said, and an urgent request for a file inside a queued request moved that whole request. Each file is now its own
+  job; duplicate checks no longer compare the path with everything queued, and each worker reuses its scanner.
 - Pausing faded out with `1 - curve(t)` instead of `curve(1 - t)`, the shape crossfades use and `ffaudio.h`
   describes: equal-power pause fades dipped too early, and logarithmic and exponential ones had each other's shape.
 - After a measurement that did not change a track's gain, the next gain change (e.g. a new preamp) took 2 s
@@ -62,13 +89,16 @@
 - `au_media_is_live()` is true only for network streams without a duration, as the player treats them; it was also
   true for local files with an unknown length, and for files whose length only the audio stream gave.
 - A local file named like a demuxer (`mp3`, `hls`, ...) was opened with that demuxer instead of being probed.
+- The ReplayGain cache file was not safe to share between programs, as the readme said: a compaction renamed a new
+  file over it, so another program kept appending to the replaced file, and records appended meanwhile were dropped
+  (in a test with two processes, 492 of 500 entries were lost). Writes now take a lock (a `.lock` file next to the
+  cache), a compaction reads the file again first, and appends follow a replaced file. A file of a later format is
+  left alone instead of being read as this one and appended to. Loading reads the file in one go (100000 entries:
+  40 ms instead of 74).
 - Files whose timestamps start late (MPEG-TS and so HLS, which start at 1.4 s or more) reported positions that
   included that start, while seeks and the duration count from 0: `au_get_audio_play_time()` was too large, end
   crossfades and `on_prepare_next` came that much early, and a device change jumped ahead by it.
 
-### Documentation
-- The ReplayGain cache file is not safe to write from several programs at the same time, as the readme said:
-  compacting replaces the file and can lose another writer's changes. One writer at a time.
 
 ## 2.0.1 (2026-11-20)
 

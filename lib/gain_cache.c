@@ -22,8 +22,8 @@
  * In memory it is a hash table behind one mutex. On disk it is an append-only text file in the platform's
  * per-user data directory: every change appends one line, so a change is a single small write and a crash can
  * not lose earlier entries. The file is read on first use and rewritten (compacted) when superseded lines pile
- * up. There is no locking: a compaction (or a clear) can lose what another process appends at the same time,
- * so one process at a time should write to a file.
+ * up. Several processes can share the file: every write takes a lock (a separate ".lock" file, since compacting
+ * replaces the cache file), a compaction reads the file again under it, and appends follow a replaced file.
  *
  *   ffaudio-replaygain-cache 1
  *   S <tab> track_gain <tab> track_peak <tab> album_gain <tab> album_peak <tab> flags <tab> path     (set)
@@ -40,9 +40,15 @@
 #include <locale.h>
 #include <stdio.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
+#endif
 #ifdef _WIN32
 #include <windows.h>
 #include <direct.h>
+#include <io.h>
 #endif
 
 #include "gain_cache.h"
@@ -72,6 +78,7 @@ static bool custom_location = false;   // au_gain_cache_set_file() was called
 static char *file_path = NULL;          // resolved location, "" = memory only
 static FILE *append_file = NULL;
 static size_t file_lines = 0;           // records in the file, to decide when to compact
+static bool foreign = false;            // the file is not one this version reads: it is left alone
 
 static SDL_mutex *cache_mutex_ptr = NULL;
 static SDL_cond *cache_changed = NULL;   // broadcast when an entry is set or a measurement fails (gain_cache_wait)
@@ -388,6 +395,80 @@ static void close_append(void) {
     append_file = NULL;
 }
 
+// Cross-process lock: a file next to the cache that is never replaced (a lock on the cache file itself would be lost
+// when a compaction renames a new file over it). Every write takes it, so appends from several processes do not
+// interleave and a compaction includes what the others appended. When it can not be taken (no permission, a file
+// system without locks) writes go ahead unlocked, as before.
+#ifdef _WIN32
+static HANDLE lock_handle = INVALID_HANDLE_VALUE;
+#else
+static int lock_fd = -1;
+#endif
+
+static void close_file_lock(void) {
+#ifdef _WIN32
+    if (lock_handle != INVALID_HANDLE_VALUE) CloseHandle(lock_handle);
+    lock_handle = INVALID_HANDLE_VALUE;
+#else
+    if (lock_fd >= 0) close(lock_fd);
+    lock_fd = -1;
+#endif
+}
+
+static bool take_file_lock(void) {
+    if (!persistent()) return false;
+#ifdef _WIN32
+    if (lock_handle == INVALID_HANDLE_VALUE) {
+        char *lp = av_asprintf("%s.lock", file_path);
+        wchar_t *w = lp ? utf8_to_wide(lp) : NULL;
+        if (w) {
+            make_parent_dirs(file_path);
+            lock_handle = CreateFileW(w, GENERIC_READ | GENERIC_WRITE,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, NULL);
+        }
+        av_free(w);
+        av_free(lp);
+        if (lock_handle == INVALID_HANDLE_VALUE) return false;
+    }
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof(ov));
+    return LockFileEx(lock_handle, LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &ov) != 0;
+#else
+    if (lock_fd < 0) {
+        char *lp = av_asprintf("%s.lock", file_path);
+        if (!lp) return false;
+        make_parent_dirs(file_path);
+        lock_fd = open(lp, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        av_free(lp);
+        if (lock_fd < 0) return false;
+    }
+    while (flock(lock_fd, LOCK_EX) != 0)
+        if (errno != EINTR) return false;
+    return true;
+#endif
+}
+
+static void release_file_lock(const bool held) {
+    if (!held) return;
+#ifdef _WIN32
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof(ov));
+    UnlockFileEx(lock_handle, 0, 1, 0, &ov);
+#else
+    flock(lock_fd, LOCK_UN);
+#endif
+}
+
+static bool sync_file(FILE *f) {
+    if (fflush(f) != 0) return false;
+#ifdef _WIN32
+    return _commit(_fileno(f)) == 0;
+#else
+    return fsync(fileno(f)) == 0;
+#endif
+}
+
 static void apply_line(char *line) {
     const size_t len = strlen(line);
     if (len && line[len - 1] == '\n') line[len - 1] = '\0';
@@ -428,9 +509,49 @@ static void apply_line(char *line) {
     if (fields[5][0]) table_set(fields[5], &rg);
 }
 
-// Rewrite the file with one line per entry (temporary file + rename, so it is never half written)
-static int compact(void) {
-    if (!persistent()) return AU_OK;
+// Read the whole file into the (empty) table, in one read. A last line without its newline is another process's
+// record still being written: not a record yet. false: not a file this version reads (another format), left alone.
+static bool read_cache_file(void) {
+    file_lines = 0;
+    FILE *f = open_file(file_path, "rb");
+    if (!f) return true; // nothing stored yet
+    char *buf = NULL;
+    size_t n = 0;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        const long size = ftell(f);
+        if (size > 0 && fseek(f, 0, SEEK_SET) == 0 && (buf = av_malloc((size_t)size + 1)))
+            n = fread(buf, 1, (size_t)size, f);
+    }
+    fclose(f);
+    if (!buf) return true;
+    buf[n] = '\0';
+
+    bool ours = true, header = true;
+    for (char *line = buf, *end = buf + n; line < end;) {
+        char *nl = memchr(line, '\n', (size_t)(end - line));
+        if (!nl) break;
+        *nl = '\0';
+        if (header) {
+            header = false;
+            if (nl > line && nl[-1] == '\r') nl[-1] = '\0';
+            if (strcmp(line, CACHE_HEADER) != 0) {
+                ours = false;
+                break;
+            }
+        }
+        else {
+            apply_line(line);
+            file_lines++;
+        }
+        line = nl + 1;
+    }
+    av_free(buf);
+    return ours;
+}
+
+// Rewrite the file with one line per entry: a temporary file, flushed to the disk, then renamed over the old one, so
+// it is never half written. File lock held (when there is one).
+static int write_file(void) {
     close_append();
     char *tmp = av_asprintf("%s.tmp", file_path);
     if (!tmp) return AU_ERR_NO_MEMORY;
@@ -452,12 +573,25 @@ static int compact(void) {
         }
     }
     av_bprint_finalize(&bp, NULL);
+    ok = sync_file(f) && ok;
     ok = (fclose(f) == 0) && ok;
     if (ok) ok = replace_file(tmp, file_path);
     if (!ok) remove(tmp);
     av_free(tmp);
     if (ok) file_lines = n_entries;
     return ok ? AU_OK : AU_ERR_FILE;
+}
+
+// Compact the file: read it again under the lock, so what other processes appended since it was loaded stays, then
+// rewrite it
+static int compact(void) {
+    if (!persistent() || foreign) return AU_OK;
+    const bool locked = take_file_lock();
+    table_clear();
+    foreign = !read_cache_file();
+    const int ret = foreign ? AU_OK : write_file();
+    release_file_lock(locked);
+    return ret;
 }
 
 static void ensure_loaded(void) {
@@ -471,65 +605,44 @@ static void ensure_loaded(void) {
     }
     if (!persistent()) return;
 
-    FILE *f = open_file(file_path, "rb");
-    if (!f) return; // nothing stored yet
-    char *line = NULL;
-    size_t cap = 0, len = 0;
-    int c;
-    bool header = true;
-    file_lines = 0;
-    // Read line by line (no getline() on every platform)
-    for (;;) {
-        c = fgetc(f);
-        if (c == EOF || c == '\n') {
-            if (len || c == '\n') {
-                if (line) {
-                    line[len] = '\0';
-                    if (header) {
-                        header = false;
-                        if (strncmp(line, "ffaudio-replaygain-cache", 24) != 0) break; // not our file
-                    }
-                    else {
-                        apply_line(line);
-                        file_lines++;
-                    }
-                }
-                len = 0;
-            }
-            if (c == EOF) break;
-            continue;
-        }
-        if (len + 2 > cap) {
-            const size_t ncap = cap ? cap * 2 : 256;
-            char *nl = av_realloc(line, ncap);
-            if (!nl) break;
-            line = nl;
-            cap = ncap;
-        }
-        line[len++] = (char)c;
-    }
-    av_free(line);
-    fclose(f);
-
+    foreign = !read_cache_file();
     // Many superseded lines: rewrite the file compactly
-    if (file_lines > 2 * n_entries + 256) compact();
+    if (!foreign && file_lines > 2 * n_entries + 256) compact();
 }
 
 static int append_record(const char *record, const size_t len) {
     if (!persistent()) return AU_OK;
+    if (foreign) return AU_ERR_FILE; // kept in memory only: the file is not ours to write
+    const bool locked = take_file_lock();
+#ifndef _WIN32
+    // Another process may have compacted the cache since: append to the new file, not to the one it replaced
+    if (append_file) {
+        struct stat a, b;
+        if (fstat(fileno(append_file), &a) != 0 || stat(file_path, &b) != 0 || a.st_ino != b.st_ino ||
+            a.st_dev != b.st_dev)
+            close_append();
+    }
+#endif
     if (!append_file) {
         make_parent_dirs(file_path);
         append_file = open_file(file_path, "ab");
-        if (!append_file) return AU_ERR_FILE;
+        if (!append_file) {
+            release_file_lock(locked);
+            return AU_ERR_FILE;
+        }
         fseek(append_file, 0, SEEK_END);
         if (ftell(append_file) == 0) {
             fputs(CACHE_HEADER "\n", append_file);
             file_lines = 0;
         }
     }
-    // One write per record keeps lines from several processes intact
+    // One write per record keeps lines intact
     const bool ok = fwrite(record, 1, len, append_file) == len && fflush(append_file) == 0;
     file_lines++;
+#ifdef _WIN32
+    close_append(); // Windows can only replace a file nobody has open: let other processes compact it
+#endif
+    release_file_lock(locked);
     return ok ? AU_OK : AU_ERR_FILE;
 }
 
@@ -562,11 +675,13 @@ int au_gain_cache_set_file(const char *path) {
 
     SDL_LockMutex(m);
     close_append();
+    close_file_lock(); // it belongs to the old file
     table_clear();
     av_free(file_path);
     file_path = copy;
     custom_location = path != NULL;
     loaded = false;
+    foreign = false;
     file_lines = 0;
     ensure_loaded();
     SDL_UnlockMutex(m);
@@ -596,6 +711,7 @@ int au_gain_cache_reload(void) {
     close_append();
     table_clear();
     loaded = false;
+    foreign = false;
     ensure_loaded();
     SDL_UnlockMutex(m);
     ff_gain_cache_changed(NULL);
@@ -710,7 +826,11 @@ void au_gain_cache_clear(void) {
     SDL_LockMutex(m);
     ensure_loaded();
     table_clear();
-    if (persistent()) compact(); // an empty file
+    if (persistent() && !foreign) { // an empty file
+        const bool locked = take_file_lock();
+        write_file();
+        release_file_lock(locked);
+    }
     SDL_UnlockMutex(m);
     ff_gain_cache_changed(NULL);
 }

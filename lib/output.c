@@ -19,9 +19,10 @@
 /*
  * Output device and mixer.
  *
- * The SDL callback runs with the device lock held. It never blocks, allocates or frees: it pulls
- * float frames from the tracks in the mixer slots, applies fades and gain, and converts to the
- * device format (with TPDF dither for integer formats). Slot changes it makes itself (gapless
+ * The SDL callback runs with the device lock held. It never blocks, allocates, frees or signals: it
+ * takes float frames from the rings of the tracks in the mixer slots (lib/sample_ring.c), applies fades
+ * and gain, and converts to the device format (with TPDF dither for integer formats). The status for the
+ * getters goes out with a try-lock that skips a period rather than wait. Slot changes it makes itself (gapless
  * handover, crossfade at a natural end) are reported to the control thread through Mixer.events.
  */
 
@@ -36,9 +37,10 @@
 //| Fade curves                                         |
 //+-----------------------------------------------------+
 
-float fade_curve_gain(const AuFade *fade, float t) {
+static float curve_value(const AuFade *fade, float t) {
     if (t <= 0.0f) return 0.0f;
     if (t >= 1.0f) return 1.0f;
+    if (!fade) return t;
     switch (fade->curve) {
         case AU_FADE_EQUAL_POWER: return sinf(t * (float)M_PI_2);
         case AU_FADE_S_CURVE:     return t * t * (3.0f - 2.0f * t);
@@ -56,14 +58,24 @@ float fade_curve_gain(const AuFade *fade, float t) {
     }
 }
 
-static float fade_in_gain(const FadeState *f, const int64_t offset) {
-    if (!f->active || f->len <= 0) return 1.0f;
-    return fade_curve_gain(&f->fade, (float)(f->pos + offset) / (float)f->len);
+void fade_curve_build(FadeCurve *out, const AuFade *fade) {
+    for (int i = 0; i <= FADE_CURVE_STEPS; i++)
+        out->g[i] = curve_value(fade, (float)i / FADE_CURVE_STEPS);
 }
 
-static float fade_out_gain(const FadeState *f, const int64_t offset) {
-    if (!f->active || f->len <= 0) return 0.0f;
-    return fade_curve_gain(&f->fade, 1.0f - (float)(f->pos + offset) / (float)f->len);
+static inline float curve_at(const FadeCurve *c, float t) {
+    if (t <= 0.0f) return c->g[0];
+    if (t >= 1.0f) return c->g[FADE_CURVE_STEPS];
+    const float x = t * FADE_CURVE_STEPS;
+    const int i = (int)x;
+    return c->g[i] + (c->g[i + 1] - c->g[i]) * (x - (float)i);
+}
+
+// Gain of a fade `offset` frames after its current position (an inactive fade-in is at 1, a fade-out at 0)
+static inline float fade_gain_at(const FadeState *f, const int64_t offset, const bool fading_out) {
+    if (!f->active || f->len <= 0) return fading_out ? 0.0f : 1.0f;
+    const float t = (float)(f->pos + offset) / (float)f->len;
+    return curve_at(&f->curve, fading_out ? 1.0f - t : t);
 }
 
 //+-----------------------------------------------------+
@@ -80,15 +92,17 @@ static void push_event(Mixer *m, const MixerEventType type, TrackState *t, const
     e->type = type;
     e->track = t;
     e->position = position;
+    m->wake_control = true;
 }
 
 //+-----------------------------------------------------+
 //| Transitions                                         |
 //+-----------------------------------------------------+
 
-bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *incoming, const AuFade *fade) {
+bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *incoming, const double seconds,
+                            const FadeCurve *curve) {
     Mixer *m = &ap->mixer;
-    const int64_t len = (fade && fade->seconds > 0 && m->rate > 0) ? (int64_t)(fade->seconds * m->rate) : 0;
+    const int64_t len = (curve && seconds > 0 && m->rate > 0) ? (int64_t)(seconds * m->rate) : 0;
     if (len <= 0) return false; // shorter than a frame, or no device yet: the caller cuts
 
     if (outgoing) {
@@ -108,7 +122,7 @@ bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *i
         m->out_fade.active = true;
         m->out_fade.pos = start;
         m->out_fade.len = len;
-        m->out_fade.fade = *fade;
+        m->out_fade.curve = *curve;
     }
 
     if (outgoing == m->current) m->current = NULL;
@@ -121,14 +135,14 @@ bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *i
         m->in_fade.active = true;
         m->in_fade.pos = 0;
         m->in_fade.len = len;
-        m->in_fade.fade = *fade;
+        m->in_fade.curve = *curve;
     }
     return true;
 }
 
-void mixer_set_pause(AudioPlayer *ap, const bool paused, const AuFade *fade) {
+void mixer_set_pause(AudioPlayer *ap, const bool paused, const double seconds, const FadeCurve *curve) {
     Mixer *m = &ap->mixer;
-    const int64_t len = (fade && fade->seconds > 0 && m->rate > 0) ? (int64_t)(fade->seconds * m->rate) : 0;
+    const int64_t len = (curve && seconds > 0 && m->rate > 0) ? (int64_t)(seconds * m->rate) : 0;
     m->pause_from = m->pause_gain;
     m->pause_to = paused ? 0.0f : 1.0f;
     if (!paused) m->frozen = false;
@@ -136,25 +150,26 @@ void mixer_set_pause(AudioPlayer *ap, const bool paused, const AuFade *fade) {
         m->pause_fade.active = true;
         m->pause_fade.pos = 0;
         m->pause_fade.len = len;
-        m->pause_fade.fade = *fade;
+        m->pause_fade.curve = *curve;
     }
     else {
         // A very short ramp avoids a click
         m->pause_fade.active = true;
         m->pause_fade.pos = 0;
         m->pause_fade.len = FFMAX(1, m->vol_ramp_frames);
-        m->pause_fade.fade = (AuFade){ .seconds = VOLUME_RAMP_SECONDS, .curve = AU_FADE_LINEAR };
+        m->pause_fade.curve = m->linear_curve;
     }
 }
 
 // Crossfade into the queued track when the current one is about to end
 // Length (seconds) of the crossfade the current track should get at its end; 0 = play gapless.
 // *remaining is set to the seconds left in the current track.
-static double planned_end_fade(Mixer *m, const AuFade **fade_out, double *remaining) {
+static double planned_end_fade(Mixer *m, const FadeCurve **curve_out, double *remaining) {
     TrackState *cur = m->current, *next = m->next;
     if (!cur || !next || m->outgoing) return 0;
 
-    const AuFade *fade = next->has_fade_in_override ? &next->fade_in_override : &m->end_fade;
+    const bool own = next->has_fade_in_override;
+    const AuFade *fade = own ? &next->fade_in_override : &m->end_fade;
     if (fade->seconds <= 0) return 0;
 
     // Everything below is in output (wall clock) seconds: file seconds / playback speed
@@ -173,16 +188,16 @@ static double planned_end_fade(Mixer *m, const AuFade **fade_out, double *remain
         fade_s = FFMIN(fade_s, next_len / 2.0);
     }
 
-    *fade_out = fade;
+    *curve_out = own ? &next->fade_in_curve : &m->end_curve;
     *remaining = (end - cur->position) / speed;
     return fade_s;
 }
 
 // Frames that can be rendered before the end crossfade has to start (INT_MAX = no crossfade planned)
 static int frames_until_end_crossfade(Mixer *m) {
-    const AuFade *fade = NULL;
+    const FadeCurve *curve = NULL;
     double remaining = 0;
-    const double fade_s = planned_end_fade(m, &fade, &remaining);
+    const double fade_s = planned_end_fade(m, &curve, &remaining);
     if (fade_s <= 0 || remaining <= fade_s) return INT_MAX;
     const double frames = ceil((remaining - fade_s) * m->rate);
     return frames >= INT_MAX ? INT_MAX : FFMAX(1, (int)frames);
@@ -190,16 +205,14 @@ static int frames_until_end_crossfade(Mixer *m) {
 
 static void maybe_start_end_crossfade(AudioPlayer *ap) {
     Mixer *m = &ap->mixer;
-    const AuFade *fade = NULL;
+    const FadeCurve *curve = NULL;
     double remaining = 0;
-    const double fade_s = planned_end_fade(m, &fade, &remaining);
+    const double fade_s = planned_end_fade(m, &curve, &remaining);
     if (fade_s <= 0 || remaining > fade_s + 0.5 / m->rate || remaining <= 0.005) return;
-    if (!track_has_audio(m->next)) return; // not decoded yet: try again next chunk (or end gapless)
+    if (!track_has_audio(m->next, m->rate, m->channels)) return; // not decoded yet: next chunk (or end gapless)
 
-    AuFade f = *fade;
-    f.seconds = remaining; // end exactly when the current track does
     TrackState *cur = m->current;
-    if (mixer_start_transition(ap, cur, m->next, &f))
+    if (mixer_start_transition(ap, cur, m->next, remaining, curve)) // ends exactly when the current track does
         cur->fade_reason = END_NATURAL;
 }
 
@@ -209,11 +222,19 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 
 #define LATE_GAIN_RAMP_SECONDS 2.0
 
+// Frames per gain step: gains are exact at the edges of a block and linear in between (a 0.5 s equal-power fade is
+// then within 3e-6 of its curve), so the inner loops are a multiply-add per sample
+#define GAIN_BLOCK 64
+
 // The track's ReplayGain gain: taken as it is with the first samples, then a linear ramp for every change (10 ms, or
 // 2 s when the value arrived after the track started, e.g. a measurement that missed measure_wait_ms)
 static float track_gain_step(Mixer *m, TrackState *t, float *target_out) {
     const int packed = SDL_AtomicGet(&t->gain_mb);
-    const float target = powf(10.0f, (float)gain_centi_db(packed) / 2000.0f);
+    if (!t->gain_started || packed != t->gain_packed) {
+        t->gain_packed = packed;
+        t->gain_target = powf(10.0f, (float)gain_centi_db(packed) / 2000.0f);
+    }
+    const float target = t->gain_target;
     if (!t->gain_started) {
         t->gain_cur = t->gain_seen = target;
         t->gain_step = 0;
@@ -229,32 +250,54 @@ static float track_gain_step(Mixer *m, TrackState *t, float *target_out) {
     return t->gain_cur == target ? 0.0f : t->gain_step;
 }
 
+// A linear ramp `k` frames on, stopping at its target
+static inline float ramp_at(const float from, const float step, const float target, const int64_t k) {
+    if (step == 0.0f) return from;
+    const float v = from + step * (float)k;
+    return step > 0 ? (v > target ? target : v) : (v < target ? target : v);
+}
+
+// The gain of a track's sample `k` frames into the chunk: ReplayGain ramp x fade x fade-in after a network stall
+static inline float voice_gain_at(const TrackState *t, const float rg_from, const float rg_step, const float rg_target,
+                                  const FadeState *fade, const bool fading_out, const int64_t k) {
+    float g = ramp_at(rg_from, rg_step, rg_target, k + 1) * fade_gain_at(fade, k, fading_out);
+    if (t->resume_fade - k > 0) g *= 1.0f - (float)(t->resume_fade - k) / (float)t->resume_fade_len;
+    return g;
+}
+
+static void mix_block(float *d, const float *s, const int frames, const int channels, float g, const float dg) {
+    if (channels == 2) {
+        for (int i = 0; i < frames; i++, s += 2, d += 2, g += dg) {
+            d[0] += s[0] * g;
+            d[1] += s[1] * g;
+        }
+    }
+    else if (channels == 1) {
+        for (int i = 0; i < frames; i++, g += dg) d[i] += s[i] * g;
+    }
+    else {
+        for (int i = 0; i < frames; i++, s += channels, d += channels, g += dg)
+            for (int c = 0; c < channels; c++) d[c] += s[c] * g;
+    }
+}
+
 static void add_voice(Mixer *m, TrackState *t, float *dst, const float *src, const int frames, const int channels,
                       const FadeState *fade, const bool fading_out) {
     // A track that has produced nothing yet (its file may not even be open) must not fix its starting gain:
     // that is read with its first samples, when the read thread has set it
     if (frames <= 0) return;
-    const bool constant = !fade->active;
     float target;
     const float step = track_gain_step(m, t, &target);
-    float gain = t->gain_cur;
-    for (int i = 0; i < frames; i++) {
-        if (step != 0.0f) {
-            gain += step;
-            if ((step > 0 && gain > target) || (step < 0 && gain < target)) gain = target;
-        }
-        float g = gain * (constant ? (fading_out ? 0.0f : 1.0f)
-                                   : (fading_out ? fade_out_gain(fade, i) : fade_in_gain(fade, i)));
-        if (t->resume_fade > 0) { // back after a network stall
-            g *= 1.0f - (float)t->resume_fade / (float)t->resume_fade_len;
-            t->resume_fade--;
-        }
-        const float *s = src + (size_t)i * channels;
-        float *d = dst + (size_t)i * channels;
-        for (int c = 0; c < channels; c++)
-            d[c] += s[c] * g;
+    const float from = t->gain_cur;
+    float g0 = voice_gain_at(t, from, step, target, fade, fading_out, 0);
+    for (int b = 0; b < frames; b += GAIN_BLOCK) {
+        const int n = FFMIN(GAIN_BLOCK, frames - b);
+        const float g1 = voice_gain_at(t, from, step, target, fade, fading_out, b + n);
+        mix_block(dst + (size_t)b * channels, src + (size_t)b * channels, n, channels, g0, (g1 - g0) / (float)n);
+        g0 = g1;
     }
-    t->gain_cur = gain;
+    t->gain_cur = ramp_at(from, step, target, frames);
+    t->resume_fade = FFMAX(0, t->resume_fade - frames);
 }
 
 static void render_outgoing(AudioPlayer *ap, const int frames) {
@@ -323,90 +366,116 @@ static int render_current(AudioPlayer *ap, const int frames) {
     return pos;
 }
 
-static void apply_master_gain(AudioPlayer *ap, const int frames) {
+static inline float dither_noise(uint32_t *state) {
+    // Triangular (TPDF) noise in [-1, 1) LSB from two uniform values
+    uint32_t x = *state;
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    const float a = (float)(x >> 8) * (1.0f / 16777216.0f);
+    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+    const float b = (float)(x >> 8) * (1.0f / 16777216.0f);
+    *state = x;
+    return a - b;
+}
+
+static inline float clamp1(const float v) {
+    return v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v);
+}
+
+// Write `n` samples of the mix times a gain going from g by dg per frame, clamped, in the device format
+static void write_block(Mixer *m, Uint8 *out, const float *src, const int frames, float g, const float dg,
+                        uint32_t *dither) {
+    const int ch = m->channels;
+    switch (m->format) {
+        case AUDIO_F32SYS: {
+            float *d = (float *)out;
+            for (int i = 0; i < frames; i++, g += dg)
+                for (int c = 0; c < ch; c++, src++, d++) *d = clamp1(*src * g);
+            break;
+        }
+        case AUDIO_S16SYS: {
+            int16_t *d = (int16_t *)out;
+            for (int i = 0; i < frames; i++, g += dg)
+                for (int c = 0; c < ch; c++, src++, d++) {
+                    const long r = lrintf(clamp1(*src * g) * 32767.0f + dither_noise(dither));
+                    *d = (int16_t)(r > 32767 ? 32767 : (r < -32768 ? -32768 : r));
+                }
+            break;
+        }
+        case AUDIO_S32SYS: {
+            int32_t *d = (int32_t *)out;
+            for (int i = 0; i < frames; i++, g += dg)
+                for (int c = 0; c < ch; c++, src++, d++) {
+                    const double v = (double)clamp1(*src * g) * 2147483647.0;
+                    *d = v >= 2147483647.0 ? INT32_MAX : (v <= -2147483648.0 ? INT32_MIN : (int32_t)llrint(v));
+                }
+            break;
+        }
+        case AUDIO_U8: {
+            uint8_t *d = out;
+            for (int i = 0; i < frames; i++, g += dg)
+                for (int c = 0; c < ch; c++, src++, d++) {
+                    const long r = lrintf(clamp1(*src * g) * 127.0f + dither_noise(dither)) + 128;
+                    *d = (uint8_t)(r > 255 ? 255 : (r < 0 ? 0 : r));
+                }
+            break;
+        }
+        default:
+            memset(out, 0, (size_t)frames * ch * m->bytes_per_sample);
+            break;
+    }
+}
+
+// Pause fade gain `k` frames after its current position
+static inline float pause_gain_at(const Mixer *m, const int64_t k) {
+    if (!m->pause_fade.active) return m->pause_gain;
+    if (m->pause_fade.pos + k >= m->pause_fade.len) return m->pause_to;
+    // Down (pausing), the curve runs backwards like a crossfade's fade-out: curve(1 - t), not 1 - curve(t)
+    const float t = (float)(m->pause_fade.pos + k) / (float)m->pause_fade.len;
+    const float from = m->pause_from, to = m->pause_to;
+    return to < from ? to + (from - to) * curve_at(&m->pause_fade.curve, 1.0f - t)
+                     : from + (to - from) * curve_at(&m->pause_fade.curve, t);
+}
+
+// Volume (with its 10 ms ramp), the pause fade, clamping and the device format, in one pass over the mix
+static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
     Mixer *m = &ap->mixer;
     const float target = SDL_AtomicGet(&ap->muted) ? 0.0f : (float)SDL_AtomicGet(&ap->volume) / 100.0f;
     const float step = 1.0f / (float)FFMAX(1, m->vol_ramp_frames);
-    const int ch = m->channels;
+    const int frame_bytes = m->channels * m->bytes_per_sample;
+    uint32_t dither = m->dither_state;
 
-    for (int i = 0; i < frames; i++) {
-        if (m->vol_gain < target) m->vol_gain = FFMIN(target, m->vol_gain + step);
-        else if (m->vol_gain > target) m->vol_gain = FFMAX(target, m->vol_gain - step);
+    for (int b = 0; b < frames;) {
+        int n = FFMIN(GAIN_BLOCK, frames - b);
+        // Blocks end where a ramp or the pause fade does, so both are exact at every block edge
+        const float v0 = m->vol_gain;
+        if (v0 != target) n = FFMIN(n, FFMAX(1, (int)ceilf(fabsf(target - v0) / step)));
+        if (m->pause_fade.active) n = (int)FFMIN((int64_t)n, FFMAX(1, m->pause_fade.len - m->pause_fade.pos));
+        const float vstep = v0 < target ? step : -step;
+        const float g0 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, 1) * pause_gain_at(m, 0);
+        const float g1 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, n + 1) * pause_gain_at(m, n);
+        write_block(m, out + (size_t)b * frame_bytes, m->mix_buf + (size_t)b * m->channels, n, g0,
+                    (g1 - g0) / (float)n, &dither);
 
+        m->vol_gain = ramp_at(v0, v0 == target ? 0.0f : vstep, target, n);
         if (m->pause_fade.active) {
-            // Down (pausing), the curve runs backwards like a crossfade's fade-out: curve(1 - t), not 1 - curve(t)
-            const float t = (float)m->pause_fade.pos / (float)m->pause_fade.len;
-            const float from = m->pause_from, to = m->pause_to;
-            m->pause_gain = to < from ? to + (from - to) * fade_curve_gain(&m->pause_fade.fade, 1.0f - t)
-                                      : from + (to - from) * fade_curve_gain(&m->pause_fade.fade, t);
-            if (++m->pause_fade.pos >= m->pause_fade.len) {
+            m->pause_fade.pos += n;
+            if (m->pause_fade.pos >= m->pause_fade.len) {
                 m->pause_fade.active = false;
                 m->pause_gain = m->pause_to;
             }
+            else {
+                m->pause_gain = pause_gain_at(m, 0);
+            }
         }
-
-        const float g = m->vol_gain * m->pause_gain;
-        float *s = m->mix_buf + (size_t)i * ch;
-        for (int c = 0; c < ch; c++) {
-            float v = s[c] * g;
-            s[c] = v > 1.0f ? 1.0f : (v < -1.0f ? -1.0f : v);
-        }
+        b += n;
     }
+    m->dither_state = dither;
 
     if (!m->pause_fade.active && m->pause_to == 0.0f && SDL_AtomicGet(&ap->paused))
         m->frozen = true;
 }
 
-static inline float dither_noise(Mixer *m) {
-    // Triangular (TPDF) noise in [-1, 1) LSB from two uniform values
-    uint32_t x = m->dither_state;
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-    const float a = (float)(x >> 8) * (1.0f / 16777216.0f);
-    x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-    const float b = (float)(x >> 8) * (1.0f / 16777216.0f);
-    m->dither_state = x;
-    return a - b;
-}
-
-static void convert_output(Mixer *m, Uint8 *out, const int frames) {
-    const int n = frames * m->channels;
-    const float *src = m->mix_buf;
-    switch (m->format) {
-        case AUDIO_F32SYS:
-            memcpy(out, src, (size_t)n * sizeof(float));
-            break;
-        case AUDIO_S16SYS: {
-            int16_t *d = (int16_t *)out;
-            for (int i = 0; i < n; i++) {
-                const float v = src[i] * 32767.0f + dither_noise(m);
-                const long r = lrintf(v);
-                d[i] = (int16_t)(r > 32767 ? 32767 : (r < -32768 ? -32768 : r));
-            }
-            break;
-        }
-        case AUDIO_S32SYS: {
-            int32_t *d = (int32_t *)out;
-            for (int i = 0; i < n; i++) {
-                const double v = (double)src[i] * 2147483647.0;
-                d[i] = (int32_t)(v >= 2147483647.0 ? 2147483647 : (v <= -2147483648.0 ? INT32_MIN : (int32_t)llrint(v)));
-            }
-            break;
-        }
-        case AUDIO_U8: {
-            uint8_t *d = out;
-            for (int i = 0; i < n; i++) {
-                const long r = lrintf(src[i] * 127.0f + dither_noise(m)) + 128;
-                d[i] = (uint8_t)(r > 255 ? 255 : (r < 0 ? 0 : r));
-            }
-            break;
-        }
-        default:
-            memset(out, 0, (size_t)n * m->bytes_per_sample);
-            break;
-    }
-}
-
-static void publish_status(AudioPlayer *ap, const bool advancing) {
+static void publish_status(AudioPlayer *ap, const bool advancing, const int frames) {
     Mixer *m = &ap->mixer;
     TrackState *t = m->current;
     StatusSnapshot s;
@@ -416,9 +485,13 @@ static void publish_status(AudioPlayer *ap, const bool advancing) {
     s.callback_time = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
     s.advancing = advancing;
     s.speed = t ? t->play_speed : 1.0;
-    SDL_LockMutex(ap->status_mutex);
-    ap->status = s;
-    SDL_UnlockMutex(ap->status_mutex);
+    s.period = m->rate > 0 ? (double)frames / m->rate : 0;
+    // Never waits: while a getter holds the lock (a copy of a few bytes), this period's status is skipped and the
+    // next one, a period later, is published instead
+    if (SDL_TryLockMutex(ap->status_mutex) == 0) {
+        ap->status = s;
+        SDL_UnlockMutex(ap->status_mutex);
+    }
 }
 
 static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
@@ -427,6 +500,11 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
     const int frame_bytes = m->channels * m->bytes_per_sample;
     const int total = frame_bytes > 0 ? len / frame_bytes : 0;
     bool advancing = false;
+
+    // Audio from before a seek (or for another format) goes right away, also while paused, so no decoder waits
+    if (m->current) track_drop_stale(m->current, m->rate, m->channels);
+    if (m->next) track_drop_stale(m->next, m->rate, m->channels);
+    if (m->outgoing) track_drop_stale(m->outgoing, m->rate, m->channels);
 
     int done = 0;
     while (done < total) {
@@ -442,16 +520,24 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
             render_outgoing(ap, n);
             if (render_current(ap, n) > 0)
                 advancing = true;
-            apply_master_gain(ap, n);
+            output_pass(ap, stream + (size_t)done * frame_bytes, n);
         }
-
-        convert_output(m, stream + (size_t)done * frame_bytes, n);
+        else {
+            // Paused and faded out: silence, without dither noise
+            memset(stream + (size_t)done * frame_bytes, m->format == AUDIO_U8 ? 0x80 : 0, (size_t)n * frame_bytes);
+        }
         done += n;
     }
     if (done * frame_bytes < len)
         memset(stream + (size_t)done * frame_bytes, m->format == AUDIO_U8 ? 0x80 : 0, (size_t)(len - done * frame_bytes));
 
-    publish_status(ap, advancing && !m->frozen);
+    publish_status(ap, advancing && !m->frozen, total);
+    // Events are rare (a few per track): only then is the control thread woken, with a semaphore post that never
+    // blocks; otherwise it comes by itself every CONTROL_PLAYING_MS
+    if (m->wake_control) {
+        m->wake_control = false;
+        SDL_SemPost(ap->wake_sem);
+    }
 }
 
 //+-----------------------------------------------------+
@@ -492,7 +578,6 @@ void output_close(AudioPlayer *ap) {
         ap->device_id = 0;
     }
     ap->device_running = false;
-    ap->is_audio_device_initialized = false;
 
     SDL_LockMutex(ap->format_mutex);
     ap->output_ready = false;
@@ -574,7 +659,6 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
     m->channels = obtained.channels;
     m->format = obtained.format;
     m->bytes_per_sample = SDL_AUDIO_BITSIZE(obtained.format) / 8;
-    m->period_frames = obtained.samples;
     m->vol_ramp_frames = FFMAX(1, (int)(VOLUME_RAMP_SECONDS * obtained.freq));
     m->buf_frames = FFMAX(1024, obtained.samples);
     m->mix_buf = av_malloc_array((size_t)m->buf_frames * m->channels, sizeof(float));
@@ -590,17 +674,13 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
 
     ap->device_id = id;
     SDL_AtomicSet(&ap->open_device, (int)id);
-    ap->obtained_spec = obtained;
     ap->device_running = false;
-    ap->is_audio_device_initialized = true;
 
     SDL_LockMutex(ap->format_mutex);
     ap->audio_target.freq = obtained.freq;
     av_channel_layout_uninit(&ap->audio_target.ch_layout);
     ap->audio_target.ch_layout = sdl_channel_layout(obtained.channels);
     ap->audio_target.fmt = AV_SAMPLE_FMT_FLT;
-    ap->audio_target.frame_size = (int32_t)(obtained.channels * sizeof(float));
-    ap->audio_target.bytes_per_sec = ap->audio_target.frame_size * obtained.freq;
     ap->output_ready = true;
     av_free(ap->device_in_use);
     ap->device_in_use = in_use;

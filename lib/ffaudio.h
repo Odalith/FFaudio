@@ -76,7 +76,9 @@ extern "C" {
     } AU_FADE_CURVE;
 
     // t goes 0 -> 1 over the fade; return the gain (0..1) of the track fading IN.
-    // The track fading out uses curve(1 - t). Called on the audio thread: it must be fast and must not block.
+    // The track fading out uses curve(1 - t). Called on ffaudio's control thread while the fade is set up
+    // (au_set_crossfade(), or the track with PlayAudioConfig.fade_in being queued): the curve is sampled at 257
+    // points, which are used from then on, so custom_user only has to live until that call has been processed.
     typedef float (*AuFadeCurveFn)(float t, void *custom_user);
 
     // How a fade happens. seconds <= 0 means no fade (cut, or gapless at a natural track end).
@@ -362,8 +364,8 @@ extern "C" {
     //   macOS:     ~/Library/Application Support/ffaudio/replaygain.cache
     //   Windows:   %LOCALAPPDATA%\ffaudio\replaygain.cache
     //   others:    SDL_GetPrefPath("ffaudio", "ffaudio") + replaygain.cache (Android, iOS, ...)
-    // Each change is appended to the file right away (one small write), and the file is read on first use. Only one
-    // process at a time should write to a file: compacting replaces it, which can lose another writer's changes.
+    // Each change is appended to the file right away (one small write), and the file is read on first use. Several
+    // processes can share the file: writes take a lock (a ".lock" file next to it), so none are lost.
     // Works without au_initialize() and survives au_shutdown().
     // Media files are never touched.
     //

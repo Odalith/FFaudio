@@ -78,8 +78,9 @@ add_library(ffaudio
         lib/filtergraph.h
         lib/packet_queue_utils.c
         lib/packet_queue_utils.h
-        lib/frame_queue_utils.c
-        lib/frame_queue_utils.h
+        lib/sample_ring.c
+        lib/sample_ring.h
+        lib/atomics.h
         lib/decoder_utils.c
         lib/decoder_utils.h
         lib/globals.h)
@@ -103,6 +104,10 @@ if(NOT BUILD_SHARED_LIBS)
     target_compile_definitions(ffaudio PUBLIC FFAUDIO_STATIC)
 endif()
 target_compile_options(ffaudio PRIVATE ${FFAUDIO_WARNINGS} ${SAN_FLAGS})
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    # Nothing reads errno after a math call; this lets the compiler inline lrintf() and friends in the mixer
+    target_compile_options(ffaudio PRIVATE -fno-math-errno)
+endif()
 target_link_options(ffaudio PRIVATE ${SAN_FLAGS})
 
 if(FFAUDIO_RELOCATABLE AND NOT WIN32)
@@ -188,6 +193,10 @@ if(FFAUDIO_BUILD_TESTS)
 
     ffaudio_test_exe(test_filters tests/test_filters.c)
     add_test(NAME test_filters COMMAND test_filters ${CMAKE_BINARY_DIR})
+    ffaudio_test_exe(test_ring tests/test_ring.c)
+    add_test(NAME test_ring COMMAND test_ring)
+    # Renders a fixed playlist for before/after comparisons of the output; not a CTest (see the file)
+    ffaudio_test_exe(golden_render tests/golden_render.c)
 
     if(NOT FFMPEG_EXECUTABLE OR NOT BASH_EXECUTABLE)
         message(WARNING "ffaudio: ffmpeg or bash not found, playback tests are disabled")

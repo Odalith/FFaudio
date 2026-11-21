@@ -41,7 +41,10 @@
 #include "once.h"
 
 
-#define CONTROL_TICK_MS 5
+// The control thread sleeps until a message or a mixer event wakes it, or for this long: while tracks are loaded
+// (prepare-next, "now playing", buffering progress), and when idle (device changes)
+#define CONTROL_PLAYING_MS 50
+#define CONTROL_IDLE_MS 500
 #define DEFAULT_PREPARE_NEXT_SECONDS 10.0
 
 static AudioPlayer *audio_player = NULL;
@@ -70,8 +73,8 @@ static void msg_post(AudioPlayer *ap, Msg *m) {
     if (ap->msg_tail) ap->msg_tail->next = m;
     else ap->msg_head = m;
     ap->msg_tail = m;
-    SDL_CondSignal(ap->msg_cond);
     SDL_UnlockMutex(ap->msg_mutex);
+    SDL_SemPost(ap->wake_sem);
 }
 
 static bool on_control_thread(const AudioPlayer *ap) {
@@ -265,22 +268,36 @@ static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
     if (reason == END_NATURAL && SDL_AtomicGet(&t->had_error))
         reason = END_ERROR;
     t->ended = true;
-    t->end_reason = reason;
-    if (!t->reported) {
-        t->reported = true;
-        note_add((Note){ .type = NOTE_EOF, .handle = t->handle,
-                         .b1 = reason == END_SKIPPED, .b2 = reason == END_ERROR });
-    }
+    note_add((Note){ .type = NOTE_EOF, .handle = t->handle, .b1 = reason == END_SKIPPED, .b2 = reason == END_ERROR });
     (void)ap;
 }
 
+// Ended tracks are stopped here and freed once their worker has returned (MSG_TRACK_EXITED wakes the loop): the control
+// thread never waits for a worker
 static void destroy_ended_tracks(AudioPlayer *ap) {
     for (int i = ap->n_tracks - 1; i >= 0; i--) {
         TrackState *t = ap->tracks[i];
-        if (t->ended && t->role == ROLE_NONE) {
-            registry_remove(ap, t);
-            track_destroy(t);
+        if (!t->ended || t->role != ROLE_NONE) continue;
+        if (ap->n_dying == ap->cap_dying) {
+            const int cap = ap->cap_dying ? ap->cap_dying * 2 : 8;
+            TrackState **arr = av_realloc_array(ap->dying, cap, sizeof(TrackState *));
+            if (!arr) { // out of memory: wait for this one now
+                registry_remove(ap, t);
+                track_destroy(t);
+                continue;
+            }
+            ap->dying = arr;
+            ap->cap_dying = cap;
         }
+        registry_remove(ap, t);
+        track_stop(t);
+        ap->dying[ap->n_dying++] = t;
+    }
+    for (int i = ap->n_dying - 1; i >= 0; i--) {
+        TrackState *t = ap->dying[i];
+        if (!track_stopped(t)) continue;
+        track_destroy(t); // its worker has returned: no wait
+        ap->dying[i] = ap->dying[--ap->n_dying];
     }
 }
 
@@ -314,9 +331,15 @@ static void set_current_slot(AudioPlayer *ap, TrackState *t) {
     }
 }
 
-static const AuFade *fade_for(const TrackState *incoming, const AuFade *fallback) {
-    if (incoming && incoming->has_fade_in_override) return &incoming->fade_in_override;
-    return fallback;
+// Seconds and sampled curve of the fade into `incoming`: its own (PlayAudioConfig.fade_in) or the configured one
+static double fade_for(const TrackState *incoming, const AuFade *fallback, const FadeCurve *fallback_curve,
+                       const FadeCurve **curve) {
+    if (incoming && incoming->has_fade_in_override) {
+        *curve = &incoming->fade_in_curve;
+        return incoming->fade_in_override.seconds;
+    }
+    *curve = fallback_curve;
+    return fallback->seconds;
 }
 
 static void publish_idle_status(AudioPlayer *ap) {
@@ -361,8 +384,9 @@ static void cmd_play(AudioPlayer *ap, const Msg *msg) {
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
     TrackState *old = m->current;
-    const AuFade *fade = fade_for(t, &ap->crossfade.on_play);
-    const bool faded = old && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, old, t, fade);
+    const FadeCurve *curve;
+    const double seconds = fade_for(t, &ap->crossfade.on_play, &ap->play_curve, &curve);
+    const bool faded = old && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, old, t, seconds, curve);
     if (faded) old->fade_reason = END_SKIPPED;
     else {
         if (old) remove_from_mixer(ap, old);
@@ -398,8 +422,9 @@ static void cmd_skip(AudioPlayer *ap) {
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
     TrackState *cur = m->current, *next = m->next;
-    const AuFade *fade = fade_for(next, &ap->crossfade.on_skip);
-    const bool faded = cur && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, cur, next, fade);
+    const FadeCurve *curve;
+    const double seconds = fade_for(next, &ap->crossfade.on_skip, &ap->skip_curve, &curve);
+    const bool faded = cur && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, cur, next, seconds, curve);
     if (faded) cur->fade_reason = END_SKIPPED;
     else {
         if (cur) remove_from_mixer(ap, cur);
@@ -433,12 +458,12 @@ static void cmd_stop(AudioPlayer *ap) {
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
     TrackState *cur = m->current, *next = m->next;
-    const AuFade *fade = &ap->crossfade.on_stop;
     if (next) {
         remove_from_mixer(ap, next);
         removed[n_removed++] = next;
     }
-    if (cur && !SDL_AtomicGet(&ap->paused) && mixer_start_transition(ap, cur, NULL, fade)) {
+    if (cur && !SDL_AtomicGet(&ap->paused) &&
+        mixer_start_transition(ap, cur, NULL, ap->crossfade.on_stop.seconds, &ap->stop_curve)) {
         // Fading out; a track that was already fading out is cut and reported through a mixer event
         cur->fade_reason = END_SKIPPED;
     }
@@ -463,7 +488,7 @@ static void cmd_pause(AudioPlayer *ap, const bool value) {
     if ((SDL_AtomicGet(&ap->paused) != 0) == value) return;
     SDL_AtomicSet(&ap->paused, value);
     lock_mixer(ap);
-    mixer_set_pause(ap, value, &ap->crossfade.on_pause);
+    mixer_set_pause(ap, value, ap->crossfade.on_pause.seconds, &ap->pause_curve);
     unlock_mixer(ap);
     update_device_running(ap);
 }
@@ -497,10 +522,18 @@ static void cmd_set_loop(AudioPlayer *ap, const int loop_count) {
     unlock_mixer(ap);
 }
 
+// The curves are sampled here, on the control thread: a custom curve is called now and never by the mixer
 static void apply_crossfade_config(AudioPlayer *ap, const CrossfadeConfig *cfg) {
     ap->crossfade = *cfg;
+    fade_curve_build(&ap->play_curve, &cfg->on_play);
+    fade_curve_build(&ap->skip_curve, &cfg->on_skip);
+    fade_curve_build(&ap->stop_curve, &cfg->on_stop);
+    fade_curve_build(&ap->pause_curve, &cfg->on_pause);
+    FadeCurve end_curve;
+    fade_curve_build(&end_curve, &cfg->on_track_end);
     lock_mixer(ap);
     ap->mixer.end_fade = cfg->on_track_end;
+    ap->mixer.end_curve = end_curve;
     ap->mixer.min_track_seconds = cfg->min_track_seconds;
     unlock_mixer(ap);
 }
@@ -612,7 +645,7 @@ static int cmd_configure_device(AudioPlayer *ap, const Msg *msg) {
     if (!use_default && (!msg->device.audio_device || msg->device.audio_device_index < 0))
         return AU_ERR_INVALID_ARGUMENT;
 
-    if (ap->is_audio_device_initialized) {
+    if (ap->device_id) {
         if (use_default && ap->use_default_device)
             return AU_ERR_NOTHING_TO_DO;
         if (!use_default && !ap->use_default_device && ap->audio_device_name &&
@@ -804,7 +837,7 @@ static void housekeeping(AudioPlayer *ap) {
     const double pos = cur ? cur->position : 0;
     unlock_mixer(ap);
 
-    if (cur && !have_next && !cur->prepare_next_sent && SDL_AtomicGet(&cur->opened)
+    if (cur && !have_next && !cur->prepare_next_sent && ffa_load_acquire(&cur->opened)
         && SDL_AtomicGet(&cur->loops_remaining) == 0) {
         const double end = track_end_position(cur);
         const double lead = ap->prepare_next_seconds + FFMAX(0.0, ap->crossfade.on_track_end.seconds);
@@ -913,7 +946,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         }
         case CMD_GET_TRACK_GAIN: {
             TrackState *t = track_for_handle(ap, msg->handle);
-            const bool known = t && !t->ended && SDL_AtomicGet(&t->opened);
+            const bool known = t && !t->ended && ffa_load_acquire(&t->opened);
             if (known) *msg->out_double = gain_centi_db(SDL_AtomicGet(&t->gain_mb)) / 100.0;
             finish_sync(msg, known ? AU_OK : AU_ERR_NOTHING_TO_DO);
             msg->done = NULL;
@@ -928,6 +961,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case MSG_TRACK_FAILED:
         case MSG_TRACK_DEMUX_EOF:
         case MSG_TRACK_SEEKED:     handle_track_msg(ap, msg); break;
+        case MSG_TRACK_EXITED:     break; // reaped at the end of this loop iteration
     }
     return true;
 }
@@ -942,8 +976,13 @@ static void shutdown_tracks(AudioPlayer *ap) {
     unlock_mixer(ap);
     output_close(ap);
     for (int i = 0; i < ap->n_tracks; i++)
+        track_stop(ap->tracks[i]);
+    for (int i = 0; i < ap->n_tracks; i++)
         track_destroy(ap->tracks[i]);
     ap->n_tracks = 0;
+    for (int i = 0; i < ap->n_dying; i++)
+        track_destroy(ap->dying[i]);
+    ap->n_dying = 0;
 }
 
 static int control_thread(void *arg) {
@@ -956,9 +995,8 @@ static int control_thread(void *arg) {
     SDL_SemPost(ap->started_sem);
 
     while (!shutdown_msg) {
+        SDL_SemWaitTimeout(ap->wake_sem, ap->n_tracks || ap->n_dying ? CONTROL_PLAYING_MS : CONTROL_IDLE_MS);
         SDL_LockMutex(ap->msg_mutex);
-        if (!ap->msg_head)
-            SDL_CondWaitTimeout(ap->msg_cond, ap->msg_mutex, CONTROL_TICK_MS);
         Msg *list = ap->msg_head;
         ap->msg_head = ap->msg_tail = NULL;
         SDL_UnlockMutex(ap->msg_mutex);
@@ -1045,14 +1083,19 @@ int au_initialize(const InitializeConfig* config) {
     ap->mixer.pause_gain = 1.0f;
     ap->mixer.pause_to = 1.0f;
     ap->mixer.vol_gain = (float)SDL_AtomicGet(&ap->volume) / 100.0f;
+    fade_curve_build(&ap->mixer.linear_curve, NULL);
+    const CrossfadeConfig no_fades = {0};
+    apply_crossfade_config(ap, &no_fades); // no device yet: lock_mixer() does nothing
 
     ap->msg_mutex = SDL_CreateMutex();
-    ap->msg_cond = SDL_CreateCond();
+    ap->wake_sem = SDL_CreateSemaphore(0);
     ap->format_mutex = SDL_CreateMutex();
     ap->format_cond = SDL_CreateCond();
     ap->status_mutex = SDL_CreateMutex();
+    ap->ring_pool_mutex = SDL_CreateMutex();
     ap->started_sem = SDL_CreateSemaphore(0);
-    if (!ap->started_sem || !ap->msg_mutex || !ap->msg_cond || !ap->format_mutex || !ap->format_cond || !ap->status_mutex)
+    if (!ap->msg_mutex || !ap->wake_sem || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
+        !ap->ring_pool_mutex || !ap->started_sem)
         goto fail_sync;
     publish_idle_status(ap);
 
@@ -1113,10 +1156,11 @@ int au_initialize(const InitializeConfig* config) {
 
 fail_sync:
     SDL_DestroyMutex(ap->msg_mutex);
-    SDL_DestroyCond(ap->msg_cond);
+    SDL_DestroySemaphore(ap->wake_sem);
     SDL_DestroyMutex(ap->format_mutex);
     SDL_DestroyCond(ap->format_cond);
     SDL_DestroyMutex(ap->status_mutex);
+    SDL_DestroyMutex(ap->ring_pool_mutex);
     SDL_DestroySemaphore(ap->started_sem);
     av_free(ap);
     return AU_ERR_SDL;
@@ -1157,6 +1201,7 @@ void au_shutdown(void) {
         rest = n;
     }
     av_free(ap->tracks);
+    av_free(ap->dying);
     av_free(ap->audio_device_name);
     av_free(ap->device_in_use);
     free_device_list(ap->known_devices, ap->n_known_devices);
@@ -1164,10 +1209,12 @@ void au_shutdown(void) {
     av_free(ap->downmix_filters);
     av_channel_layout_uninit(&ap->audio_target.ch_layout);
     SDL_DestroyMutex(ap->msg_mutex);
-    SDL_DestroyCond(ap->msg_cond);
+    SDL_DestroySemaphore(ap->wake_sem);
     SDL_DestroyMutex(ap->format_mutex);
     SDL_DestroyCond(ap->format_cond);
     SDL_DestroyMutex(ap->status_mutex);
+    ring_storage_free_all(ap); // the tracks gave their storage back when they were destroyed
+    SDL_DestroyMutex(ap->ring_pool_mutex);
     SDL_DestroySemaphore(ap->started_sem);
     av_free(ap);
 
@@ -1585,8 +1632,7 @@ double au_get_audio_play_time(void) {
     if (!s.advancing) return s.position;
 
     // The position is that of the last sample handed to SDL; what is audible lags by the buffered audio
-    const double rate = ap->obtained_spec.freq > 0 ? ap->obtained_spec.freq : 48000;
-    const double period = ap->obtained_spec.samples / rate;
+    const double period = s.period;
     const double now = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
     const double elapsed = FFMIN(FFMAX(now - s.callback_time, 0.0), period);
     const double speed = s.speed > 0 ? s.speed : 1.0;

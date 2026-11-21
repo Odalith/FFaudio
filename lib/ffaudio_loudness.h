@@ -50,7 +50,7 @@ extern "C" {
         bool silent;                  // nothing above the -70 LUFS gate: loudness and gains are not meaningful
         double integrated_lufs;       // integrated (programme) loudness, gated, in LUFS
         double loudness_range_lu;     // loudness range (EBU Tech 3342), in LU
-        double true_peak;             // linear, 4x oversampled (1.0 = 0 dBTP)
+        double true_peak;             // linear (1.0 = 0 dBTP): 4x interpolated below 96 kHz, 2x below 192 kHz
         double sample_peak;           // linear, largest absolute sample value (1.0 = full scale)
         double duration;              // seconds of audio measured
         double replaygain_gain_db;    // ReplayGain 2.0 gain: -18 LUFS - integrated (REPLAYGAIN_*_GAIN)
@@ -63,7 +63,7 @@ extern "C" {
     typedef bool (*AuLoudnessProgress)(double fraction, void *user);
 
     typedef struct AuLoudnessConfig {
-        bool skip_true_peak;          // only measure the sample peak (true peak costs ~40% of the scan time)
+        bool skip_true_peak;          // only measure the sample peak (the true peak adds about 15% to a scan)
         AuLoudnessProgress progress;  // optional
         void *progress_user;
     } AuLoudnessConfig;

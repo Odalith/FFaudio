@@ -96,14 +96,14 @@ AuNetworkConfig network_config(char *ua, const size_t ua_size) {
     memset(&c, 0, sizeof(c));
     if (locked()) {
         c = settings;
-        snprintf(ua, ua_size, "%s", settings.user_agent ? settings.user_agent : "");
+        if (ua) snprintf(ua, ua_size, "%s", settings.user_agent ? settings.user_agent : "");
         SDL_UnlockMutex(lock);
     }
-    else {
+    else if (ua) {
         ua[0] = '\0';
     }
-    if (!ua[0]) snprintf(ua, ua_size, "ffaudio/%s", au_get_version());
-    c.user_agent = ua;
+    if (ua && !ua[0]) snprintf(ua, ua_size, "ffaudio/%s", au_get_version());
+    c.user_agent = ua; // NULL when only the numbers were asked for
     if (c.timeout_seconds <= 0) c.timeout_seconds = DEFAULT_TIMEOUT_SECONDS;
     if (c.buffer_seconds <= 0) c.buffer_seconds = DEFAULT_BUFFER_SECONDS;
     if (c.max_buffer_seconds <= 0) c.max_buffer_seconds = DEFAULT_MAX_BUFFER_SECONDS;
@@ -131,8 +131,7 @@ static char *crlf_headers(const char *headers) {
 
 void network_after_open(AVFormatContext *ic, const char *path) {
     if (!ic || !ic->pb || !au_is_network_url(path)) return;
-    char ua[8];
-    if (network_config(ua, sizeof(ua)).reconnect_attempts > 0)
+    if (network_config(NULL, 0).reconnect_attempts > 0)
         av_opt_set(ic->pb, "reconnect_on_network_error", "1", AV_OPT_SEARCH_CHILDREN); // not every protocol has it
 }
 

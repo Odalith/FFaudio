@@ -306,10 +306,9 @@ ffaudio, so values measured once are there in every later run.
 right away as one line, so nothing is lost if the program crashes; it is read on first use and compacted when it has
 grown with superseded lines. The folder is only created on the first write.
 
-Only one program should write to a cache file at a time. Compacting (and `au_gain_cache_clear()`) replaces the
-file, so changes another program writes at that moment can be lost; on Linux and macOS a program that has the file
-open goes on appending to the replaced copy. Programs that measure while running side by side should each use
-their own file. One after the other is fine, and `au_gain_cache_reload()` picks up what another program wrote.
+Several programs can use the file at the same time: every write takes a lock (a `.lock` file next to it), a
+compaction first reads what the others appended, and an append follows a file another program has replaced.
+`au_gain_cache_reload()` picks up what the others wrote. A cache file of a later format is not read or written.
 ffaudio never tracks, checks or modifies the media files: paths are plain strings, and keeping them current is up
 to the application (`au_gain_cache_foreach()` + `au_gain_cache_remove()` to drop entries for deleted files).
 
@@ -431,24 +430,28 @@ macOS allocators return memory to the system more readily.
 
 ## Architecture
 ```
- app ──au_*()──▶ control thread ──creates/destroys──▶ tracks (one read thread + one decode thread each)
+ app ──au_*()──▶ control thread ──creates/destroys──▶ tracks (one thread each; streams also a reader)
                   │  ▲ events                            │ demux → decode → convert graph → user graph
                   ▼  │                                   ▼
-            mixer slots (current / next / outgoing) ◀── decoded float frames (~0.5 s per track)
+            mixer slots (current / next / outgoing) ◀── lock-free ring of float frames (~0.5 s per track)
                   │
                   ▼
             SDL audio callback: gapless handover, crossfades, gain ramps, dither → device
 ```
 - `lib/ffaudio.c`: public API and the control thread; the only place tracks are created, moved and freed.
-- `lib/track.c`: per-track read and decode threads, filter graphs, and the non-blocking `track_pull()`.
-- `lib/output.c`: device handling and the mixer (SDL callback). It never blocks, allocates or frees.
+- `lib/track.c`: the per-track worker (and a reader thread for network streams), filter graphs, and the
+  non-blocking `track_pull()`.
+- `lib/output.c`: device handling and the mixer (SDL callback). It never blocks, allocates, frees or signals.
+- `lib/sample_ring.c`: the lock-free ring between a track's decoder and the mixer.
 - `lib/filtergraph.c`: the convert graph (decoder format → output format) and the user graph (filters).
 - `lib/filters.c`: the filter-string builder (`ffaudio_filters.h`).
-- `lib/*_queue_utils.c`, `lib/decoder_utils.c`: packet/frame queues and the decoder loop, from FFplay.
+- `lib/packet_queue_utils.c`, `lib/decoder_utils.c`: the packet queue (network streams) and the decoder loop, from
+  FFplay.
 
 ## Testing
 `ctest` runs headless suites with SDL's dummy and disk drivers:
 - `test_filters`: filter-string builder
+- `test_ring`: the lock-free sample ring, on one thread and with a producer and a consumer thread
 - `test_basic`: formats, broken files, queueing, pause, seek, stop, looping
 - `test_lifecycle`: calls before init, shutdown while playing, re-initialization
 - `test_stress`: random API sequences, a playlist driven entirely from callbacks, rapid track replacement
@@ -461,6 +464,9 @@ macOS allocators return memory to the system more readily.
 - `test_metadata`: tags, track/disc numbers and ReplayGain/R128 parsing in several formats
 - `test_output`: captures the mixed output and checks gapless joins sample by sample, crossfade lengths,
   fades, volume ramps and live filter changes
+
+`golden_render <fixture-dir> <out.f32> [reference.f32]` (not a CTest) renders a fixed queue of tracks
+without anything depending on timing, so a render from before a change can be compared with one after it.
 
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
 `tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]`
