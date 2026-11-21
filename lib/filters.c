@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include <libavfilter/avfilter.h>
+#include <libavutil/bprint.h>
 
 #include "ffaudio_filters.h"
 #include "numbers.h"
@@ -32,11 +33,9 @@
 #define NAME_MAX_LEN 32
 
 struct AuFilterBuilder {
-    char *buf;
-    size_t len;
-    size_t cap;
+    AVBPrint bp;                 // the chain so far
     char error[256];
-    char name[NAME_MAX_LEN + 1]; // instance name for the next add call ("" = none)
+    char name[NAME_MAX_LEN + 1]; // instance name of the add call in progress ("" = none)
 };
 
 static const double default_freqs[AU_EQ_BANDS] = { 31.25, 62.5, 125, 250, 500, 1000, 2000, 4000, 8000, 16000 };
@@ -103,68 +102,43 @@ static bool named(const AuFilterBuilder *fb) {
     return fb->name[0] != '\0';
 }
 
-// A growable string, so multi-filter helpers can build everything before touching the builder
-typedef struct Str {
-    char *s;
-    size_t len, cap;
-    bool oom;
-} Str;
-
-static void str_add(Str *s, const char *fmt, ...) {
-    if (s->oom) return;
-    char tmp[1024];
-    va_list args;
-    va_start(args, fmt);
-    const int n = vsnprintf(tmp, sizeof(tmp), fmt, args);
-    va_end(args);
-    if (n < 0 || n >= (int)sizeof(tmp)) { s->oom = true; return; }
-    if (s->len + (size_t)n + 1 > s->cap) {
-        size_t cap = s->cap ? s->cap * 2 : 512;
-        while (cap < s->len + (size_t)n + 1) cap *= 2;
-        char *b = realloc(s->s, cap);
-        if (!b) { s->oom = true; return; }
-        s->s = b;
-        s->cap = cap;
-    }
-    memcpy(s->s + s->len, tmp, (size_t)n + 1);
-    s->len += (size_t)n;
-}
-
-// Append a filter to the chain (with a ',' separator)
+// Append a filter to the chain (with a ',' separator); the chain is unchanged when memory runs out
 static int append(AuFilterBuilder *fb, const char *filter) {
-    const size_t add = strlen(filter);
-    const size_t need = fb->len + add + 2;
-    if (need > fb->cap) {
-        size_t cap = fb->cap ? fb->cap : 128;
-        while (cap < need) cap *= 2;
-        char *b = realloc(fb->buf, cap);
-        if (!b) return AU_ERR_NO_MEMORY;
-        fb->buf = b;
-        fb->cap = cap;
+    const unsigned old = fb->bp.len;
+    if (fb->bp.len) av_bprint_chars(&fb->bp, ',', 1);
+    av_bprintf(&fb->bp, "%s", filter);
+    if (!av_bprint_is_complete(&fb->bp)) {
+        fb->bp.len = old;
+        if (fb->bp.size) fb->bp.str[old] = '\0';
+        return AU_ERR_NO_MEMORY;
     }
-    if (fb->len) fb->buf[fb->len++] = ',';
-    memcpy(fb->buf + fb->len, filter, add + 1);
-    fb->len += add;
     fb->error[0] = '\0';
     return AU_OK;
 }
 
-static int appendf(AuFilterBuilder *fb, const char *fmt, ...) {
-    char tmp[1024];
-    va_list args;
-    va_start(args, fmt);
-    const int n = vsnprintf(tmp, sizeof(tmp), fmt, args);
-    va_end(args);
-    if (n < 0 || n >= (int)sizeof(tmp)) return fail(fb, "filter string too long");
-    return append(fb, tmp);
+// A string for a helper to build everything in before touching the chain
+static void str_init(AVBPrint *s) {
+    av_bprint_init(s, 0, AV_BPRINT_SIZE_UNLIMITED);
 }
 
-// Append a Str built by a helper (nothing when empty) and free it
-static int append_str(AuFilterBuilder *fb, Str *s) {
+static int appendf(AuFilterBuilder *fb, const char *fmt, ...) {
+    AVBPrint s;
+    str_init(&s);
+    va_list args;
+    va_start(args, fmt);
+    av_vbprintf(&s, fmt, args);
+    va_end(args);
+    const int ret = av_bprint_is_complete(&s) ? append(fb, s.str) : AU_ERR_NO_MEMORY;
+    av_bprint_finalize(&s, NULL);
+    return ret;
+}
+
+// Append what a helper built (nothing when empty) and free it
+static int append_str(AuFilterBuilder *fb, AVBPrint *s) {
     int ret = AU_OK;
-    if (s->oom) ret = AU_ERR_NO_MEMORY;
-    else if (s->len) ret = append(fb, s->s);
-    free(s->s);
+    if (!av_bprint_is_complete(s)) ret = AU_ERR_NO_MEMORY;
+    else if (s->len) ret = append(fb, s->str);
+    av_bprint_finalize(s, NULL);
     return ret;
 }
 
@@ -173,32 +147,33 @@ static int append_str(AuFilterBuilder *fb, Str *s) {
 //+-----------------------------------------------------+
 
 AuFilterBuilder *au_fb_create(void) {
-    return calloc(1, sizeof(AuFilterBuilder));
+    AuFilterBuilder *fb = calloc(1, sizeof(AuFilterBuilder));
+    if (fb) av_bprint_init(&fb->bp, 0, AV_BPRINT_SIZE_UNLIMITED);
+    return fb;
 }
 
 void au_fb_free(AuFilterBuilder *fb) {
     if (!fb) return;
-    free(fb->buf);
+    av_bprint_finalize(&fb->bp, NULL);
     free(fb);
 }
 
 void au_fb_clear(AuFilterBuilder *fb) {
     if (!fb) return;
-    fb->len = 0;
-    if (fb->buf) fb->buf[0] = '\0';
+    av_bprint_clear(&fb->bp);
     fb->error[0] = '\0';
     fb->name[0] = '\0';
 }
 
 char *au_fb_build(const AuFilterBuilder *fb) {
-    if (!fb || !fb->len) return NULL;
-    char *s = malloc(fb->len + 1);
-    if (s) memcpy(s, fb->buf, fb->len + 1);
+    if (!fb || !fb->bp.len) return NULL;
+    char *s = malloc(fb->bp.len + 1); // au_free() frees it, with ffaudio's C runtime
+    if (s) memcpy(s, fb->bp.str, fb->bp.len + 1);
     return s;
 }
 
 const char *au_fb_peek(const AuFilterBuilder *fb) {
-    return (fb && fb->len) ? fb->buf : "";
+    return (fb && fb->bp.len) ? fb->bp.str : "";
 }
 
 const char *au_fb_last_error(const AuFilterBuilder *fb) {
@@ -219,12 +194,11 @@ bool au_filter_available(const char *name) {
     return name && name[0] && avfilter_get_by_name(name) != NULL;
 }
 
-int au_fb_set_name(AuFilterBuilder *fb, const char *name) {
-    if (!fb) return AU_ERR_INVALID_ARGUMENT;
-    if (!name || !name[0]) {
-        fb->name[0] = '\0';
-        return AU_OK;
-    }
+// The start of every au_fb_add_*() call with a name: check it and use it for the filters of this call (finish()
+// clears it). NULL or "" = no name.
+static int begin(AuFilterBuilder *fb, const char *name) {
+    fb->name[0] = '\0';
+    if (!name || !name[0]) return AU_OK;
     const size_t n = strlen(name);
     if (n > NAME_MAX_LEN) return fail(fb, "filter names are at most %d characters", NAME_MAX_LEN);
     for (size_t i = 0; i < n; i++)
@@ -238,8 +212,10 @@ int au_fb_set_name(AuFilterBuilder *fb, const char *name) {
 //| Gain                                                |
 //+-----------------------------------------------------+
 
-int au_fb_add_volume_db(AuFilterBuilder *fb, const double gain_db) {
+int au_fb_add_volume_db(AuFilterBuilder *fb, const char *name, const double gain_db) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
     if (!in_range(gain_db, -60.0, 30.0)) return finish(fb, fail(fb, "gain must be between -60 and +30 dB"));
     char g[32], t[96];
     return finish(fb, appendf(fb, "%s=%sdB", tag(fb, t, "volume", -1), num(g, gain_db)));
@@ -259,47 +235,40 @@ AuEqualizer au_equalizer_defaults(void) {
     return eq;
 }
 
-static int add_equalizer(AuFilterBuilder *fb, const int channels, const AuEqualizer *eq) {
+static int add_equalizer(AuFilterBuilder *fb, const AuEqualizer *eq) {
     if (!eq) return fail(fb, "no equalizer settings");
-    if (channels < 1 || channels > 8) return fail(fb, "channel count must be between 1 and 8");
     if (!in_range(eq->preamp_db, -30.0, 30.0)) return fail(fb, "preamp must be between -30 and +30 dB");
-    const int r = require(fb, "anequalizer");
+    const int r = require(fb, "equalizer");
     if (r != AU_OK) return r;
 
     // With a name every band is added (0 dB included) so commands can change any of them
     const bool all = named(fb);
-    bool any = false;
     for (int b = 0; b < AU_EQ_BANDS; b++) {
         if (!in_range(eq->gain_db[b], -30.0, 30.0)) return fail(fb, "band %d: gain must be between -30 and +30 dB", b);
         if (eq->gain_db[b] == 0 && !all) continue;
         if (!in_range(eq->frequency_hz[b], 1.0, 96000.0)) return fail(fb, "band %d: frequency must be between 1 and 96000 Hz", b);
         if (!in_range(eq->width_hz[b], 0.1, 96000.0)) return fail(fb, "band %d: width must be between 0.1 and 96000 Hz", b);
-        any = true;
     }
-    if (!any && eq->preamp_db == 0) return AU_OK;
 
-    // Build into a separate string first so the builder is unchanged on error
-    Str s = { 0 };
+    // Built into a separate string first, so the chain is unchanged on error. One peaking biquad per band, its width
+    // in Hz, in double precision like the parametric EQ; it works on any channel count.
+    AVBPrint s;
+    str_init(&s);
     char t[96], f[32], w[32], g[32];
-    if (eq->preamp_db != 0) str_add(&s, "%s=%sdB", tag(fb, t, "volume", -1), num(g, eq->preamp_db));
-    if (any) {
-        str_add(&s, "%s%s=", s.len ? "," : "", tag(fb, t, "anequalizer", -1));
-        bool first = true;
-        for (int c = 0; c < channels; c++) {
-            for (int b = 0; b < AU_EQ_BANDS; b++) {
-                if (eq->gain_db[b] == 0 && !all) continue;
-                str_add(&s, "%sc%d f=%s w=%s g=%s", first ? "" : "|", c,
-                        num(f, eq->frequency_hz[b]), num(w, eq->width_hz[b]), num(g, eq->gain_db[b]));
-                first = false;
-            }
-        }
+    if (eq->preamp_db != 0) av_bprintf(&s, "%s=%sdB", tag(fb, t, "volume", -1), num(g, eq->preamp_db));
+    for (int b = 0; b < AU_EQ_BANDS; b++) {
+        if (eq->gain_db[b] == 0 && !all) continue;
+        av_bprintf(&s, "%s%s=f=%s:t=h:w=%s:g=%s:r=f64", s.len ? "," : "", tag(fb, t, "equalizer", b),
+                   num(f, eq->frequency_hz[b]), num(w, eq->width_hz[b]), num(g, eq->gain_db[b]));
     }
     return append_str(fb, &s);
 }
 
-int au_fb_add_equalizer(AuFilterBuilder *fb, const int channels, const AuEqualizer *eq) {
+int au_fb_add_equalizer(AuFilterBuilder *fb, const char *name, const AuEqualizer *eq) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
-    return finish(fb, add_equalizer(fb, channels, eq));
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
+    return finish(fb, add_equalizer(fb, eq));
 }
 
 //+-----------------------------------------------------+
@@ -346,23 +315,26 @@ static int add_parametric_eq(AuFilterBuilder *fb, const AuParametricEq *eq) {
     }
 
     const bool all = named(fb);
-    Str s = { 0 };
+    AVBPrint s;
+    str_init(&s);
     char t[96], f[32], q[32], g[32];
     if (eq->preamp_db != 0 || (all && eq->band_count))
-        str_add(&s, "%s=%sdB", tag(fb, t, "volume", -1), num(g, eq->preamp_db));
+        av_bprintf(&s, "%s=%sdB", tag(fb, t, "volume", -1), num(g, eq->preamp_db));
     for (int i = 0; i < eq->band_count; i++) {
         const AuPeqBand *b = &eq->bands[i];
         if (peq_has_gain(b->type) && b->gain_db == 0 && !all) continue; // a 0 dB peak or shelf does nothing
-        str_add(&s, "%s%s=f=%s:t=q:w=%s", s.len ? "," : "", tag(fb, t, peq_filter(b->type), i),
+        av_bprintf(&s, "%s%s=f=%s:t=q:w=%s", s.len ? "," : "", tag(fb, t, peq_filter(b->type), i),
                 num(f, b->frequency_hz), num(q, b->q));
-        if (peq_has_gain(b->type)) str_add(&s, ":g=%s", num(g, b->gain_db));
-        str_add(&s, ":r=f64"); // double precision: float biquads are noisy at low frequencies
+        if (peq_has_gain(b->type)) av_bprintf(&s, ":g=%s", num(g, b->gain_db));
+        av_bprintf(&s, ":r=f64"); // double precision: float biquads are noisy at low frequencies
     }
     return append_str(fb, &s);
 }
 
-int au_fb_add_parametric_eq(AuFilterBuilder *fb, const AuParametricEq *eq) {
+int au_fb_add_parametric_eq(AuFilterBuilder *fb, const char *name, const AuParametricEq *eq) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
     return finish(fb, add_parametric_eq(fb, eq));
 }
 
@@ -514,19 +486,22 @@ static int add_tone(AuFilterBuilder *fb, const double bass_db, const double treb
     if ((bass_db != 0 || all) && (r = require(fb, "bass")) != AU_OK) return r;
     if ((treble_db != 0 || all) && (r = require(fb, "treble")) != AU_OK) return r;
 
-    Str s = { 0 };
+    AVBPrint s;
+    str_init(&s);
     char t[96], f[32], w[32], g[32];
     num(w, TONE_SLOPE_Q);
     if (bass_db != 0 || all)
-        str_add(&s, "%s=f=%s:t=q:w=%s:g=%s:r=f64", tag(fb, t, "bass", -1), num(f, TONE_BASS_HZ), w, num(g, bass_db));
+        av_bprintf(&s, "%s=f=%s:t=q:w=%s:g=%s:r=f64", tag(fb, t, "bass", -1), num(f, TONE_BASS_HZ), w, num(g, bass_db));
     if (treble_db != 0 || all)
-        str_add(&s, "%s%s=f=%s:t=q:w=%s:g=%s:r=f64", s.len ? "," : "", tag(fb, t, "treble", -1),
+        av_bprintf(&s, "%s%s=f=%s:t=q:w=%s:g=%s:r=f64", s.len ? "," : "", tag(fb, t, "treble", -1),
                 num(f, TONE_TREBLE_HZ), w, num(g, treble_db));
     return append_str(fb, &s);
 }
 
-int au_fb_add_tone(AuFilterBuilder *fb, const double bass_db, const double treble_db) {
+int au_fb_add_tone(AuFilterBuilder *fb, const char *name, const double bass_db, const double treble_db) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
     return finish(fb, add_tone(fb, bass_db, treble_db));
 }
 
@@ -552,8 +527,10 @@ static int add_stereo(AuFilterBuilder *fb, const AuStereo *st) {
                    num(w, mono ? 1.0 : st->width), num(b, st->balance));
 }
 
-int au_fb_add_stereo(AuFilterBuilder *fb, const AuStereo *stereo) {
+int au_fb_add_stereo(AuFilterBuilder *fb, const char *name, const AuStereo *stereo) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
     return finish(fb, add_stereo(fb, stereo));
 }
 
@@ -575,8 +552,10 @@ static int add_limiter(AuFilterBuilder *fb, const AuLimiter *config) {
                    num(c, fmax(0.0625, db_to_linear(l.ceiling_db))), num(a, l.attack_ms), num(rel, l.release_ms));
 }
 
-int au_fb_add_limiter(AuFilterBuilder *fb, const AuLimiter *config) {
+int au_fb_add_limiter(AuFilterBuilder *fb, const char *name, const AuLimiter *config) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
     return finish(fb, add_limiter(fb, config));
 }
 
@@ -609,8 +588,10 @@ static int add_compressor(AuFilterBuilder *fb, const AuCompressor *config) {
                    num(mk, db_to_linear(c.makeup_db)));
 }
 
-int au_fb_add_compressor(AuFilterBuilder *fb, const AuCompressor *config) {
+int au_fb_add_compressor(AuFilterBuilder *fb, const char *name, const AuCompressor *config) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
     return finish(fb, add_compressor(fb, config));
 }
 
@@ -637,8 +618,10 @@ static int add_crossfeed(AuFilterBuilder *fb, const AuCrossfeed *config) {
                    num(a, c.strength), num(b, c.range), num(s, c.slope), num(li, c.level_in), num(lo, c.level_out));
 }
 
-int au_fb_add_crossfeed(AuFilterBuilder *fb, const AuCrossfeed *config) {
+int au_fb_add_crossfeed(AuFilterBuilder *fb, const char *name, const AuCrossfeed *config) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
     return finish(fb, add_crossfeed(fb, config));
 }
 
@@ -656,8 +639,10 @@ static int add_bs2b_profile(AuFilterBuilder *fb, const AU_BS2B_PROFILE profile) 
     return appendf(fb, "%s=profile=%s", tag(fb, t, "bs2b", -1), name);
 }
 
-int au_fb_add_bs2b_profile(AuFilterBuilder *fb, const AU_BS2B_PROFILE profile) {
+int au_fb_add_bs2b_profile(AuFilterBuilder *fb, const char *name, const AU_BS2B_PROFILE profile) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
     return finish(fb, add_bs2b_profile(fb, profile));
 }
 
@@ -670,7 +655,9 @@ static int add_bs2b(AuFilterBuilder *fb, const int fcut_hz, const int feed_tenth
     return appendf(fb, "%s=fcut=%d:feed=%d", tag(fb, t, "bs2b", -1), fcut_hz, feed_tenth_db);
 }
 
-int au_fb_add_bs2b(AuFilterBuilder *fb, const int fcut_hz, const int feed_tenth_db) {
+int au_fb_add_bs2b(AuFilterBuilder *fb, const char *name, const int fcut_hz, const int feed_tenth_db) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
     return finish(fb, add_bs2b(fb, fcut_hz, feed_tenth_db));
 }

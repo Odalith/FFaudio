@@ -314,7 +314,7 @@ static int output_channels(void) {
 
 static void random_filters(void) {
     if (chance(0.2)) {
-        au_set_global_filtergraph(NULL);
+        au_set_filters(NULL);
         return;
     }
     const int ch = output_channels();
@@ -324,36 +324,33 @@ static void random_filters(void) {
         AuEqualizer eq = au_equalizer_defaults();
         for (int i = 0; i < AU_EQ_BANDS; i++) eq.gain_db[i] = chance(0.5) ? 0 : rnd_real(-8, 8);
         eq.preamp_db = -6;
-        if (chance(0.5)) au_fb_set_name(fb, "geq");
-        au_fb_add_equalizer(fb, ch, &eq);
+        au_fb_add_equalizer(fb, chance(0.5) ? "geq" : NULL, &eq);
     }
     if (chance(0.3)) {
         AuParametricEq peq = { .preamp_db = -4, .band_count = 1 + rnd_int(10) };
         for (int i = 0; i < peq.band_count; i++)
             peq.bands[i] = (AuPeqBand){ (AU_PEQ_TYPE)rnd_int(5), rnd_real(30, 15000), rnd_real(0.3, 5), rnd_real(-8, 8) };
-        if (chance(0.5)) au_fb_set_name(fb, "peq");
-        au_fb_add_parametric_eq(fb, &peq);
+        au_fb_add_parametric_eq(fb, chance(0.5) ? "peq" : NULL, &peq);
     }
-    if (chance(0.3)) au_fb_add_tone(fb, rnd_real(-6, 6), rnd_real(-6, 6));
+    if (chance(0.3)) au_fb_add_tone(fb, NULL, rnd_real(-6, 6), rnd_real(-6, 6));
     if (ch == 2) {
         if (chance(0.4)) {
             AuStereo st = au_stereo_defaults();
             st.balance = chance(0.5) ? 0 : rnd_real(-1, 1);
             st.width = chance(0.2) ? 0 : rnd_real(0.5, 2);
             st.swap = chance(0.2);
-            au_fb_set_name(fb, "st");
-            au_fb_add_stereo(fb, &st);
+            au_fb_add_stereo(fb, "st", &st);
         }
-        if (chance(0.3)) au_fb_add_crossfeed(fb, NULL);
-        if (chance(0.2) && au_filter_available("bs2b")) au_fb_add_bs2b_profile(fb, (AU_BS2B_PROFILE)rnd_int(3));
+        if (chance(0.3)) au_fb_add_crossfeed(fb, NULL, NULL);
+        if (chance(0.2) && au_filter_available("bs2b")) au_fb_add_bs2b_profile(fb, NULL, (AU_BS2B_PROFILE)rnd_int(3));
     }
     if (chance(0.25)) {
         const AuCompressor c = chance(0.5) ? au_compressor_defaults() : au_compressor_night();
-        au_fb_add_compressor(fb, &c);
+        au_fb_add_compressor(fb, NULL, &c);
     }
-    if (chance(0.4)) au_fb_add_limiter(fb, NULL);
+    if (chance(0.4)) au_fb_add_limiter(fb, NULL, NULL);
     const char *s = au_fb_peek(fb);
-    au_set_global_filtergraph(s[0] ? s : NULL);
+    au_set_filters(s[0] ? s : NULL);
     au_fb_free(fb);
 }
 
@@ -369,8 +366,10 @@ static void random_command(void) {
             au_send_filter_command(0, "equalizer@peq_0", "g", arg);
             break;
         default:
-            snprintf(arg, sizeof(arg), "%d|f=1000|w=500|g=%d", rnd_int(10), rnd_int(13) - 6);
-            au_send_filter_command(0, "anequalizer@geq", "change", arg);
+            char target[32];
+            snprintf(target, sizeof(target), "equalizer@geq_%d", rnd_int(AU_EQ_BANDS));
+            snprintf(arg, sizeof(arg), "%d", rnd_int(13) - 6);
+            au_send_filter_command(0, target, "g", arg);
             break;
     }
 }
@@ -622,7 +621,7 @@ static void one_action(void) {
     else if (r < 560) { ACTION("speed");         au_set_speed(chance(0.4) ? 1.0 : rnd_real(0.25, 4), chance(0.7)); }
     else if (r < 620) { ACTION("filters");       random_filters(); }
     else if (r < 680) { ACTION("command");       random_command(); }
-    else if (r < 700) { ACTION("track_filter");  au_update_filtergraph(0, chance(0.5) ? NULL : "volume=0.7"); }
+    else if (r < 700) { ACTION("track_filter");  au_set_track_filters(0, chance(0.5) ? NULL : "volume=0.7"); }
     else if (r < 720) { ACTION("crossfade");     random_crossfade(); }
     else if (r < 740) { ACTION("replaygain");    random_replaygain(); }
     else if (r < 750) { ACTION("downmix");       au_set_downmix(chance(0.5) ? AU_DOWNMIX_FULL_LEVEL : AU_DOWNMIX_NORMALIZED, NULL); }

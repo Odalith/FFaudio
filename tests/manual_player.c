@@ -313,7 +313,7 @@ static void apply_effects(void) {
     if (!fb) { pthread_mutex_unlock(&fx_lock); return; }
     char desc[512] = "";
     if (peq_on) {
-        if (au_fb_add_parametric_eq(fb, &peq) != AU_OK) printf("  parametric eq: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_parametric_eq(fb, NULL, &peq) != AU_OK) printf("  parametric eq: %s\n", au_fb_last_error(fb));
         ADD_DESC(" peq(%d bands)", peq.band_count);
     }
     if (eq_index > 0) {
@@ -324,12 +324,12 @@ static void apply_effects(void) {
             if (eq.gain_db[i] > max_gain) max_gain = eq.gain_db[i];
         }
         eq.preamp_db = -max_gain; // headroom for the boosts
-        if (au_fb_add_equalizer(fb, channels, &eq) != AU_OK)
+        if (au_fb_add_equalizer(fb, NULL, &eq) != AU_OK)
             printf("  equalizer: %s\n", au_fb_last_error(fb));
         ADD_DESC(" eq=%s", eq_presets[eq_index].name);
     }
     if (bass_db != 0 || treble_db != 0) {
-        if (au_fb_add_tone(fb, bass_db, treble_db) != AU_OK) printf("  tone: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_tone(fb, NULL, bass_db, treble_db) != AU_OK) printf("  tone: %s\n", au_fb_last_error(fb));
         ADD_DESC(" bass=%+.0fdB treble=%+.0fdB", bass_db, treble_db);
     }
 
@@ -341,34 +341,33 @@ static void apply_effects(void) {
     else {
         // Always there and named, so the balance keys can change it instantly with a command
         const AuStereo st = { .balance = balance, .width = mono ? 0 : width, .swap = swap_lr };
-        au_fb_set_name(fb, "st");
-        if (au_fb_add_stereo(fb, &st) != AU_OK) printf("  stereo: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_stereo(fb, "st", &st) != AU_OK) printf("  stereo: %s\n", au_fb_last_error(fb));
         if (balance != 0) ADD_DESC(" balance=%+.1f", balance);
         if (mono) ADD_DESC(" mono");
         else if (width != 1) ADD_DESC(" width=%.2g", width);
         if (swap_lr && !mono) ADD_DESC(" swapped");
         if (crossfeed_on) {
-            if (au_fb_add_crossfeed(fb, NULL) != AU_OK) printf("  crossfeed: %s\n", au_fb_last_error(fb));
+            if (au_fb_add_crossfeed(fb, NULL, NULL) != AU_OK) printf("  crossfeed: %s\n", au_fb_last_error(fb));
             ADD_DESC(" crossfeed");
         }
         if (bs2b_mode >= 0) {
-            if (au_fb_add_bs2b_profile(fb, (AU_BS2B_PROFILE)bs2b_mode) != AU_OK)
+            if (au_fb_add_bs2b_profile(fb, NULL, (AU_BS2B_PROFILE)bs2b_mode) != AU_OK)
                 printf("  bs2b: %s\n", au_fb_last_error(fb));
             ADD_DESC(" bs2b=%s", bs2b_names[bs2b_mode]);
         }
     }
     if (compressor_mode) {
         const AuCompressor c = compressor_mode == 2 ? au_compressor_night() : au_compressor_defaults();
-        if (au_fb_add_compressor(fb, &c) != AU_OK) printf("  compressor: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_compressor(fb, NULL, &c) != AU_OK) printf("  compressor: %s\n", au_fb_last_error(fb));
         ADD_DESC(" compressor=%s", compressor_names[compressor_mode]);
     }
     if (limiter_on) {
-        if (au_fb_add_limiter(fb, NULL) != AU_OK) printf("  limiter: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_limiter(fb, NULL, NULL) != AU_OK) printf("  limiter: %s\n", au_fb_last_error(fb));
         ADD_DESC(" limiter(-1 dB)");
     }
 
     const char *filters = au_fb_peek(fb);
-    if (au_set_global_filtergraph(filters[0] ? filters : NULL) != AU_OK) {
+    if (au_set_filters(filters[0] ? filters : NULL) != AU_OK) {
         printf("  effects rejected by FFmpeg: \"%s\"\n", filters);
     }
     else {

@@ -1442,7 +1442,7 @@ int au_set_crossfade(const AuCrossfade *config) {
 //| Public API: filters                                 |
 //+-----------------------------------------------------+
 
-int au_validate_filtergraph(const char *filters) {
+int au_validate_filters(const char *filters) {
     AudioPlayer *ap = audio_player;
     if (!filters || !filters[0]) return AU_OK;
 
@@ -1480,19 +1480,19 @@ static int post_filter_msg(const MsgType type, const int32_t handle, const char 
     return AU_OK;
 }
 
-int au_set_global_filtergraph(const char *filters) {
+int au_set_filters(const char *filters) {
     if (!audio_player) return AU_ERR_NOT_INITIALIZED;
-    if (au_validate_filtergraph(filters) != AU_OK) {
+    if (au_validate_filters(filters) != AU_OK) {
         ff_log(AU_LOG_ERROR, "au_set_global_filtergraph: invalid filters \"%s\"", filters);
         return AU_ERR_INVALID_ARGUMENT;
     }
     return post_filter_msg(CMD_SET_GLOBAL_FILTERS, 0, filters, NULL, NULL);
 }
 
-int au_update_filtergraph(const int32_t handle, const char *filters) {
+int au_set_track_filters(const int32_t handle, const char *filters) {
     if (!audio_player) return AU_ERR_NOT_INITIALIZED;
     if (handle < 0) return AU_ERR_INVALID_ARGUMENT;
-    if (au_validate_filtergraph(filters) != AU_OK) {
+    if (au_validate_filters(filters) != AU_OK) {
         ff_log(AU_LOG_ERROR, "au_update_filtergraph: invalid filters \"%s\"", filters);
         return AU_ERR_INVALID_ARGUMENT;
     }

@@ -368,18 +368,18 @@ extern "C" {
 
     // Filters applied to every track, after the track's own (AuPlayConfig.filters). NULL or "" removes them.
     // Returns AU_ERR_INVALID_ARGUMENT (and changes nothing) if the string does not parse.
-    DLL_EXPORT int au_set_global_filtergraph(const char *filters);
+    DLL_EXPORT int au_set_filters(const char *filters);
 
     // Replace the filters of one track (handle from au_play()/au_queue(), 0 = the current track).
-    DLL_EXPORT int au_update_filtergraph(int32_t handle, const char *filters);
+    DLL_EXPORT int au_set_track_filters(int32_t handle, const char *filters);
 
     // Send a runtime command to a filter, see avfilter_graph_send_command() and each filter's
-    // "Commands" section, e.g. ("volume", "volume", "0.5") or ("anequalizer", "change", "0|f=1000|w=500|g=-6").
+    // "Commands" section, e.g. ("volume", "volume", "0.5") or ("equalizer@eq_3", "g", "-6").
     // `target` is a filter name or instance name ("all" for every filter). handle 0 = every live track.
     DLL_EXPORT int au_send_filter_command(int32_t handle, const char *target, const char *command, const char *arg);
 
     // Check a filter string against the current output format (or 48 kHz stereo before a device is open)
-    DLL_EXPORT int au_validate_filtergraph(const char *filters);
+    DLL_EXPORT int au_validate_filters(const char *filters);
 
     //+-----------------------------------------------------+
     //| Downmixing                                          |

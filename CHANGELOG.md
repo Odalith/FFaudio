@@ -41,6 +41,14 @@ The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.
   bytes) everywhere: `AuPlayConfig.replaygain`, the ReplayGain cache, the background scan and
   `au_loudness_to_replaygain()`. `AU_REPLAYGAIN_NONE` is the value with nothing set. The cache file's format is
   unchanged. `AuReplayGainConfig.measure_wait_seconds` replaces `measure_wait_ms`.
+- Filters: `au_set_filters()`, `au_set_track_filters()` and `au_validate_filters()` replace
+  `au_set_global_filtergraph()`, `au_update_filtergraph()` and `au_validate_filtergraph()`. Every `au_fb_add_*()`
+  helper takes the instance name as its second argument (NULL = none) instead of `au_fb_set_name()` setting it for
+  the next call.
+- The graphic equalizer (`au_fb_add_equalizer()`) is one peaking biquad per band (FFmpeg `equalizer`, in double
+  precision) instead of `anequalizer`: it no longer takes the output channel count, and each band can be changed
+  while playing on its own (`equalizer@<name>_<band>`, commands `f`, `w`, `g`). It sounds slightly different, since
+  the bands are cookbook biquads rather than anequalizer's filters.
 
 ### Fixed
 - In applications with a comma-decimal locale (`LC_NUMERIC` such as de_DE or fr_FR, which GTK applications set from

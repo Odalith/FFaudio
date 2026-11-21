@@ -262,7 +262,7 @@ static void test_user_filter_comma_locale(void) {
         printf("   (no comma-decimal locale installed, skipped)\n");
         return;
     }
-    CHECK(au_validate_filtergraph("volume=0.5") == AU_OK);   // parsed on this thread
+    CHECK(au_validate_filters("volume=0.5") == AU_OK);   // parsed on this thread
     check_user_filter("filter, comma locale");
 
     // The downmix check (this thread) and a speed stage with "tempo=0.866025404" (the track's thread)
@@ -427,12 +427,12 @@ static void test_live_filter_changes(void) {
     start_capture("livefilters");
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(1000);
-    CHECK(au_set_global_filtergraph("not_a_filter=1") == AU_ERR_INVALID_ARGUMENT); // rejected, nothing changes
-    CHECK(au_set_global_filtergraph("volume=0.5") == AU_OK);
+    CHECK(au_set_filters("not_a_filter=1") == AU_ERR_INVALID_ARGUMENT); // rejected, nothing changes
+    CHECK(au_set_filters("volume=0.5") == AU_OK);
     tc_sleep_ms(1500);
     CHECK(au_send_filter_command(0, "volume", "volume", "0.25") == AU_OK);
     tc_sleep_ms(1500);
-    CHECK(au_update_filtergraph(0, "volume=2") == AU_OK); // track filter runs before the global one
+    CHECK(au_set_track_filters(0, "volume=2") == AU_OK); // track filter runs before the global one
     tc_sleep_ms(1500);
     au_stop();
     wait_until_idle(1, 3000);
@@ -830,18 +830,17 @@ static float channel_window_peak_db(const Capture *c, const int channel, size_t 
 static void test_limiter_and_named_command(void) {
     // +15 dB into a -6 dB limiter: the sine (-18 dB) would peak at -3 dB without it
     AuFilterBuilder *fb = au_fb_create();
-    au_fb_add_volume_db(fb, 15);
+    au_fb_add_volume_db(fb, NULL, 15);
     AuLimiter lim = au_limiter_defaults();
     lim.ceiling_db = -6;
-    CHECK(au_fb_add_limiter(fb, &lim) == AU_OK);
+    CHECK(au_fb_add_limiter(fb, NULL, &lim) == AU_OK);
     const AuStereo st = au_stereo_defaults();
-    CHECK(au_fb_set_name(fb, "st") == AU_OK);
-    CHECK(au_fb_add_stereo(fb, &st) == AU_OK); // named, so it is there to be changed
+    CHECK(au_fb_add_stereo(fb, "st", &st) == AU_OK); // named, so it is there to be changed
     printf("   filters: %s\n", au_fb_peek(fb));
 
     start_capture("named_filters");
     au_set_volume(1.0f);
-    CHECK(au_set_global_filtergraph(au_fb_peek(fb)) == AU_OK);
+    CHECK(au_set_filters(au_fb_peek(fb)) == AU_OK);
     au_fb_free(fb);
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(1500);
