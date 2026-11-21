@@ -168,7 +168,7 @@ static void test_scan_while_playing(void) {
     // Analysis is independent of the player: results are identical while music plays
     const AuLoudness before = analyze("ld_gate.flac");
     REQUIRE(tc_init_player(0) == 0);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(300);
     const AuLoudness during = analyze("ld_gate.flac");
     CHECK(during.integrated_lufs == before.integrated_lufs);

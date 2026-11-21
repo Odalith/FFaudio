@@ -17,6 +17,16 @@ The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.
   `au_get_device_name()` replace `au_get_audio_devices()`, `au_free_audio_devices()` and `au_get_audio_device_name()`.
 - `AuConfig.volume` is a linear gain 0..1 (was `initial_volume` 0..100); `loop_count` was `initial_loop_count`.
 - `delegates.h` is gone; everything is in `ffaudio.h`.
+- Playback: `au_play()`, `au_queue()`, `au_skip()`, `au_clear_queue()`, `au_stop()`, `au_pause()`, `au_seek(seconds)`,
+  `au_seek_fraction(0..1)`, `au_set_speed()`, `au_set_volume(0..1)` and `au_set_muted()` replace `au_play_audio()`,
+  `au_set_next()`, `au_skip_to_next()`, `au_clear_next()`, `au_stop_audio()`, `au_pause_audio()`,
+  `au_seek_time(ms)`, `au_seek_percent(0..100)`, `au_set_playback_speed()`, `au_set_audio_volume(0..100)` and
+  `au_mute_audio()`. `AuPlayConfig` (`start_seconds`, `length_seconds`, `filters`) and `AuCrossfade` replace
+  `PlayAudioConfig` (`skip_seconds`, `play_duration`, `av_filtergraph`) and `CrossfadeConfig`.
+- `au_get_status()` fills one `AuStatus` snapshot (the audible track, its position and duration, buffering, the
+  output format, and the settings as last set, also before the control thread has applied them). It replaces
+  `au_get_current_handle()`, `au_get_audio_play_time()`, `au_get_audio_duration()`, `au_get_output_spec()`,
+  `au_is_paused()`, `au_is_muted()`, `au_get_audio_volume()`, `au_get_playback_speed()` and `au_get_loop_count()`.
 
 ### Fixed
 - In applications with a comma-decimal locale (`LC_NUMERIC` such as de_DE or fr_FR, which GTK applications set from

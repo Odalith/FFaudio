@@ -42,8 +42,8 @@ static void file_url(const char *name, char *out, const size_t size) {
 #endif
 }
 
-static void play_and_wait(const char *what, const PlayAudioConfig *cfg, const int eofs, const uint32_t ms) {
-    au_play_audio(what, cfg);
+static void play_and_wait(const char *what, const AuPlayConfig *cfg, const int eofs, const uint32_t ms) {
+    au_play(what, cfg);
     if (!TC_WAIT_FIELD(eof, eofs, ms)) {
         fprintf(stderr, "no end of %s within %u ms\n", what, ms);
         CHECK(false);
@@ -86,11 +86,11 @@ static void test_play_and_probe(void) {
 
 static void test_seek(void) {
     ts_reset(&srv);
-    au_play_audio(url("/files/long_6s.flac"), NULL);
+    au_play(url("/files/long_6s.flac"), NULL);
     tc_sleep_ms(600);
-    au_seek_time(4000);
+    au_seek(4.0);
     tc_sleep_ms(500);
-    const double t = au_get_audio_play_time();
+    const double t = tc_status().position;
     printf("   after seeking to 4 s: %.2f s, %d range requests\n", t, ts_range_requests(&srv));
     CHECK(t > 3.9 && t < 5.5);
     CHECK(ts_range_requests(&srv) >= 1);
@@ -123,10 +123,10 @@ static void test_errors_and_timeouts(void) {
     // Stopping a track that is still connecting does not wait for the timeout
     const AuNetworkConfig slow = { .timeout_seconds = 60 };
     CHECK(au_set_network(&slow) == AU_OK);
-    au_play_audio(url("/hang"), NULL);
+    au_play(url("/hang"), NULL);
     tc_sleep_ms(300);
     const uint32_t t1 = SDL_GetTicks();
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 4, 3000));
     printf("   stopped while connecting: %u ms\n", SDL_GetTicks() - t1);
     CHECK(au_set_network(NULL) == AU_OK);
@@ -139,7 +139,7 @@ static void test_headers_and_user_agent(void) {
     play_and_wait(url("/auth/s44_stereo.flac"), NULL, 1, 5000);
     CHECK(tc_snapshot().eof_error == 1);           // 401 without the token
 
-    const PlayAudioConfig with_token = { .http_headers = "X-Other: 1\nX-Test-Token: secret" };
+    const AuPlayConfig with_token = { .http_headers = "X-Other: 1\nX-Test-Token: secret" };
     play_and_wait(url("/auth/s44_stereo.flac"), &with_token, 2, 6000);
     CHECK(tc_snapshot().eof_error == 1);           // played
 
@@ -216,23 +216,23 @@ static void test_no_measuring_by_default(void) {
 #define LIVE_BPS 16000
 
 static void test_live_stream(void) {
-    au_play_audio(url("/live/live.mp3"), NULL);
+    au_play(url("/live/live.mp3"), NULL);
     CHECK(TC_WAIT_FIELD(started, 1, 8000));
     tc_sleep_ms(1500);
-    CHECK(au_get_audio_duration() < 0);
+    CHECK(tc_status().duration < 0);
     AuMediaInfo *info = au_get_track_info(0);
     CHECK(info && au_media_is_live(info) && !au_media_is_seekable(info));
     au_media_info_free(info);
 
-    const double before = au_get_audio_play_time();
-    au_seek_time(60000);                              // ignored: it is live
+    const double before = tc_status().position;
+    au_seek(60.0);                              // ignored: it is live
     tc_sleep_ms(800);
-    const double after = au_get_audio_play_time();
+    const double after = tc_status().position;
     printf("   live: %.2f s -> %.2f s across a seek to 60 s\n", before, after);
     CHECK(after >= before && after < before + 2);
     tc_sleep_ms(4000);                                // past the end of the 5 s file: the stream goes on
     CHECK(tc_snapshot().eof == 0);
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
     CHECK(tc_snapshot().eof_error == 0);
 }
@@ -244,14 +244,14 @@ static void test_preroll(void) {
     char path[64];
     snprintf(path, sizeof(path), "/live/live.mp3?bps=%d", 2 * LIVE_BPS);
     const uint32_t t0 = SDL_GetTicks();
-    au_play_audio(url(path), NULL);
+    au_play(url(path), NULL);
     CHECK(TC_WAIT_FIELD(started, 1, 8000));
     const uint32_t took = SDL_GetTicks() - t0;
     const TcEvents e = tc_snapshot();
     printf("   first sample after %u ms; buffering on %d, off %d\n", took, e.buffering_on, e.buffering_off);
     CHECK(took >= 600);
     CHECK(e.buffering_on >= 1 && e.buffering_off >= 1);
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
     CHECK(au_set_network(NULL) == AU_OK);
 }
@@ -262,16 +262,16 @@ static void test_stall(void) {
     CHECK(au_set_network(&net) == AU_OK);
     char path[64];
     snprintf(path, sizeof(path), "/live/live.mp3?bps=%d", LIVE_BPS * 6 / 10);
-    au_play_audio(url(path), NULL);
+    au_play(url(path), NULL);
     tc_sleep_ms(6000);
-    const double pos = au_get_audio_play_time();
+    const double pos = tc_status().position;
     const TcEvents e = tc_snapshot();
     printf("   after 6 s at 0.6x: position %.2f s (at most 3.6 s of audio arrived); buffering on %d, off %d\n", pos,
            e.buffering_on, e.buffering_off);
     CHECK(e.buffering_on >= 2);                       // the start, and at least one stall
     CHECK(pos > 1.0 && pos < 3.8);
     CHECK(e.eof == 0);
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
     CHECK(au_set_network(NULL) == AU_OK);
 }
@@ -286,18 +286,18 @@ static void test_reconnect(void) {
 
     // A live stream whose connection drops after ~2.5 s of audio is opened again
     ts_reset(&srv);
-    au_play_audio(url("/live/live.mp3?drop=40000"), NULL);
+    au_play(url("/live/live.mp3?drop=40000"), NULL);
     tc_sleep_ms(6000);
     printf("   dropped live stream: %d requests, eof %d\n", ts_count(&srv, "/live/live.mp3"), tc_snapshot().eof);
     CHECK(tc_snapshot().eof == 1);                   // only the file above has ended
     CHECK(ts_count(&srv, "/live/live.mp3") >= 2);
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 2, 3000));
 
     // Without reconnects the drop ends it
     const AuNetworkConfig never = { .reconnect_attempts = -1 };
     CHECK(au_set_network(&never) == AU_OK);
-    au_play_audio(url("/live/live.mp3?drop=40000&n=2"), NULL);
+    au_play(url("/live/live.mp3?drop=40000&n=2"), NULL);
     CHECK(TC_WAIT_FIELD(eof, 3, 10000));
     CHECK(au_set_network(NULL) == AU_OK);
 }
@@ -307,7 +307,7 @@ static void test_reconnect(void) {
 static void test_icy_now_playing(void) {
     // An unthrottled server: the reader is soon many seconds ahead, but every title must come when it is heard.
     // A block every 8000 bytes = every 0.5 s of audio; song k starts with block 4(k-1), sent after (4k-3) x 0.5 s.
-    au_play_audio(url("/live/live.mp3?metaint=8000"), NULL);
+    au_play(url("/live/live.mp3?metaint=8000"), NULL);
     tc_sleep_ms(7500);
     const TcEvents e = tc_snapshot();
     // The first title is read while FFmpeg probes the stream, so it shows from the start (stations send the current
@@ -331,14 +331,14 @@ static void test_icy_now_playing(void) {
         CHECK(title && e.meta_count <= 8 && !strcmp(title, e.meta_title[e.meta_count - 1]));
         au_media_info_free(info);
     }
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
 }
 
 static void test_icy_with_file_tags(void) {
     // An MP3 with its own ID3 title (looped by the server, so the tag also turns up mid-stream): only the ICY
     // titles count, each once, in order
-    au_play_audio(url("/live/live_id3.mp3?metaint=8000"), NULL);
+    au_play(url("/live/live_id3.mp3?metaint=8000"), NULL);
     tc_sleep_ms(5500);
     const TcEvents e = tc_snapshot();
     for (int i = 0; i < e.meta_count && i < 8; i++)
@@ -347,7 +347,7 @@ static void test_icy_with_file_tags(void) {
     for (int i = 0; i < e.meta_count && i < 8; i++) CHECK(strcmp(e.meta_title[i], "File Title") != 0);
     CHECK(!strcmp(e.meta_title[0], "Song 1"));
     CHECK(e.meta_count < 2 || !strcmp(e.meta_title[1], "Song 2"));
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
 }
 
@@ -377,12 +377,12 @@ static void test_failed_measurement_ends_wait(void) {
     CHECK(au_set_replaygain(&rg) == AU_OK);
 
     const uint32_t t0 = SDL_GetTicks();
-    au_play_audio(url("/live/live.mp3?n=wait"), NULL);
+    au_play(url("/live/live.mp3?n=wait"), NULL);
     CHECK(TC_WAIT_FIELD(started, 1, 15000));
     const uint32_t ms = SDL_GetTicks() - t0;
     printf("   started after %u ms (measure_wait_ms 8000, buffer 2 s)\n", ms);
     CHECK(ms < 6000);
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
 
     CHECK(au_set_replaygain(NULL) == AU_OK);
@@ -408,11 +408,11 @@ static void test_no_analysis_of_live_streams(void) {
 static void test_ogg_now_playing(void) {
     // A chained Ogg stream changes its tags when the next part starts (2 s in). Its timestamps start again at 0 there;
     // the position must go on (it went back to 0, and the change was reported at whatever position was read first)
-    au_play_audio(url("/files/chained.ogg"), NULL);
+    au_play(url("/files/chained.ogg"), NULL);
     double furthest = -1;
     const Uint32 t0 = SDL_GetTicks();
     while (!tc_snapshot().eof && SDL_GetTicks() - t0 < 10000) {
-        const double pos = au_get_audio_play_time();
+        const double pos = tc_status().position;
         if (pos > furthest) furthest = pos;
         SDL_Delay(10);
     }

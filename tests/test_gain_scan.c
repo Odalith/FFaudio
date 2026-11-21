@@ -269,7 +269,7 @@ static void test_player_measures_missing(void) {
     // Untagged and not cached: measured before it starts (well within the default 500 ms)
     const uint32_t t0 = SDL_GetTicks();
     const char *fresh = scan_file(24);
-    int32_t h = au_play_audio(fresh, NULL);
+    int32_t h = au_play(fresh, NULL);
     const double first = gain_when_open(h);
     printf("   measured before start: %+.2f dB after %u ms\n", first, SDL_GetTicks() - t0);
     CHECK(fabs(first - 5.0) < 0.1);
@@ -280,7 +280,7 @@ static void test_player_measures_missing(void) {
     rg.measure_wait_ms = -1;
     CHECK(au_set_replaygain(&rg) == AU_OK);
     tc_sleep_ms(50);
-    h = au_play_audio(fresh, NULL);
+    h = au_play(fresh, NULL);
     const double start = gain_when_open(h);
     printf("   without waiting: starts at %+.2f dB\n", start);
     CHECK(fabs(start + 6.0) < 0.01 || fabs(start - 5.0) < 0.1); // the scan may still win the race
@@ -293,7 +293,7 @@ static void test_player_measures_missing(void) {
 
     // Tagged files are never measured
     reset_done();
-    h = au_play_audio(fx("rg_tagged.flac"), NULL);
+    h = au_play(fx("rg_tagged.flac"), NULL);
     CHECK(fabs(gain_when_open(h) + 6.0) < 0.01);
     tc_sleep_ms(200);
     CHECK(done_count() == 0);
@@ -303,7 +303,7 @@ static void test_player_measures_missing(void) {
     rg.measure_missing = false;
     CHECK(au_set_replaygain(&rg) == AU_OK);
     tc_sleep_ms(50);
-    h = au_play_audio(fx("rg_untagged.flac"), NULL);
+    h = au_play(fx("rg_untagged.flac"), NULL);
     CHECK(fabs(gain_when_open(h) + 6.0) < 0.01);
     tc_sleep_ms(200);
     CHECK(!au_gain_cache_get(fx("rg_untagged.flac"), NULL));
@@ -311,7 +311,7 @@ static void test_player_measures_missing(void) {
     const AuReplayGainConfig too_long = { .mode = AU_REPLAYGAIN_TRACK, .measure_wait_ms = 20000 };
     CHECK(au_set_replaygain(&too_long) == AU_ERR_INVALID_ARGUMENT);
 
-    au_stop_audio();
+    au_stop();
     tc_sleep_ms(200);
     au_shutdown();
 }

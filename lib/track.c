@@ -274,7 +274,7 @@ double track_duration(TrackState *t) {
 //| Lifetime                                            |
 //+-----------------------------------------------------+
 
-TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *filename, const PlayAudioConfig *config) {
+TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *filename, const AuPlayConfig *config) {
     TrackState *t = av_mallocz(sizeof(TrackState));
     if (!t) return NULL;
 
@@ -303,14 +303,14 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     }
 
     if (config) {
-        if (config->av_filtergraph && config->av_filtergraph[0] && !(t->filtergraph_str = av_strdup(config->av_filtergraph)))
+        if (config->filters && config->filters[0] && !(t->filtergraph_str = av_strdup(config->filters)))
             goto fail;
         if (config->http_headers && config->http_headers[0] && !(t->http_headers = av_strdup(config->http_headers)))
             goto fail;
-        if (config->play_duration > 0)
-            t->play_duration = SecondsToMicroseconds(config->play_duration);
-        if (config->skip_seconds > 0)
-            t->start_time = SecondsToMicroseconds(config->skip_seconds);
+        if (config->length_seconds > 0)
+            t->play_duration = SecondsToMicroseconds(config->length_seconds);
+        if (config->start_seconds > 0)
+            t->start_time = SecondsToMicroseconds(config->start_seconds);
         if (config->fade_in) {
             t->fade_in_override = *config->fade_in;
             fade_curve_build(&t->fade_in_curve, config->fade_in); // control thread: a custom curve is called here
@@ -448,7 +448,7 @@ void track_update_gain(TrackState *t, const bool late) {
     const AuReplayGainConfig cfg = ap->replaygain;
     SDL_UnlockMutex(ap->format_mutex);
 
-    // Values come from, in order: PlayAudioConfig.replaygain, the ReplayGain cache, the file's tags
+    // Values come from, in order: AuPlayConfig.replaygain, the ReplayGain cache, the file's tags
     SDL_LockMutex(t->seek_mutex);
     const bool known = t->info || t->has_replaygain_override;
     const bool has_override = t->has_replaygain_override;

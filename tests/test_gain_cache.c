@@ -184,22 +184,22 @@ static void test_player_priority(void) {
     // Untagged file: the cache supplies the gain
     AuReplayGainInfo rg = track_gain(-10);
     au_gain_cache_set(fx("rg_untagged.flac"), &rg);
-    int32_t h = au_play_audio(fx("rg_untagged.flac"), NULL);
+    int32_t h = au_play(fx("rg_untagged.flac"), NULL);
     CHECK(fabs(applied_gain(h) + 10) < 0.01);
 
     // Tagged file (-6 dB): the cache wins over the tags
     rg = track_gain(-7);
     au_gain_cache_set(fx("rg_tagged.flac"), &rg);
-    h = au_play_audio(fx("rg_tagged.flac"), NULL);
+    h = au_play(fx("rg_tagged.flac"), NULL);
     CHECK(fabs(applied_gain(h) + 7) < 0.01);
 
-    // PlayAudioConfig.replaygain wins over the cache
+    // AuPlayConfig.replaygain wins over the cache
     const AuReplayGainInfo explicit_rg = track_gain(-3);
-    const PlayAudioConfig cfg = { .replaygain = &explicit_rg };
-    h = au_play_audio(fx("rg_tagged.flac"), &cfg);
+    const AuPlayConfig cfg = { .replaygain = &explicit_rg };
+    h = au_play(fx("rg_tagged.flac"), &cfg);
     CHECK(fabs(applied_gain(h) + 3) < 0.01);
 
-    au_stop_audio();
+    au_stop();
     tc_sleep_ms(200);
     au_shutdown();
 }
@@ -208,7 +208,7 @@ static void test_player_live_updates(void) {
     au_gain_cache_clear();
     start_player();
 
-    const int32_t h = au_play_audio(fx("rg_long.flac"), NULL);
+    const int32_t h = au_play(fx("rg_long.flac"), NULL);
     CHECK(fabs(applied_gain(h) + 6) < 0.01);       // from the tags
 
     AuReplayGainInfo rg = track_gain(-9);
@@ -216,8 +216,8 @@ static void test_player_live_updates(void) {
     tc_sleep_ms(100);
     CHECK(fabs(applied_gain(h) + 9) < 0.01);
 
-    // A queued track picks up a value that arrives after au_set_next()
-    const int32_t next = au_set_next(fx("rg_untagged.flac"), NULL);
+    // A queued track picks up a value that arrives after au_queue()
+    const int32_t next = au_queue(fx("rg_untagged.flac"), NULL);
     tc_sleep_ms(100);
     CHECK(fabs(applied_gain(next)) < 0.01);         // no tags, no cache yet
     rg = track_gain(-4.5);
@@ -232,7 +232,7 @@ static void test_player_live_updates(void) {
     tc_sleep_ms(100);
     CHECK(fabs(applied_gain(next)) < 0.01);
 
-    au_stop_audio();
+    au_stop();
     tc_sleep_ms(200);
     au_shutdown();
 }
@@ -243,7 +243,7 @@ static void test_survives_shutdown(void) {
     au_gain_cache_set(fx("rg_untagged.flac"), &rg);  // before any player exists
     for (int i = 0; i < 2; i++) {
         start_player();
-        const int32_t h = au_play_audio(fx("rg_untagged.flac"), NULL);
+        const int32_t h = au_play(fx("rg_untagged.flac"), NULL);
         CHECK(fabs(applied_gain(h) + 8) < 0.01);
         au_shutdown();
     }
@@ -270,7 +270,7 @@ static void test_updates_during_shutdown(void) {
     SDL_Thread *t = SDL_CreateThread(set_loop, "cache_setter", NULL);
     for (int i = 0; i < 5; i++) {
         start_player();
-        au_play_audio(fx("rg_untagged.flac"), NULL);
+        au_play(fx("rg_untagged.flac"), NULL);
         tc_sleep_ms(50);
         au_shutdown();
     }

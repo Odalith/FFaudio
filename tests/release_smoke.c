@@ -54,7 +54,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "could not initialize the player\n");
         return 1;
     }
-    au_play_audio(argv[1], NULL);
+    au_play(argv[1], NULL);
     for (int i = 0; i < 1000 && !atomic_load(&ended); i++) sleep_ms(10);
     const int e = atomic_load(&ended);
     au_shutdown();

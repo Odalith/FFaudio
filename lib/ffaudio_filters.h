@@ -17,13 +17,13 @@
  */
 
 /*
- * Helpers that build FFmpeg filter strings for PlayAudioConfig.av_filtergraph,
+ * Helpers that build FFmpeg filter strings for AuPlayConfig.filters,
  * au_set_global_filtergraph() and au_update_filtergraph().
  *
  *   AuFilterBuilder *fb = au_fb_create();
  *   AuEqualizer eq = au_equalizer_defaults();
  *   eq.gain_db[0] = 3.0;                      // +3 dB at 31 Hz
- *   au_fb_add_equalizer(fb, channels, &eq);   // channels: see au_get_output_spec()
+ *   au_fb_add_equalizer(fb, channels, &eq);   // channels: see au_get_status()
  *   au_fb_add_crossfeed(fb, NULL);            // NULL = default settings
  *   char *filters = au_fb_build(fb);          // "anequalizer=...,crossfeed=..."
  *   au_set_global_filtergraph(filters);
@@ -117,7 +117,7 @@ extern "C" {
     // Octave bands at 31.25, 62.5, 125, 250, 500, 1k, 2k, 4k, 8k and 16k Hz, all gains 0
     DLL_EXPORT AuEqualizer au_equalizer_defaults(void);
 
-    // channels: the output channel count (au_get_output_spec()), filters run at the output layout.
+    // channels: the output channel count (au_get_status()), filters run at the output layout.
     // Adds nothing when every gain is 0. Filters: volume@<name> (preamp, when not 0) and anequalizer@<name>;
     // anequalizer's "change" command takes "<index>|f=<Hz>|w=<Hz>|g=<dB>", where the index counts the bands
     // it was built with, channel by channel.

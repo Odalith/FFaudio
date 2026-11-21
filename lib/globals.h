@@ -39,6 +39,7 @@
 #define MIXER_EVENT_CAPACITY 64
 
 #include <stdbool.h>
+#include <string.h>
 #include <stdint.h>
 
 #include "libavutil/avstring.h"
@@ -395,11 +396,11 @@ typedef struct Msg {
     char *str;                      // owned
     char *str2;                     // owned
     char *str3;                     // owned
-    PlayAudioConfig play_config;    // av_filtergraph points at str2, http_headers at str3
+    AuPlayConfig play_config;       // filters points at str2, http_headers at str3
     bool has_play_config;
     AuFade fade_in_override;
     bool has_fade_in_override;
-    CrossfadeConfig crossfade;
+    AuCrossfade crossfade;
     AuReplayGainConfig replaygain;
     AuReplayGainInfo replaygain_override;
     bool has_replaygain_override;
@@ -428,18 +429,34 @@ typedef struct StatusSnapshot {
     bool advancing;                 // false while paused / underrun / idle
     double speed;                   // playback speed of the audible audio
     double period;                  // seconds of audio per callback (SDL's buffer), 0 = no callback yet
+    bool buffering;                 // the track waits for network data
 } StatusSnapshot;
+
+// A float kept in an SDL_atomic_t (its bits)
+static inline void atomic_set_float(SDL_atomic_t *a, const float v) {
+    int32_t i;
+    memcpy(&i, &v, sizeof(i));
+    SDL_AtomicSet(a, i);
+}
+
+static inline float atomic_get_float(SDL_atomic_t *a) {
+    const int32_t i = SDL_AtomicGet(a);
+    float v;
+    memcpy(&v, &i, sizeof(v));
+    return v;
+}
 
 typedef struct AudioPlayer {
     // ---- configuration ----
-    SDL_atomic_t volume;                // 0..100
+    SDL_atomic_t volume;                // linear gain 0..1, a float (atomic_get_float())
     SDL_atomic_t muted;
-    SDL_atomic_t paused;
+    SDL_atomic_t paused;                // applied (control thread)
+    SDL_atomic_t pause_requested;       // as last set by au_pause(), for au_get_status()
     SDL_atomic_t loop_count;            // default for new tracks, -1 infinite
     double prepare_next_seconds;
     int32_t output_channels;            // 0 = device preference
     int32_t output_sample_rate;         // 0 = device preference
-    CrossfadeConfig crossfade;          // control thread only
+    AuCrossfade crossfade;              // control thread only
     FadeCurve play_curve, skip_curve, stop_curve, pause_curve; // control thread: its curves, sampled when set
     bool use_soxr;
     int32_t filter_nbthreads;

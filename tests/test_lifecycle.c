@@ -5,18 +5,18 @@
 
 static void test_calls_before_init(void) {
     /* None of these may crash when the player does not exist */
-    au_play_audio(fx("s44_stereo.flac"), NULL);
-    au_set_next(fx("s44_stereo.flac"), NULL);
-    au_skip_to_next();
-    au_clear_next();
-    au_stop_audio();
-    au_pause_audio(true);
-    au_seek_time(10);
-    au_seek_percent(10);
-    au_set_audio_volume(10);
-    au_mute_audio(true);
-    CHECK(au_get_audio_play_time() < 0);
-    CHECK(au_get_audio_duration() < 0);
+    au_play(fx("s44_stereo.flac"), NULL);
+    au_queue(fx("s44_stereo.flac"), NULL);
+    au_skip();
+    au_clear_queue();
+    au_stop();
+    au_pause(true);
+    au_seek(0.01);
+    au_seek_fraction(0.1);
+    au_set_volume(0.1f);
+    au_set_muted(true);
+    CHECK(tc_status().position < 0);
+    CHECK(tc_status().duration < 0);
     CHECK(au_set_device(NULL) == AU_ERR_NOT_INITIALIZED);
     int count = -1;
     CHECK(au_list_devices(&count) == NULL && count == 0);
@@ -29,8 +29,8 @@ static void test_init_null_config(void) {
 
 static void test_shutdown_while_playing(void) {
     REQUIRE(tc_init_player(0) == 0);
-    au_play_audio(fx("long_6s.flac"), NULL);
-    au_set_next(fx("s44_stereo.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
+    au_queue(fx("s44_stereo.flac"), NULL);
     tc_sleep_ms(300);
     au_shutdown();
 }
@@ -41,7 +41,7 @@ static void test_reinit(void) {
         const int ret = tc_init_player(0);
         CHECK(ret == 0);
         if (ret != 0) return;
-        au_play_audio(fx("s44_stereo.flac"), NULL);
+        au_play(fx("s44_stereo.flac"), NULL);
         CHECK(TC_WAIT_FIELD(eof, 1, 5000));
         au_shutdown();
     }
@@ -68,7 +68,7 @@ static void test_device_name_and_no_spurious_changes(void) {
     au_free(NULL);
 
     // SDL announces every device at start-up and the list is polled every 2 s: neither is a change
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(4500);
     CHECK(tc_snapshot().devices_changed == 0);
     au_shutdown();
@@ -80,18 +80,18 @@ static void test_device_name_and_no_spurious_changes(void) {
 static void test_fade_without_frames_cuts(void) {
     REQUIRE(tc_init_player(0) == 0);
     const AuFade tiny = { .seconds = 1e-6, .curve = AU_FADE_LINEAR };
-    const CrossfadeConfig xf2 = { .on_play = tiny, .on_skip = tiny, .on_stop = tiny };
+    const AuCrossfade xf2 = { .on_play = tiny, .on_skip = tiny, .on_stop = tiny };
     CHECK(au_set_crossfade(&xf2) == AU_OK);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(200);
-    au_play_audio(fx("long_6s.flac"), NULL);   // play over a playing track
+    au_play(fx("long_6s.flac"), NULL);   // play over a playing track
     CHECK(TC_WAIT_FIELD(eof, 1, 2000));
-    au_set_next(fx("long_6s.flac"), NULL);
+    au_queue(fx("long_6s.flac"), NULL);
     tc_sleep_ms(200);
-    au_skip_to_next();
+    au_skip();
     CHECK(TC_WAIT_FIELD(eof, 2, 2000));
     tc_sleep_ms(200);
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 3, 2000));
     const TcEvents e = tc_snapshot();
     CHECK(e.eof == 3 && e.eof_skip == 3 && e.eof_error == 0);
@@ -107,9 +107,44 @@ static void test_sdl_events_left_alone(void) {
     memset(&ev, 0, sizeof(ev));
     ev.type = type;
     REQUIRE(SDL_PushEvent(&ev) == 1);
-    au_play_audio(fx("s44_stereo.flac"), NULL);
+    au_play(fx("s44_stereo.flac"), NULL);
     tc_sleep_ms(300);   // dozens of control thread iterations
     CHECK(SDL_PeepEvents(&ev, 1, SDL_GETEVENT, type, type) == 1);
+    au_shutdown();
+}
+
+/* ---------- status ---------- */
+
+// au_get_status() has the settings as last set, before the control thread has applied them, and the defaults
+// without a player
+static void test_status_reflects_settings(void) {
+    AuStatus st = tc_status();
+    CHECK(st.handle == 0 && st.position == -1 && st.duration == -1 && st.volume == 1.0f && st.speed == 1.0);
+    CHECK(st.sample_rate == 0 && st.channels == 0);
+
+    REQUIRE(tc_init_player(0) == 0);
+    st = tc_status();
+    CHECK(st.sample_rate > 0 && st.channels > 0 && st.volume == 0.5f && !st.paused);
+    au_set_volume(0.333f);
+    au_set_speed(1.5, false);
+    au_set_loop_count(3);
+    au_set_muted(true);
+    au_pause(true);
+    st = tc_status();
+    CHECK(st.volume == 0.333f && st.speed == 1.5 && !st.keep_pitch && st.loop_count == 3 && st.muted && st.paused);
+    au_set_volume(2.0f);                 // out of range: ignored
+    CHECK(tc_status().volume == 0.333f);
+    au_set_loop_count(0);
+    au_set_speed(1.0, true);
+    au_set_muted(false);
+
+    // Playing unpauses
+    const int32_t h = au_play(fx("long_6s.flac"), NULL);
+    CHECK(!tc_status().paused);
+    CHECK(TC_WAIT_FIELD(started, 1, 5000));
+    tc_sleep_ms(300);
+    st = tc_status();
+    CHECK(st.handle == h && st.position > 0 && st.position < 6 && st.duration > 5.9 && st.duration < 6.1);
     au_shutdown();
 }
 
@@ -143,7 +178,7 @@ static void test_poll_events(void) {
     printf("   device: \"%s\", %d Hz, %d channels\n", e.data.device.name ? e.data.device.name : "",
            e.data.device.sample_rate, e.data.device.channels);
 
-    const int32_t h = au_play_audio(fx("s44_stereo.flac"), NULL);
+    const int32_t h = au_play(fx("s44_stereo.flac"), NULL);
     CHECK(poll_until(AU_EVENT_TRACK_STARTED, h, 5, NULL, NULL));
     CHECK(poll_until(AU_EVENT_TRACK_ENDED, h, 5, &e, NULL));
     CHECK(e.data.ended.reason == AU_END_FINISHED);
@@ -163,7 +198,7 @@ static void test_poll_overflow(void) {
     REQUIRE(poll_start() == AU_OK);
     REQUIRE(poll_until(AU_EVENT_DEVICE, 0, 5, NULL, NULL));
     const int tracks = 3000;   // each: an error log and AU_EVENT_TRACK_ENDED, so about 6000 events for 4096 places
-    for (int i = 0; i < tracks; i++) au_play_audio(fx("no_such_file.flac"), NULL);
+    for (int i = 0; i < tracks; i++) au_play(fx("no_such_file.flac"), NULL);
     // Let the control thread get through them: the end events stop coming in once all are done
     SDL_Delay(500);
     for (int i = 0; i < 100; i++) SDL_Delay(100);
@@ -213,6 +248,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_device_name_and_no_spurious_changes);
     RUN_TEST(test_fade_without_frames_cuts);
     RUN_TEST(test_sdl_events_left_alone);
+    RUN_TEST(test_status_reflects_settings);
     RUN_TEST(test_poll_events);
     RUN_TEST(test_poll_overflow);
     RUN_TEST(test_wait_ends_with_shutdown);

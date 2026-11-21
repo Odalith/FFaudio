@@ -433,7 +433,7 @@ static inline float pause_gain_at(const Mixer *m, const int64_t k) {
 // Volume (with its 10 ms ramp), the pause fade, clamping and the device format, in one pass over the mix
 static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
     Mixer *m = &ap->mixer;
-    const float target = SDL_AtomicGet(&ap->muted) ? 0.0f : (float)SDL_AtomicGet(&ap->volume) / 100.0f;
+    const float target = SDL_AtomicGet(&ap->muted) ? 0.0f : atomic_get_float(&ap->volume);
     const float step = 1.0f / (float)FFMAX(1, m->vol_ramp_frames);
     const int frame_bytes = m->channels * m->bytes_per_sample;
     uint32_t dither = m->dither_state;
@@ -480,6 +480,7 @@ static void publish_status(AudioPlayer *ap, const bool advancing, const int fram
     s.advancing = advancing;
     s.speed = t ? t->play_speed : 1.0;
     s.period = m->rate > 0 ? (double)frames / m->rate : 0;
+    s.buffering = t && SDL_AtomicGet(&t->buffering) != 0;
     // Never waits: while a getter holds the lock (a copy of a few bytes), this period's status is skipped and the
     // next one, a period later, is published instead
     if (SDL_TryLockMutex(ap->status_mutex) == 0) {

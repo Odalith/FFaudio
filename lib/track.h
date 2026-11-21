@@ -24,7 +24,7 @@
 #include "globals.h"
 
 // Control thread: allocate a track and start its read thread. NULL on allocation failure.
-TrackState *track_create(AudioPlayer *ap, int32_t handle, const char *filename, const PlayAudioConfig *config);
+TrackState *track_create(AudioPlayer *ap, int32_t handle, const char *filename, const AuPlayConfig *config);
 
 // Control thread: stop the track's threads and free it. The track must not be in a mixer slot. Waits for the threads.
 void track_destroy(TrackState *t);

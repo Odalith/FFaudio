@@ -39,20 +39,20 @@ static void test_random_ops(void) {
 
     for (int i = 0; i < iters; i++) {
         switch (rnd() % 12) {
-            case 0: case 1: case 2: au_play_audio(any_file(), NULL); break;
-            case 3: case 4: au_set_next(any_file(), NULL); break;
-            case 5: au_skip_to_next(); break;
-            case 6: au_clear_next(); break;
-            case 7: au_stop_audio(); break;
-            case 8: au_pause_audio(rnd() % 2); break;
-            case 9: au_seek_time(rnd() % 3000); break;
-            case 10: au_seek_percent((double)(rnd() % 100)); break;
-            case 11: au_set_audio_volume((int)(rnd() % 101)); (void)au_get_audio_play_time(); break;
+            case 0: case 1: case 2: au_play(any_file(), NULL); break;
+            case 3: case 4: au_queue(any_file(), NULL); break;
+            case 5: au_skip(); break;
+            case 6: au_clear_queue(); break;
+            case 7: au_stop(); break;
+            case 8: au_pause(rnd() % 2); break;
+            case 9: au_seek((rnd() % 3000) / 1000.0); break;
+            case 10: au_seek_fraction((rnd() % 100) / 100.0); break;
+            case 11: au_set_volume((rnd() % 101) / 100.0f); (void)tc_status(); break;
         }
         tc_sleep_ms(rnd() % 40);
     }
-    au_pause_audio(false);
-    au_stop_audio();
+    au_pause(false);
+    au_stop();
 }
 
 /* ---------- 2. Playlist driven entirely from callbacks (the Segfault scenario) ---------- */
@@ -72,13 +72,13 @@ static void playlist_on_eof(bool skip, bool error, int32_t handle) {
     if (error) {
         /* What the old manual test did: start the next file right from the EOF callback */
         const int i = SDL_AtomicAdd(&playlist_pos, 1);
-        if (i < playlist_len) au_play_audio(playlist_file(i), NULL);
+        if (i < playlist_len) au_play(playlist_file(i), NULL);
     }
 }
 
 static void playlist_on_prepare_next(void) {
     const int i = SDL_AtomicAdd(&playlist_pos, 1);
-    if (i < playlist_len) au_set_next(playlist_file(i), NULL);
+    if (i < playlist_len) au_queue(playlist_file(i), NULL);
 }
 
 static void test_callback_driven_playlist(void) {
@@ -89,7 +89,7 @@ static void test_callback_driven_playlist(void) {
     tc_on_prepare_next_hook = playlist_on_prepare_next;
     SDL_UnlockMutex(tc_mutex);
 
-    au_play_audio(playlist_file(0), NULL);
+    au_play(playlist_file(0), NULL);
 
     /* Each good track is ~1 s (one is 6 s); generous timeout, the point is no crash / no hang */
     const uint32_t deadline = SDL_GetTicks() + 60000;
@@ -101,7 +101,7 @@ static void test_callback_driven_playlist(void) {
     tc_on_eof_hook = NULL;
     tc_on_prepare_next_hook = NULL;
     SDL_UnlockMutex(tc_mutex);
-    au_stop_audio();
+    au_stop();
     tc_sleep_ms(200);
 }
 
@@ -109,11 +109,11 @@ static void test_callback_driven_playlist(void) {
 
 static void test_rapid_replace(void) {
     for (int i = 0; i < 100; i++) {
-        au_play_audio(any_file(), NULL);
-        if (i % 4 == 0) au_set_next(any_file(), NULL);
+        au_play(any_file(), NULL);
+        if (i % 4 == 0) au_queue(any_file(), NULL);
     }
     tc_sleep_ms(300);
-    au_stop_audio();
+    au_stop();
 }
 
 /* ---------- 4. Many device changes from a callback ---------- */
@@ -148,7 +148,7 @@ static void test_callback_changes_device_often(void) {
     SDL_UnlockMutex(tc_mutex);
     const int before = tc_snapshot().device;
     const Uint32 t0 = SDL_GetTicks();
-    SDL_AtomicSet(&own_handle, au_play_audio(fx("s44_stereo.flac"), NULL));   // plays for a second: set in time
+    SDL_AtomicSet(&own_handle, au_play(fx("s44_stereo.flac"), NULL));   // plays for a second: set in time
     while (!SDL_AtomicGet(&hook_ran) && SDL_GetTicks() - t0 < 5000) SDL_Delay(10);
     CHECK(SDL_AtomicGet(&hook_ran));
     SDL_LockMutex(tc_mutex);
@@ -170,7 +170,7 @@ static void test_callback_changes_device_often(void) {
     CHECK(tc_snapshot().device_failed == 0);
     // Still plays
     const int ended = tc_snapshot().eof, errors = tc_snapshot().eof_error;
-    au_play_audio(fx("s44_stereo.flac"), NULL);
+    au_play(fx("s44_stereo.flac"), NULL);
     CHECK(TC_WAIT_FIELD(eof, ended + 1, 5000));
     CHECK(tc_snapshot().eof_error == errors);
     au_set_device(NULL);

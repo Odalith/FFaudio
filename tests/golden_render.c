@@ -44,9 +44,9 @@ static SDL_atomic_t next_item;   // next playlist item to queue
 static SDL_atomic_t ended, errors;
 
 static void queue(const int i) {
-    const PlayAudioConfig cfg = { .av_filtergraph = playlist[i].filters };
-    if (i == 0) au_play_audio(paths[i], &cfg);
-    else au_set_next(paths[i], &cfg);
+    const AuPlayConfig cfg = { .filters = playlist[i].filters };
+    if (i == 0) au_play(paths[i], &cfg);
+    else au_queue(paths[i], &cfg);
 }
 
 static void on_prepare_next(int32_t handle, void *user) {
@@ -156,7 +156,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "could not start the player\n");
         return 2;
     }
-    const CrossfadeConfig xf = { .on_track_end = { .seconds = 0.5, .curve = AU_FADE_EQUAL_POWER },
+    const AuCrossfade xf = { .on_track_end = { .seconds = 0.5, .curve = AU_FADE_EQUAL_POWER },
                                  .min_track_seconds = 2.0 };
     au_set_crossfade(&xf);
     const AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK };

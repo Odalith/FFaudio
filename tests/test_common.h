@@ -48,6 +48,12 @@ static const char *fx(const char *name) {
     return b;
 }
 
+static AuStatus tc_status(void) {
+    AuStatus s;
+    au_get_status(&s);
+    return s;
+}
+
 /* ---------- callback event recording ---------- */
 
 typedef struct TcEvents {
@@ -112,7 +118,7 @@ static void tc_on_ended(const AuEvent *e) {
 }
 
 static void tc_on_stream_metadata(const AuEvent *e) {
-    const double pos = au_get_audio_play_time();
+    const double pos = tc_status().position;
     SDL_LockMutex(tc_mutex);
     const int i = tc_ev.meta_count++;
     if (i < 8) {

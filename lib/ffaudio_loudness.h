@@ -20,7 +20,7 @@
  * Loudness analysis (EBU R128 / ITU-R BS.1770-4, ReplayGain 2.0), independent of playback.
  *
  * Measures files and returns the values; it never modifies them. Store the results in your own library
- * database and pass them to playback with PlayAudioConfig.replaygain (see au_loudness_to_replaygain()).
+ * database and pass them to playback with AuPlayConfig.replaygain (see au_loudness_to_replaygain()).
  *
  * - No au_init() needed, and it does not affect playback: scan while music plays.
  * - A scanner is used by one thread at a time; run several scanners in parallel to scan faster.
@@ -94,7 +94,7 @@ extern "C" {
     // file); a live stream (no duration) returns AU_ERR_UNSUPPORTED, since it never ends.
     DLL_EXPORT int au_loudness_analyze(const char *filename, const AuLoudnessConfig *config, AuLoudness *out);
 
-    // ReplayGain values for PlayAudioConfig.replaygain. album may be NULL. Peaks are the true peaks
+    // ReplayGain values for AuPlayConfig.replaygain. album may be NULL. Peaks are the true peaks
     // (the sample peaks when true peak was skipped). Silent results give no gain.
     DLL_EXPORT AuReplayGainInfo au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album);
 

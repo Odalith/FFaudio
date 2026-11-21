@@ -51,6 +51,12 @@
 
 #include "http_server.h"
 #include "../lib/ffaudio.h"
+
+static AuStatus status(void) {
+    AuStatus s;
+    au_get_status(&s);
+    return s;
+}
 #include "../lib/ffaudio_filters.h"
 #include "../lib/ffaudio_loudness.h"
 
@@ -242,7 +248,7 @@ static void on_restart(int32_t handle, double pos, bool looped, int32_t left, vo
 static void on_prepare_next(int32_t current, void *ud) {
     (void)current; (void)ud;
     atomic_fetch_add(&n_prepare_next, 1);
-    if (chance(0.9)) au_set_next(pick_file(), NULL);   // sometimes nothing is queued and playback just ends
+    if (chance(0.9)) au_queue(pick_file(), NULL);   // sometimes nothing is queued and playback just ends
 }
 
 static void on_buffering(int32_t handle, bool buffering, double seconds, void *ud) {
@@ -281,7 +287,7 @@ static AuFade random_fade(const double max_seconds) {
 }
 
 static void random_crossfade(void) {
-    const CrossfadeConfig xf = { .on_track_end = random_fade(8), .on_skip = random_fade(3), .on_play = random_fade(3),
+    const AuCrossfade xf = { .on_track_end = random_fade(8), .on_skip = random_fade(3), .on_play = random_fade(3),
                                  .on_stop = random_fade(1), .on_pause = random_fade(0.5),
                                  .min_track_seconds = chance(0.5) ? 0 : rnd_real(1, 20) };
     au_set_crossfade(&xf);
@@ -301,7 +307,9 @@ static void random_replaygain(void) {
 
 static int output_channels(void) {
     int rate = 0, ch = 0;
-    return au_get_output_spec(&rate, &ch) == AU_OK && ch > 0 ? ch : 2;
+    (void)rate;
+    ch = status().channels;
+    return ch > 0 ? ch : 2;
 }
 
 static void random_filters(void) {
@@ -371,16 +379,16 @@ static void play_random(const bool queue) {
     static const char *track_filters[] = { "volume=0.8", "atempo=1.05", "highpass=f=40", "aecho=0.8:0.5:40:0.2" };
     const AuFade fade = random_fade(2);
     const AuReplayGainInfo rg = { .has_track_gain = true, .track_gain_db = rnd_real(-12, 3) };
-    const PlayAudioConfig cfg = {
-        .skip_seconds = chance(0.2) ? rnd_real(0, 400) : 0,  // sometimes past the end
-        .play_duration = chance(0.15) ? rnd_real(1, 60) : 0,
-        .av_filtergraph = chance(0.15) ? track_filters[rnd_int(4)] : NULL,
+    const AuPlayConfig cfg = {
+        .start_seconds = chance(0.2) ? rnd_real(0, 400) : 0,  // sometimes past the end
+        .length_seconds = chance(0.15) ? rnd_real(1, 60) : 0,
+        .filters = chance(0.15) ? track_filters[rnd_int(4)] : NULL,
         .fade_in = chance(0.15) ? &fade : NULL,
         .replaygain = chance(0.1) ? &rg : NULL,
     };
-    const PlayAudioConfig *c = chance(0.5) ? &cfg : NULL;
-    if (queue) au_set_next(pick_file(), c);
-    else au_play_audio(pick_file(), c);
+    const AuPlayConfig *c = chance(0.5) ? &cfg : NULL;
+    if (queue) au_queue(pick_file(), c);
+    else au_play(pick_file(), c);
 }
 
 //+-----------------------------------------------------+
@@ -603,14 +611,14 @@ static void one_action(void) {
     atomic_fetch_add(&n_actions, 1);
     if (r < 120)      { ACTION("play");          play_random(false); }
     else if (r < 200) { ACTION("set_next");      play_random(true); }
-    else if (r < 300) { ACTION("skip");          au_skip_to_next(); }
-    else if (r < 380) { ACTION("seek");          chance(0.5) ? au_seek_percent(rnd_real(0, 1.1)) : au_seek_time(rnd_int(400000)); }
-    else if (r < 420) { ACTION("pause");         au_pause_audio(true); usleep((useconds_t)rnd_int(1500) * 1000); au_pause_audio(false); }
-    else if (r < 440) { ACTION("stop");          au_stop_audio(); if (chance(0.8)) play_random(false); }
-    else if (r < 460) { ACTION("clear_next");    au_clear_next(); }
-    else if (r < 500) { ACTION("volume");        au_set_audio_volume(rnd_int(101)); }
-    else if (r < 510) { ACTION("mute");          au_mute_audio(true); usleep(200000); au_mute_audio(false); }
-    else if (r < 560) { ACTION("speed");         au_set_playback_speed(chance(0.4) ? 1.0 : rnd_real(0.25, 4), chance(0.7)); }
+    else if (r < 300) { ACTION("skip");          au_skip(); }
+    else if (r < 380) { ACTION("seek");          chance(0.5) ? au_seek_fraction(rnd_real(0, 1.1)) : au_seek(rnd_int(400000) / 1000.0); }
+    else if (r < 420) { ACTION("pause");         au_pause(true); usleep((useconds_t)rnd_int(1500) * 1000); au_pause(false); }
+    else if (r < 440) { ACTION("stop");          au_stop(); if (chance(0.8)) play_random(false); }
+    else if (r < 460) { ACTION("clear_next");    au_clear_queue(); }
+    else if (r < 500) { ACTION("volume");        au_set_volume(rnd_int(101) / 100.0f); }
+    else if (r < 510) { ACTION("mute");          au_set_muted(true); usleep(200000); au_set_muted(false); }
+    else if (r < 560) { ACTION("speed");         au_set_speed(chance(0.4) ? 1.0 : rnd_real(0.25, 4), chance(0.7)); }
     else if (r < 620) { ACTION("filters");       random_filters(); }
     else if (r < 680) { ACTION("command");       random_command(); }
     else if (r < 700) { ACTION("track_filter");  au_update_filtergraph(0, chance(0.5) ? NULL : "volume=0.7"); }
@@ -636,8 +644,7 @@ static void one_action(void) {
         au_media_info_free(info);
         double g;
         au_get_track_gain_db(0, &g);
-        au_get_audio_play_time();
-        au_get_audio_duration();
+        (void)status();
     }
     else if (r < 870) {
         ACTION("devices");
@@ -651,8 +658,8 @@ static void one_action(void) {
             switch (rnd_int(4)) {
                 case 0: play_random(false); break;
                 case 1: play_random(true); break;
-                case 2: au_skip_to_next(); break;
-                default: au_seek_percent(rnd_real(0, 1)); break;
+                case 2: au_skip(); break;
+                default: au_seek_fraction(rnd_real(0, 1)); break;
             }
         }
     }
@@ -737,7 +744,7 @@ int main(int argc, char **argv) {
         atomic_store(&heartbeat, elapsed_s());
         one_action();
         // Keep something playing: an application would start the next track when playback stopped
-        if (au_get_current_handle() == 0 && chance(0.5)) play_random(false);
+        if (status().handle == 0 && chance(0.5)) play_random(false);
         usleep((useconds_t)(50 + rnd_int(1500)) * 1000);
 
         const double t = now_s() - t0;

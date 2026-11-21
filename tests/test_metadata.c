@@ -109,7 +109,7 @@ static void test_probe_untagged_and_bad(void) {
 static void test_track_info_while_playing(void) {
     REQUIRE(tc_init_player(0) == 0);
     CHECK(au_get_track_info(0) == NULL); // nothing playing
-    const int32_t h = au_play_audio(fx("rg_long.flac"), NULL);
+    const int32_t h = au_play(fx("rg_long.flac"), NULL);
     tc_sleep_ms(500);
 
     AuMediaInfo *info = au_get_track_info(0);
@@ -135,7 +135,7 @@ static void test_track_info_while_playing(void) {
     const AuReplayGainConfig bad = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 40 };
     CHECK(au_set_replaygain(&bad) == AU_ERR_INVALID_ARGUMENT);
 
-    au_stop_audio();
+    au_stop();
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
     au_shutdown();
 }
@@ -168,7 +168,7 @@ static void test_non_audio_opens_no_decoder(void) {
 
     REQUIRE(tc_init_player(0) == 0);
     av_log_set_level(AV_LOG_WARNING); // au_initialize() sets AV_LOG_ERROR
-    au_play_audio(fx("not_audio.bin"), NULL);
+    au_play(fx("not_audio.bin"), NULL);
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
     CHECK(tc_snapshot().eof_error == 1);
     au_shutdown();

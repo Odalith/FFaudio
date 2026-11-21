@@ -56,6 +56,12 @@
 #include <math.h>
 
 #include "../lib/ffaudio.h"
+
+static AuStatus status(void) {
+    AuStatus s;
+    au_get_status(&s);
+    return s;
+}
 #include "../lib/ffaudio_loudness.h"
 #include "../lib/ffaudio_filters.h"
 
@@ -65,7 +71,7 @@ static size_t next_index = 0;
 static size_t max_tracks = (size_t)-1;
 static const char *filter = NULL;
 
-// Handle of the track queued with au_set_next() that has not started yet (0 = none).
+// Handle of the track queued with au_queue() that has not started yet (0 = none).
 // Written from callbacks (control thread) and read by the key loop.
 static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 static int32_t queued_handle = 0;
@@ -152,8 +158,8 @@ static const char *take_next(void) {
 
 static void prefetch_upcoming(void);
 
-static PlayAudioConfig play_config(void) {
-    return (PlayAudioConfig){ .av_filtergraph = filter };
+static AuPlayConfig play_config(void) {
+    return (AuPlayConfig){ .filters = filter };
 }
 
 static void on_log(const char *msg, int64_t req, enum AU_LOG_LEVEL level, void *ud) {
@@ -227,8 +233,8 @@ static void prefetch_upcoming(void) {
 static void queue_next_file(void) {
     const char *f = take_next();
     if (!f) { printf("  (no more files)\n"); return; }
-    const PlayAudioConfig cfg = play_config();
-    const int32_t h = au_set_next(f, &cfg);
+    const AuPlayConfig cfg = play_config();
+    const int32_t h = au_queue(f, &cfg);
     set_queued(h);
     printf("  queued #%d %s\n", h, f);
 }
@@ -298,7 +304,9 @@ static char last_filters[8192] = "";
 static void apply_effects(void) {
     pthread_mutex_lock(&fx_lock);
     int rate = 0, channels = 0;
-    if (au_get_output_spec(&rate, &channels) != AU_OK || channels <= 0) channels = 2;
+    rate = status().sample_rate;
+    channels = status().channels;
+    if (channels <= 0) channels = 2;
     const bool stereo = channels == 2;
 
     AuFilterBuilder *fb = au_fb_create();
@@ -608,15 +616,15 @@ int main(int argc, char **argv) {
     if (crossfade > 0) {
         const AuFade fade = { .seconds = crossfade, .curve = AU_FADE_EQUAL_POWER };
         const AuFade quick = { .seconds = 0.4, .curve = AU_FADE_S_CURVE };
-        const CrossfadeConfig xf = { .on_track_end = fade, .on_skip = quick, .on_play = quick,
+        const AuCrossfade xf = { .on_track_end = fade, .on_skip = quick, .on_play = quick,
                                      .on_stop = quick, .on_pause = { .seconds = 0.2, .curve = AU_FADE_S_CURVE } };
         au_set_crossfade(&xf);
         printf("crossfade: %.1f s\n", crossfade);
     }
 
-    const PlayAudioConfig cfg = play_config();
+    const AuPlayConfig cfg = play_config();
     const char *first_file = take_next();
-    au_play_audio(first_file, &cfg);
+    au_play(first_file, &cfg);
 
     setvbuf(stdout, NULL, _IOLBF, 0);
     enable_key_mode();
@@ -630,72 +638,72 @@ int main(int argc, char **argv) {
                 // Use the queued track if there is one, otherwise start the next file right away
                 if (get_queued()) {
                     printf("  next (queued track)\n");
-                    au_skip_to_next();
+                    au_skip();
                 }
                 else {
                     const char *f = take_next();
                     if (!f) { printf("  (no more files)\n"); break; }
-                    const PlayAudioConfig next_cfg = play_config();
-                    printf("  next: #%d %s\n", au_play_audio(f, &next_cfg), f);
+                    const AuPlayConfig next_cfg = play_config();
+                    printf("  next: #%d %s\n", au_play(f, &next_cfg), f);
                 }
                 if (paused) {
-                    au_pause_audio(false); // au_skip_to_next() does not resume on its own
+                    au_pause(false); // au_skip() does not resume on its own
                     paused = false;
                 }
                 break;
             }
             case 'p':
                 paused = !paused;
-                au_pause_audio(paused);
+                au_pause(paused);
                 printf("  %s\n", paused ? "paused" : "resumed");
                 break;
             case 's':
-                au_stop_audio();
+                au_stop();
                 paused = false;
                 printf("  stopped (n plays the next file)\n");
                 break;
             case 'm':
                 muted = !muted;
-                au_mute_audio(muted);
+                au_set_muted(muted);
                 printf("  %s\n", muted ? "muted" : "unmuted");
                 break;
             case '+':
             case '=': {
-                const int v = au_get_audio_volume() + 5 > 100 ? 100 : au_get_audio_volume() + 5;
-                au_set_audio_volume(v);
-                printf("  volume %d\n", v);
+                const float v = fminf(1.0f, status().volume + 0.05f);
+                au_set_volume(v);
+                printf("  volume %.0f%%\n", v * 100);
                 break;
             }
             case '-': {
-                const int v = au_get_audio_volume() - 5 < 0 ? 0 : au_get_audio_volume() - 5;
-                au_set_audio_volume(v);
-                printf("  volume %d\n", v);
+                const float v = fmaxf(0.0f, status().volume - 0.05f);
+                au_set_volume(v);
+                printf("  volume %.0f%%\n", v * 100);
                 break;
             }
             case '>':
             case '<': {
-                const double t = au_get_audio_play_time();
+                const double t = status().position;
                 if (t < 0) { printf("  (nothing playing)\n"); break; }
                 const double target = c == '>' ? t + 10 : (t > 10 ? t - 10 : 0);
-                au_seek_time((int64_t)(target * 1000));
+                au_seek(target);
                 printf("  seek to %.1f s\n", target);
                 break;
             }
             case ' ':
             case '\n':
-                printf("  #%d  %.2f / %.2f s\n", au_get_current_handle(), au_get_audio_play_time(), au_get_audio_duration());
+                printf("  #%d  %.2f / %.2f s\n", status().handle, status().position, status().duration);
                 break;
             case '[':
             case ']': {
-                double sp = au_get_playback_speed() + (c == ']' ? 0.25 : -0.25);
+                double sp = status().speed + (c == ']' ? 0.25 : -0.25);
                 sp = sp < 0.25 ? 0.25 : (sp > 4.0 ? 4.0 : sp);
-                au_set_playback_speed(sp, keep_pitch);
+                au_set_speed(sp, keep_pitch);
                 printf("  speed %.2fx%s\n", sp, keep_pitch ? "" : " (tape)");
                 break;
             }
             case '\\':
                 keep_pitch = !keep_pitch;
-                au_set_playback_speed(au_get_playback_speed(), keep_pitch);
+                au_set_speed(status().speed, keep_pitch);
                 printf("  %s\n", keep_pitch ? "speed keeps the pitch" : "speed changes the pitch (tape)");
                 break;
             case 'e':
