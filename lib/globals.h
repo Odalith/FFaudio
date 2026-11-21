@@ -118,12 +118,6 @@ typedef struct Decoder {
 //| Tracks                                              |
 //+-----------------------------------------------------+
 
-typedef enum TrackRole {
-    ROLE_NONE = 0,      // not audible and not queued (retired, waiting for destruction)
-    ROLE_CURRENT,
-    ROLE_NEXT,
-    ROLE_OUTGOING,      // fading out (crossfade or fade-out on stop)
-} TrackRole;
 
 typedef enum TrackEndReason {
     END_NONE = 0,
@@ -279,9 +273,8 @@ typedef struct TrackState {
     int32_t loops_heard;                // loops reported so far (compared with loops_started)
     int32_t last_frame_serial;          // serial of last_frame_pts
 
-    // ---- slot bookkeeping, changed under the device lock ----
-    TrackRole role;
-    TrackEndReason fade_reason;         // why it is fading out (ROLE_OUTGOING)
+    // ---- under the device lock ----
+    TrackEndReason fade_reason;         // why it is fading out (while it is the mixer's outgoing track)
 
     // ---- control thread only ----
     bool ended;                         // removed from the mixer and reported, waiting for destruction
@@ -357,6 +350,11 @@ typedef struct Mixer {
 
     uint32_t dither_state;
 } Mixer;
+
+// Whether a track is in one of the mixer's slots (current, queued or fading out). Device lock held, or no device.
+static inline bool mixer_has_track(const Mixer *m, const struct TrackState *t) {
+    return t && (m->current == t || m->next == t || m->outgoing == t);
+}
 
 //+-----------------------------------------------------+
 //| Control-thread messages                             |

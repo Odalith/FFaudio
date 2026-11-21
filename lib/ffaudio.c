@@ -273,12 +273,19 @@ static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
     (void)ap;
 }
 
+static void lock_mixer(AudioPlayer *ap);
+static void unlock_mixer(AudioPlayer *ap);
+
 // Ended tracks are stopped here and freed once their worker has returned (MSG_TRACK_EXITED wakes the loop): the control
 // thread never waits for a worker
 static void destroy_ended_tracks(AudioPlayer *ap) {
     for (int i = ap->n_tracks - 1; i >= 0; i--) {
         TrackState *t = ap->tracks[i];
-        if (!t->ended || t->role != ROLE_NONE) continue;
+        if (!t->ended) continue;
+        lock_mixer(ap); // the SDL callback moves tracks out of its slots
+        const bool in_mixer = mixer_has_track(&ap->mixer, t);
+        unlock_mixer(ap);
+        if (in_mixer) continue;
         if (ap->n_dying == ap->cap_dying) {
             const int cap = ap->cap_dying ? ap->cap_dying * 2 : 8;
             TrackState **arr = av_realloc_array(ap->dying, cap, sizeof(TrackState *));
@@ -315,21 +322,16 @@ static void remove_from_mixer(AudioPlayer *ap, TrackState *t) {
     if (m->current == t) { m->current = NULL; m->in_fade.active = false; }
     if (m->next == t) m->next = NULL;
     if (m->outgoing == t) { m->outgoing = NULL; m->out_fade.active = false; }
-    t->role = ROLE_NONE;
 }
 
 static void set_next_slot(AudioPlayer *ap, TrackState *t) {
     ap->mixer.next = t;
-    if (t) t->role = ROLE_NEXT;
 }
 
 static void set_current_slot(AudioPlayer *ap, TrackState *t) {
     ap->mixer.current = t;
     ap->mixer.in_fade.active = false;
-    if (t) {
-        if (ap->mixer.next == t) ap->mixer.next = NULL;
-        t->role = ROLE_CURRENT;
-    }
+    if (t && ap->mixer.next == t) ap->mixer.next = NULL;
 }
 
 // Seconds and sampled curve of the fade into `incoming`: its own (PlayAudioConfig.fade_in) or the configured one
@@ -765,7 +767,7 @@ static void process_mixer_events(AudioPlayer *ap) {
         lock_mixer(ap);
         for (int i = 0; i < ap->n_tracks; i++) {
             TrackState *t = ap->tracks[i];
-            if (!t->ended && t->role == ROLE_NONE) {
+            if (!t->ended && !mixer_has_track(&ap->mixer, t)) {
                 unlock_mixer(ap);
                 end_track(ap, t, END_NATURAL);
                 lock_mixer(ap);
