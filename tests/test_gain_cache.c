@@ -407,6 +407,7 @@ static void test_damaged_and_foreign_lines(void) {
     CHECK(au_gain_cache_count() == 0);
     CHECK(au_gain_cache_set("/m/y.flac", &rg) == AU_ERR_FILE);
     CHECK(count_lines(cache_file) == 2);
+    use_fresh_file(); // the tests after this one write to the cache file
 }
 
 // Two processes writing one cache file: while this one compacts it again and again, another appends entries of its
