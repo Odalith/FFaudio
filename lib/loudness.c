@@ -59,13 +59,10 @@ typedef struct Histogram {
     double energy[HIST_BINS];
 } Histogram;
 
-struct AuLoudnessScanner {
-    AuLoudnessConfig config;
-    AVIOInterruptCB interrupt;  // loudness_scanner_set_interrupt(); no callback = none
-    Histogram *blocks, *short_term;          // every scanned track (the album)
-    Histogram *file_blocks, *file_short_term; // the file being scanned, reused
+struct AuLoudnessMeter {
+    Histogram *blocks, *short_term;     // every file measured into it
     double sample_peak, true_peak, duration;
-    int tracks;
+    int files;
 };
 
 // True peak: interpolation to 4x (below 96 kHz) or 2x (below 192 kHz) with a windowed sinc in polyphase form (49
@@ -618,88 +615,97 @@ end:
 //| Public API                                          |
 //+-----------------------------------------------------+
 
-void au_loudness_scanner_free(AuLoudnessScanner *s) {
-    if (!s) return;
-    av_free(s->blocks);
-    av_free(s->short_term);
-    av_free(s->file_blocks);
-    av_free(s->file_short_term);
-    av_free(s);
+void au_loudness_meter_free(AuLoudnessMeter *m) {
+    if (!m) return;
+    av_free(m->blocks);
+    av_free(m->short_term);
+    av_free(m);
 }
 
-AuLoudnessScanner *au_loudness_scanner_create(const AuLoudnessConfig *config) {
-    AuLoudnessScanner *s = av_mallocz(sizeof(AuLoudnessScanner));
-    if (!s) return NULL;
-    if (config) s->config = *config;
-    s->blocks = av_mallocz(sizeof(Histogram));
-    s->short_term = av_mallocz(sizeof(Histogram));
-    s->file_blocks = av_mallocz(sizeof(Histogram));
-    s->file_short_term = av_mallocz(sizeof(Histogram));
-    if (!s->blocks || !s->short_term || !s->file_blocks || !s->file_short_term) {
-        au_loudness_scanner_free(s);
+AuLoudnessMeter *loudness_meter_create(void) {
+    AuLoudnessMeter *m = av_mallocz(sizeof(AuLoudnessMeter));
+    if (!m) return NULL;
+    m->blocks = av_mallocz(sizeof(Histogram));
+    m->short_term = av_mallocz(sizeof(Histogram));
+    if (!m->blocks || !m->short_term) {
+        au_loudness_meter_free(m);
         return NULL;
     }
-    return s;
+    return m;
 }
 
-void loudness_scanner_configure(AuLoudnessScanner *s, const AuLoudnessConfig *config) {
-    if (!s) return;
-    if (config) s->config = *config;
-    else memset(&s->config, 0, sizeof(s->config));
+void loudness_meter_clear(AuLoudnessMeter *m) {
+    if (!m) return;
+    memset(m->blocks, 0, sizeof(Histogram));
+    memset(m->short_term, 0, sizeof(Histogram));
+    m->sample_peak = m->true_peak = m->duration = 0;
+    m->files = 0;
 }
 
-void loudness_scanner_set_interrupt(AuLoudnessScanner *s, const AVIOInterruptCB *interrupt) {
-    if (!s) return;
-    if (interrupt) s->interrupt = *interrupt;
-    else memset(&s->interrupt, 0, sizeof(s->interrupt));
-}
-
-void au_loudness_scanner_reset(AuLoudnessScanner *s) {
-    if (!s) return;
-    memset(s->blocks, 0, sizeof(Histogram));
-    memset(s->short_term, 0, sizeof(Histogram));
-    s->sample_peak = s->true_peak = s->duration = 0;
-    s->tracks = 0;
-}
-
-int au_loudness_track_count(const AuLoudnessScanner *s) {
-    return s ? s->tracks : 0;
-}
-
-int au_loudness_scan_file(AuLoudnessScanner *s, const char *filename, AuLoudness *out) {
-    if (!s || !filename || !filename[0]) return AU_ERR_INVALID_ARGUMENT;
-
-    Meter m;
-    const int ret = measure_file(&s->config, &s->interrupt, filename, &m, s->file_blocks, s->file_short_term);
-    if (ret != AU_OK) return ret;
-
-    const double duration = (double)m.samples / m.rate;
-    if (out) fill_result(out, s->file_blocks, s->file_short_term, m.sample_peak, m.true_peak, duration);
-
-    // The album is the sum of its tracks
-    hist_merge(s->blocks, s->file_blocks);
-    hist_merge(s->short_term, s->file_short_term);
-    s->sample_peak = FFMAX(s->sample_peak, m.sample_peak);
-    s->true_peak = FFMAX(s->true_peak, m.true_peak);
-    s->duration += duration;
-    s->tracks++;
-    meter_free(&m);
+int loudness_measure_into(AuLoudnessMeter *m, const char *path, const AuLoudnessConfig *config,
+                          const AVIOInterruptCB *interrupt) {
+    if (!m || !path || !path[0]) return AU_ERR_INVALID_ARGUMENT;
+    const AuLoudnessConfig none = { 0 };
+    const AVIOInterruptCB no_interrupt = { 0 };
+    Meter meter;
+    const int ret = measure_file(config ? config : &none, interrupt ? interrupt : &no_interrupt, path, &meter,
+                                 m->blocks, m->short_term);
+    if (ret != AU_OK) {
+        loudness_meter_clear(m);
+        return ret;
+    }
+    m->sample_peak = meter.sample_peak;
+    m->true_peak = meter.true_peak;
+    m->duration = (double)meter.samples / meter.rate;
+    m->files = 1;
+    meter_free(&meter);
     return AU_OK;
 }
 
-int au_loudness_album(const AuLoudnessScanner *s, AuLoudness *out) {
-    if (!s || !out) return AU_ERR_INVALID_ARGUMENT;
-    if (!s->tracks) return AU_ERR_NOTHING_TO_DO;
-    fill_result(out, s->blocks, s->short_term, s->sample_peak, s->true_peak, s->duration);
-    return AU_OK;
-}
-
-int au_loudness_analyze(const char *filename, const AuLoudnessConfig *config, AuLoudness *out) {
+int au_loudness_measure(const char *path, const AuLoudnessConfig *config, AuLoudnessMeter **out) {
     if (!out) return AU_ERR_INVALID_ARGUMENT;
-    AuLoudnessScanner *s = au_loudness_scanner_create(config);
-    if (!s) return AU_ERR_NO_MEMORY;
-    const int ret = au_loudness_scan_file(s, filename, out);
-    au_loudness_scanner_free(s);
+    *out = NULL;
+    if (!path || !path[0]) return AU_ERR_INVALID_ARGUMENT;
+    AuLoudnessMeter *m = loudness_meter_create();
+    if (!m) return AU_ERR_NO_MEMORY;
+    const int ret = loudness_measure_into(m, path, config, NULL);
+    if (ret != AU_OK) {
+        au_loudness_meter_free(m);
+        return ret;
+    }
+    *out = m;
+    return AU_OK;
+}
+
+int au_loudness_merge(AuLoudnessMeter *into, const AuLoudnessMeter *other) {
+    if (!into || !other) return AU_ERR_INVALID_ARGUMENT;
+    if (into == other) return AU_ERR_INVALID_ARGUMENT;
+    hist_merge(into->blocks, other->blocks);
+    hist_merge(into->short_term, other->short_term);
+    into->sample_peak = FFMAX(into->sample_peak, other->sample_peak);
+    into->true_peak = FFMAX(into->true_peak, other->true_peak);
+    into->duration += other->duration;
+    into->files += other->files;
+    return AU_OK;
+}
+
+int au_loudness_result(const AuLoudnessMeter *m, AuLoudness *out) {
+    if (!m || !out) return AU_ERR_INVALID_ARGUMENT;
+    if (!m->files) return AU_ERR_NOTHING_TO_DO;
+    fill_result(out, m->blocks, m->short_term, m->sample_peak, m->true_peak, m->duration);
+    return AU_OK;
+}
+
+int au_loudness_file_count(const AuLoudnessMeter *m) {
+    return m ? m->files : 0;
+}
+
+int au_loudness_analyze(const char *path, const AuLoudnessConfig *config, AuLoudness *out) {
+    if (!out) return AU_ERR_INVALID_ARGUMENT;
+    AuLoudnessMeter *m = NULL;
+    const int ret = au_loudness_measure(path, config, &m);
+    if (ret == AU_OK) au_loudness_result(m, out);
+    au_loudness_meter_free(m);
     return ret;
 }
 

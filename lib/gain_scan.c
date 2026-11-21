@@ -327,29 +327,26 @@ static void notify(const AuGainScanConfig *cfg, const char *path, const int resu
     if (cfg->on_cached) cfg->on_cached(path, result, rg, cfg->user);
 }
 
-// `scanner` is the worker's own, reused for every file
-static void measure_job(const int index, const Job *job, const AuGainScanConfig *cfg, AuLoudnessScanner *scanner) {
+// `file` and `album` are the worker's own meters, reused for every file
+static void measure_job(const int index, const Job *job, const AuGainScanConfig *cfg, AuLoudnessMeter *file,
+                        AuLoudnessMeter *album) {
     ProgressCtx ctx = { .index = index };
     const AuLoudnessConfig lcfg = { .skip_true_peak = cfg->skip_true_peak, .progress = keep_going,
                                     .progress_user = &ctx };
     const AVIOInterruptCB interrupt = { .callback = interrupted, .opaque = &ctx };
-    if (!scanner) {
+    if (!file || !album) {
         for (int i = 0; i < job->n; i++) notify(cfg, job->paths[i], AU_ERR_NO_MEMORY, NULL);
         return;
     }
-    loudness_scanner_configure(scanner, &lcfg);
-    loudness_scanner_set_interrupt(scanner, &interrupt);
-    au_loudness_scanner_reset(scanner);
 
     if (!job->album) {
-        AuLoudnessScanner *one = scanner;
         for (int i = 0; i < job->n; i++) {
             const char *path = job->paths[i];
             if (au_gain_cache_get(path, NULL)) continue; // measured by someone else meanwhile
             AuLoudness l;
-            au_loudness_scanner_reset(one);
-            const int ret = au_loudness_scan_file(one, path, &l);
+            const int ret = loudness_measure_into(file, path, &lcfg, &interrupt);
             if (ret == AU_OK) {
+                au_loudness_result(file, &l);
                 const AuReplayGain rg = au_loudness_to_replaygain(&l, NULL);
                 au_gain_cache_set(path, &rg);
                 notify(cfg, path, AU_OK, &rg);
@@ -363,29 +360,34 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
         return;
     }
 
-    // Album: every track through the scanner, then store track + album values together
+    // Album: every track measured and merged, then track + album values stored together
     AuLoudness *tracks = av_calloc(job->n, sizeof(AuLoudness));
     int *results = av_calloc(job->n, sizeof(int));
     if (!tracks || !results) {
         for (int i = 0; i < job->n; i++) notify(cfg, job->paths[i], AU_ERR_NO_MEMORY, NULL);
         goto end;
     }
+    loudness_meter_clear(album);
     for (int i = 0; i < job->n; i++) {
-        results[i] = au_loudness_scan_file(scanner, job->paths[i], &tracks[i]);
+        results[i] = loudness_measure_into(file, job->paths[i], &lcfg, &interrupt);
         if (results[i] == AU_ERR_CANCELLED) {
             for (int k = i; k < job->n; k++) notify(cfg, job->paths[k], AU_ERR_CANCELLED, NULL);
             goto end;
         }
+        if (results[i] == AU_OK) {
+            au_loudness_result(file, &tracks[i]);
+            au_loudness_merge(album, file);
+        }
     }
-    AuLoudness album;
-    const bool have_album = au_loudness_album(scanner, &album) == AU_OK;
+    AuLoudness album_values;
+    const bool have_album = au_loudness_result(album, &album_values) == AU_OK;
     for (int i = 0; i < job->n; i++) {
         if (results[i] != AU_OK) {
             note_result(job->paths[i], results[i]);
             notify(cfg, job->paths[i], results[i], NULL);
             continue;
         }
-        const AuReplayGain rg = au_loudness_to_replaygain(&tracks[i], have_album ? &album : NULL);
+        const AuReplayGain rg = au_loudness_to_replaygain(&tracks[i], have_album ? &album_values : NULL);
         au_gain_cache_set(job->paths[i], &rg);
         notify(cfg, job->paths[i], AU_OK, &rg);
     }
@@ -398,7 +400,8 @@ static int worker_main(void *arg) {
     ff_thread_use_c_locale();
     const int index = (int)(intptr_t)arg;
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
-    AuLoudnessScanner *scanner = au_loudness_scanner_create(NULL); // a few hundred KB, kept for every file
+    // About 320 KB each, kept for every file
+    AuLoudnessMeter *file = loudness_meter_create(), *album = loudness_meter_create();
 
     SDL_LockMutex(lock);
     for (;;) {
@@ -416,7 +419,7 @@ static int worker_main(void *arg) {
         const AuGainScanConfig cfg = config;
         SDL_UnlockMutex(lock);
 
-        measure_job(index, job, &cfg, scanner);
+        measure_job(index, job, &cfg, file, album);
 
         SDL_LockMutex(lock);
         workers[index].job = NULL;
@@ -425,7 +428,8 @@ static int worker_main(void *arg) {
         job_free(job);
     }
     SDL_UnlockMutex(lock);
-    au_loudness_scanner_free(scanner);
+    au_loudness_meter_free(file);
+    au_loudness_meter_free(album);
     return 0;
 }
 

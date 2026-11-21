@@ -49,6 +49,11 @@ The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.
   precision) instead of `anequalizer`: it no longer takes the output channel count, and each band can be changed
   while playing on its own (`equalizer@<name>_<band>`, commands `f`, `w`, `g`). It sounds slightly different, since
   the bands are cookbook biquads rather than anequalizer's filters.
+- Loudness: `AuLoudnessMeter` replaces `AuLoudnessScanner`. `au_loudness_measure()` measures a file into a new meter,
+  `au_loudness_merge()` adds one meter to another, `au_loudness_result()` gives the values and
+  `au_loudness_file_count()` how many files a meter holds. A meter can be made on any thread and merged later, so an
+  album's tracks can be measured in parallel; merging is exact (the same result in any order, and as measuring all
+  of it at once). `au_loudness_analyze()` stays for a single file.
 
 ### Fixed
 - In applications with a comma-decimal locale (`LC_NUMERIC` such as de_DE or fr_FR, which GTK applications set from

@@ -24,15 +24,19 @@
  *
  * - No au_init() needed, and it does not affect playback: scan while music plays.
  * - A scanner is used by one thread at a time; run several scanners in parallel to scan faster.
- * - Album values: scan every track of the album with the same scanner, then call au_loudness_album().
+ * - Album values: measure every track of the album into its own meter (on as many threads as you like), merge
+ *   them, and take the result: the album's loudness is measured over all its audio, not averaged.
  *
- *   AuLoudnessScanner *s = au_loudness_scanner_create(NULL);
- *   AuLoudness track[12], album;
- *   for (int i = 0; i < n; i++)
- *       au_loudness_scan_file(s, files[i], &track[i]);
- *   au_loudness_album(s, &album);
- *   AuReplayGain rg = au_loudness_to_replaygain(&track[0], &album);  // store, then use for playback
- *   au_loudness_scanner_free(s);
+ *   AuLoudnessMeter *album = NULL;
+ *   for (int i = 0; i < n; i++) {
+ *       AuLoudnessMeter *m;
+ *       if (au_loudness_measure(files[i], NULL, &m) != AU_OK) continue;
+ *       au_loudness_result(m, &track[i]);
+ *       if (!album) album = m;
+ *       else { au_loudness_merge(album, m); au_loudness_meter_free(m); }
+ *   }
+ *   au_loudness_result(album, &album_values);
+ *   au_loudness_meter_free(album);
  */
 
 #ifndef FFAUDIO_LOUDNESS_H
@@ -68,31 +72,29 @@ extern "C" {
         void *progress_user;
     } AuLoudnessConfig;
 
-    typedef struct AuLoudnessScanner AuLoudnessScanner;
+    // A measurement: one file, or several merged (an album). About 320 KB (two histograms of 0.01 LU bins).
+    typedef struct AuLoudnessMeter AuLoudnessMeter;
 
-    // config may be NULL (defaults: true peak on, no progress callback)
-    DLL_EXPORT AuLoudnessScanner *au_loudness_scanner_create(const AuLoudnessConfig *config);
-    DLL_EXPORT void au_loudness_scanner_free(AuLoudnessScanner *scanner);
+    // Measure one file into a new meter (*out; free it with au_loudness_meter_free()). config may be NULL
+    // (defaults: true peak on, no progress callback). Returns AU_OK, AU_ERR_FILE (can not be opened/decoded),
+    // AU_ERR_CANCELLED, AU_ERR_UNSUPPORTED (a live stream: it never ends), AU_ERR_INVALID_ARGUMENT or
+    // AU_ERR_NO_MEMORY; *out is NULL on error. URLs work too (the file is downloaded).
+    DLL_EXPORT int au_loudness_measure(const char *path, const AuLoudnessConfig *config, AuLoudnessMeter **out);
 
-    // Forget the scanned tracks (start a new album)
-    DLL_EXPORT void au_loudness_scanner_reset(AuLoudnessScanner *scanner);
+    // Add what `other` measured to `into` (an album is its tracks merged); `other` is unchanged. Exact: merging
+    // gives the same result as measuring everything in one go.
+    DLL_EXPORT int au_loudness_merge(AuLoudnessMeter *into, const AuLoudnessMeter *other);
 
-    // Measure one file and add it to the scanner's album. A file that fails or is cancelled is not added.
-    // Returns AU_OK, AU_ERR_FILE (can not be opened/decoded), AU_ERR_CANCELLED, AU_ERR_INVALID_ARGUMENT
-    // or AU_ERR_NO_MEMORY. out may be NULL if only the album values are wanted.
-    DLL_EXPORT int au_loudness_scan_file(AuLoudnessScanner *scanner, const char *filename, AuLoudness *out);
+    // The values of everything measured into the meter. Peaks are the largest of its files.
+    DLL_EXPORT int au_loudness_result(const AuLoudnessMeter *meter, AuLoudness *out);
 
-    // Album values over every file scanned since the scanner was created or reset. Album loudness is
-    // measured over all tracks together (not an average of the track values); peaks are the maximum.
-    // AU_ERR_NOTHING_TO_DO when no file has been scanned.
-    DLL_EXPORT int au_loudness_album(const AuLoudnessScanner *scanner, AuLoudness *out);
+    // How many files the meter holds (1 after au_loudness_measure(), more after merges)
+    DLL_EXPORT int au_loudness_file_count(const AuLoudnessMeter *meter);
 
-    // Number of files in the current album
-    DLL_EXPORT int au_loudness_track_count(const AuLoudnessScanner *scanner);
+    DLL_EXPORT void au_loudness_meter_free(AuLoudnessMeter *meter);
 
-    // Measure a single file without keeping a scanner around (track values only). URLs work too (it downloads the
-    // file); a live stream (no duration) returns AU_ERR_UNSUPPORTED, since it never ends.
-    DLL_EXPORT int au_loudness_analyze(const char *filename, const AuLoudnessConfig *config, AuLoudness *out);
+    // au_loudness_measure() and au_loudness_result() in one, for a single file
+    DLL_EXPORT int au_loudness_analyze(const char *path, const AuLoudnessConfig *config, AuLoudness *out);
 
     // ReplayGain values for AuPlayConfig.replaygain. album may be NULL. Peaks are the true peaks
     // (the sample peaks when true peak was skipped). Silent results give no gain.
