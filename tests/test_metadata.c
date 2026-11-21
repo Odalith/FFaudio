@@ -17,20 +17,20 @@
 
 static void check_tagged(const char *file, const char *container, const char *codec, const int bits) {
     int err = 1;
-    AuMediaInfo *info = au_probe(fx(file), &err);
+    const AuMediaInfo *info = au_probe(fx(file), &err);
     REQUIRE(info);
     CHECK(err == AU_OK);
-    printf("   %s: %s/%s %d Hz %d ch %d bit %.3f s %s, %d tags\n", file, au_media_container(info),
-           au_media_codec(info), au_media_sample_rate(info), au_media_channels(info),
-           au_media_bits_per_sample(info), au_media_duration(info), au_media_channel_layout(info),
-           au_media_tag_count(info));
-    CHECK(strcmp(au_media_container(info), container) == 0);
-    CHECK(strcmp(au_media_codec(info), codec) == 0);
-    CHECK(au_media_sample_rate(info) == 48000);
-    CHECK(au_media_channels(info) == 2);
-    CHECK(strcmp(au_media_channel_layout(info), "stereo") == 0);
-    CHECK(au_media_bits_per_sample(info) == bits);
-    CHECK(fabs(au_media_duration(info) - 1.0) < 0.06);
+    printf("   %s: %s/%s %d Hz %d ch %d bit %.3f s %s, %d tags\n", file, info->container,
+           info->codec, info->sample_rate, info->channels,
+           info->bits_per_sample, info->duration, info->channel_layout,
+           info->tag_count);
+    CHECK(strcmp(info->container, container) == 0);
+    CHECK(strcmp(info->codec, codec) == 0);
+    CHECK(info->sample_rate == 48000);
+    CHECK(info->channels == 2);
+    CHECK(strcmp(info->channel_layout, "stereo") == 0);
+    CHECK(info->bits_per_sample == bits);
+    CHECK(fabs(info->duration - 1.0) < 0.06);
 
     CHECK_TAG(info, "title", "Test Song");
     CHECK_TAG(info, "TITLE", "Test Song");       // case-insensitive
@@ -42,29 +42,24 @@ static void check_tagged(const char *file, const char *container, const char *co
     CHECK(au_media_tag(info, "date") && strncmp(au_media_tag(info, "date"), "2024", 4) == 0);
     CHECK(au_media_tag(info, "no_such_tag") == NULL);
 
-    int n, total;
-    au_media_track_number(info, &n, &total);
-    CHECK(n == 3 && total == 12);
-    au_media_disc_number(info, &n, &total);
-    CHECK(n == 1 && total == 2);
+    CHECK(info->track_number == 3 && info->track_total == 12);
+    CHECK(info->disc_number == 1 && info->disc_total == 2);
 
-    const AuReplayGainInfo rg = au_media_replaygain(info);
-    CHECK(rg.has_track_gain && fabs(rg.track_gain_db + 6.0) < 1e-9);
-    CHECK(rg.has_track_peak && fabs(rg.track_peak - 0.125) < 1e-9);
-    CHECK(rg.has_album_gain && fabs(rg.album_gain_db + 3.0) < 1e-9);
-    CHECK(rg.has_album_peak && fabs(rg.album_peak - 0.2) < 1e-9);
+    const AuReplayGain rg = info->replaygain;
+    CHECK(!isnan(rg.track_gain_db) && fabs(rg.track_gain_db + 6.0) < 1e-6);
+    CHECK(!isnan(rg.track_peak) && fabs(rg.track_peak - 0.125) < 1e-6);
+    CHECK(!isnan(rg.album_gain_db) && fabs(rg.album_gain_db + 3.0) < 1e-6);
+    CHECK(!isnan(rg.album_peak) && fabs(rg.album_peak - 0.2) < 1e-6);
     CHECK(!rg.from_r128);
 
-    // Every tag is reachable through the iterator
+    // Every tag is in the array
     int found_title = 0;
-    for (int i = 0; i < au_media_tag_count(info); i++) {
-        const char *k = NULL, *v = NULL;
-        CHECK(au_media_tag_at(info, i, &k, &v));
-        if (k && v && strcmp(v, "Test Song") == 0) found_title++;
+    for (int i = 0; i < info->tag_count; i++) {
+        CHECK(info->tags[i].key && info->tags[i].value);
+        if (strcmp(info->tags[i].value, "Test Song") == 0) found_title++;
     }
     CHECK(found_title == 1);
-    CHECK(!au_media_tag_at(info, au_media_tag_count(info), NULL, NULL));
-    au_media_info_free(info);
+    au_media_info_release(info);
 }
 
 static void test_probe_flac(void) { check_tagged("rg_tagged.flac", "flac", "flac", 16); }
@@ -72,27 +67,25 @@ static void test_probe_flac(void) { check_tagged("rg_tagged.flac", "flac", "flac
 static void test_probe_mp3(void) { check_tagged("rg_tagged.mp3", "mp3", "mp3", 0); }
 
 static void test_probe_r128(void) {
-    AuMediaInfo *info = au_probe(fx("rg_r128.opus"), NULL);
+    const AuMediaInfo *info = au_probe(fx("rg_r128.opus"), NULL);
     REQUIRE(info);
-    CHECK(strcmp(au_media_codec(info), "opus") == 0);
+    CHECK(strcmp(info->codec, "opus") == 0);
     CHECK_TAG(info, "title", "Opus Song");
-    const AuReplayGainInfo rg = au_media_replaygain(info);
+    const AuReplayGain rg = info->replaygain;
     // -2816 / 256 = -11 dB relative to -23 LUFS = -6 dB relative to ReplayGain's -18 LUFS
-    CHECK(rg.has_track_gain && fabs(rg.track_gain_db + 6.0) < 1e-9);
+    CHECK(!isnan(rg.track_gain_db) && fabs(rg.track_gain_db + 6.0) < 1e-6);
     CHECK(rg.from_r128);
-    CHECK(!rg.has_album_gain && !rg.has_track_peak);
-    au_media_info_free(info);
+    CHECK(isnan(rg.album_gain_db) && isnan(rg.track_peak));
+    au_media_info_release(info);
 }
 
 static void test_probe_untagged_and_bad(void) {
-    AuMediaInfo *info = au_probe(fx("rg_untagged.flac"), NULL);
+    const AuMediaInfo *info = au_probe(fx("rg_untagged.flac"), NULL);
     REQUIRE(info);
-    const AuReplayGainInfo rg = au_media_replaygain(info);
-    CHECK(!rg.has_track_gain && !rg.has_album_gain && !rg.has_track_peak && !rg.has_album_peak);
-    int n = -1, total = -1;
-    au_media_track_number(info, &n, &total);
-    CHECK(n == 0 && total == 0);
-    au_media_info_free(info);
+    const AuReplayGain rg = info->replaygain;
+    CHECK(isnan(rg.track_gain_db) && isnan(rg.album_gain_db) && isnan(rg.track_peak) && isnan(rg.album_peak));
+    CHECK(info->track_number == 0 && info->track_total == 0);
+    au_media_info_release(info);
 
     int err = 0;
     CHECK(au_probe(fx("text.mp3"), &err) == NULL && err != AU_OK);
@@ -102,8 +95,7 @@ static void test_probe_untagged_and_bad(void) {
 
     // NULL info is harmless everywhere
     CHECK(au_media_tag(NULL, "title") == NULL);
-    CHECK(au_media_duration(NULL) < 0);
-    au_media_info_free(NULL);
+    au_media_info_release(NULL);
 }
 
 static void test_track_info_while_playing(void) {
@@ -115,16 +107,20 @@ static void test_track_info_while_playing(void) {
     CHECK(e.opened_with_info == 1 && fabs(e.opened_duration - 3.0) < 0.06);
     CHECK(TC_WAIT_FIELD(started, 1, 5000));              // handle 0 is the audible track
 
-    AuMediaInfo *info = au_track_info(0);
+    const AuMediaInfo *info = au_track_info(0);
     CHECK(info != NULL);
     if (info) {
         CHECK_TAG(info, "title", "Test Song");
-        CHECK(fabs(au_media_duration(info) - 3.0) < 0.06);
-        au_media_info_free(info);
+        CHECK(fabs(info->duration - 3.0) < 0.06);
+        au_media_info_release(info);
     }
     info = au_track_info(h);
     CHECK(info != NULL);
-    au_media_info_free(info);
+    const AuMediaInfo *same = au_track_info(h);   // the player's own block, shared: no copy
+    CHECK(same == info);
+    au_media_info_release(same);
+    const AuMediaInfo *kept = au_track_info(h);   // outlives the player (checked after au_shutdown())
+    au_media_info_release(info);
     CHECK(au_track_info(h + 1000) == NULL);
 
     double gain = 99;
@@ -144,6 +140,9 @@ static void test_track_info_while_playing(void) {
     CHECK(au_track_gain_db(h, &gain) == AU_ERR_NOTHING_TO_DO);
     au_shutdown();
     CHECK(au_track_info(0) == NULL && au_track_gain_db(0, &gain) == AU_ERR_NOT_INITIALIZED);
+    CHECK(kept && strstr(kept->path, "rg_long.flac") && kept->tag_count > 0);
+    CHECK_TAG(kept, "title", "Test Song");
+    au_media_info_release(kept);
 }
 
 /* ---------- non-audio data must fail without running video decoders ---------- */

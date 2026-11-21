@@ -71,12 +71,12 @@ static void test_play_and_probe(void) {
     CHECK(!strncmp(ua, "ffaudio/", 8));
 
     int err = 0;
-    AuMediaInfo *info = au_probe(url("/files/long_6s.flac"), &err);
+    const AuMediaInfo *info = au_probe(url("/files/long_6s.flac"), &err);
     CHECK(info != NULL);
     if (info) {
-        CHECK(fabs(au_media_duration(info) - 6.0) < 0.1);
-        CHECK(!strcmp(au_media_codec(info), "flac"));
-        au_media_info_free(info);
+        CHECK(fabs(info->duration - 6.0) < 0.1);
+        CHECK(!strcmp(info->codec, "flac"));
+        au_media_info_release(info);
     }
     // Other formats over HTTP
     play_and_wait(url("/files/s48_stereo.mp3"), NULL, 2, 6000);
@@ -202,8 +202,8 @@ static void test_no_measuring_by_default(void) {
     CHECK(au_set_network(&measure) == AU_OK);
     CHECK(au_gain_cache_request(paths, 1, AU_SCAN_URGENT) == 1);
     for (int i = 0; i < 300 && au_gain_cache_pending() > 0; i++) tc_sleep_ms(20);
-    AuReplayGainInfo rg;
-    CHECK(au_gain_cache_get(paths[0], &rg) && rg.has_track_gain);
+    AuReplayGain rg;
+    CHECK(au_gain_cache_get(paths[0], &rg) && !isnan(rg.track_gain_db));
     CHECK(au_set_network(NULL) == AU_OK);
     au_gain_scan_stop();
     au_gain_cache_set_file("");
@@ -220,9 +220,9 @@ static void test_live_stream(void) {
     CHECK(TC_WAIT_FIELD(started, 1, 8000));
     tc_sleep_ms(1500);
     CHECK(tc_status().duration < 0);
-    AuMediaInfo *info = au_track_info(0);
-    CHECK(info && au_media_is_live(info) && !au_media_is_seekable(info));
-    au_media_info_free(info);
+    const AuMediaInfo *info = au_track_info(0);
+    CHECK(info && info->live && !info->seekable);
+    au_media_info_release(info);
 
     const double before = tc_status().position;
     au_seek(60.0);                              // ignored: it is live
@@ -322,14 +322,14 @@ static void test_icy_now_playing(void) {
     for (int i = 0; i < 3 && i < e.meta_count; i++)
         CHECK(e.meta_pos[i] > starts[i] - 0.3 && e.meta_pos[i] < starts[i] + 1.0);              // heard, not read
 
-    AuMediaInfo *info = au_track_info(0);
+    const AuMediaInfo *info = au_track_info(0);
     CHECK(info != NULL);
     if (info) {
         const char *station = au_media_tag(info, "icy-name"), *title = au_media_tag(info, "title");
         printf("   track info: station \"%s\", title \"%s\"\n", station ? station : "", title ? title : "");
         CHECK(station && !strcmp(station, "Test Radio"));
         CHECK(title && e.meta_count <= 8 && !strcmp(title, e.meta_title[e.meta_count - 1]));
-        au_media_info_free(info);
+        au_media_info_release(info);
     }
     au_stop();
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
@@ -373,7 +373,7 @@ static void test_failed_measurement_ends_wait(void) {
     CHECK(au_gain_cache_set_file(cache) == AU_OK);
     const AuNetworkConfig measure = { .measure_streams = true };
     CHECK(au_set_network(&measure) == AU_OK);
-    const AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK, .measure_missing = true, .measure_wait_ms = 8000 };
+    const AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK, .measure_missing = true, .measure_wait_seconds = 8 };
     CHECK(au_set_replaygain(&rg) == AU_OK);
 
     const uint32_t t0 = SDL_GetTicks();
@@ -400,9 +400,9 @@ static void test_no_analysis_of_live_streams(void) {
     printf("   refused after %u ms\n", SDL_GetTicks() - t0);
     CHECK(SDL_GetTicks() - t0 < 5000);
     int err = 0;
-    AuMediaInfo *info = au_probe(url("/live/live.mp3"), &err);   // probing is fine
-    CHECK(info && au_media_is_live(info));
-    au_media_info_free(info);
+    const AuMediaInfo *info = au_probe(url("/live/live.mp3"), &err);   // probing is fine
+    CHECK(info && info->live);
+    au_media_info_release(info);
 }
 
 static void test_ogg_now_playing(void) {

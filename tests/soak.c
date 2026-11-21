@@ -232,11 +232,11 @@ static void on_started(int32_t handle, void *ud) {
     atomic_fetch_add(&n_started, 1);
     atomic_store(&last_started_at, elapsed_s());
     // An application looks at the track's details when it starts
-    AuMediaInfo *info = au_track_info(handle);
+    const AuMediaInfo *info = au_track_info(handle);
     if (info) {
         const char *k, *v;
-        for (int i = 0; au_media_tag_at(info, i, &k, &v); i++) {}
-        au_media_info_free(info);
+        for (int i = 0; i < info->tag_count; i++) { k = info->tags[i].key; v = info->tags[i].value; }
+        au_media_info_release(info);
     }
 }
 
@@ -263,7 +263,7 @@ static void on_stream_metadata(int32_t handle, const char *title, const char *ar
     atomic_fetch_add(&n_titles, 1);
 }
 
-static void on_cached(const char *path, int result, const AuReplayGainInfo *rg, void *user) {
+static void on_cached(const char *path, int result, const AuReplayGain *rg, void *user) {
     (void)path; (void)rg; (void)user;
     if (result == AU_OK) atomic_fetch_add(&n_cached, 1);
 }
@@ -300,7 +300,7 @@ static void random_replaygain(void) {
         .fallback_gain_db = chance(0.5) ? 0 : -6,
         .prevent_clipping = chance(0.5),
         .measure_missing = chance(0.5),
-        .measure_wait_ms = chance(0.5) ? 0 : rnd_int(1500),
+        .measure_wait_seconds = chance(0.5) ? 0 : rnd_int(1500) / 1000.0,
     };
     au_set_replaygain(&rg);
 }
@@ -378,7 +378,8 @@ static void random_command(void) {
 static void play_random(const bool queue) {
     static const char *track_filters[] = { "volume=0.8", "atempo=1.05", "highpass=f=40", "aecho=0.8:0.5:40:0.2" };
     const AuFade fade = random_fade(2);
-    const AuReplayGainInfo rg = { .has_track_gain = true, .track_gain_db = rnd_real(-12, 3) };
+    AuReplayGain rg = AU_REPLAYGAIN_NONE;
+    rg.track_gain_db = (float)rnd_real(-12, 3);
     const AuPlayConfig cfg = {
         .start_seconds = chance(0.2) ? rnd_real(0, 400) : 0,  // sometimes past the end
         .length_seconds = chance(0.15) ? rnd_real(1, 60) : 0,
@@ -447,8 +448,8 @@ static void *analysis_thread(void *arg) {
         const char *f = pick_file();
         if (chance(0.5)) {
             int err;
-            AuMediaInfo *info = au_probe(f, &err);
-            au_media_info_free(info);
+            const AuMediaInfo *info = au_probe(f, &err);
+            au_media_info_release(info);
             atomic_fetch_add(&n_probes, 1);
         }
         else {
@@ -640,8 +641,8 @@ static void one_action(void) {
     }
     else if (r < 860) {
         ACTION("track_info");
-        AuMediaInfo *info = au_track_info(0);
-        au_media_info_free(info);
+        const AuMediaInfo *info = au_track_info(0);
+        au_media_info_release(info);
         double g;
         au_track_gain_db(0, &g);
         (void)status();

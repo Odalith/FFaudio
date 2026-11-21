@@ -236,7 +236,7 @@ static void pub_remove(AudioPlayer *ap, const int32_t handle) {
     SDL_LockMutex(ap->pub_mutex);
     TrackPub *p = pub_find(ap, handle);
     if (p) {
-        au_media_info_free(p->info);
+        au_media_info_release(p->info);
         *p = ap->pubs[--ap->n_pubs];
     }
     SDL_UnlockMutex(ap->pub_mutex);
@@ -244,24 +244,24 @@ static void pub_remove(AudioPlayer *ap, const int32_t handle) {
 
 static void pub_clear(AudioPlayer *ap) {
     SDL_LockMutex(ap->pub_mutex);
-    for (int i = 0; i < ap->n_pubs; i++) au_media_info_free(ap->pubs[i].info);
+    for (int i = 0; i < ap->n_pubs; i++) au_media_info_release(ap->pubs[i].info);
     ap->n_pubs = 0;
     SDL_UnlockMutex(ap->pub_mutex);
 }
 
 void ff_publish_info(AudioPlayer *ap, const int32_t handle, const AuMediaInfo *info) {
-    AuMediaInfo *copy = media_info_copy(info); // outside the lock
+    const AuMediaInfo *ref = media_info_retain(info);
     SDL_LockMutex(ap->pub_mutex);
     TrackPub *p = pub_find(ap, handle);
-    AuMediaInfo *old = NULL;
+    const AuMediaInfo *old = NULL;
     if (p) {
         old = p->info;
-        p->info = copy;
-        copy = NULL;
+        p->info = ref;
+        ref = NULL;
     }
     SDL_UnlockMutex(ap->pub_mutex);
-    au_media_info_free(old);
-    au_media_info_free(copy);
+    au_media_info_release(old);
+    au_media_info_release(ref);
 }
 
 void ff_publish_gain(AudioPlayer *ap, const int32_t handle, const double gain_db) {
@@ -756,7 +756,7 @@ static void handle_track_msg(AudioPlayer *ap, const Msg *msg) {
             SDL_LockMutex(t->seek_mutex);
             const AuEvent opened = { .type = AU_EVENT_TRACK_OPENED, .handle = t->handle,
                                      .data.opened = { track_duration(t), t->live,
-                                                      t->info ? au_media_is_seekable(t->info) : false } };
+                                                      t->info ? t->info->seekable : false } };
             SDL_UnlockMutex(t->seek_mutex);
             note_add(opened);
             report_duration(t);
@@ -1515,7 +1515,7 @@ int au_set_replaygain(const AuReplayGainConfig *config) {
         if (!isfinite(cfg.preamp_db) || cfg.preamp_db < -15 || cfg.preamp_db > 15) return AU_ERR_INVALID_ARGUMENT;
         if (!isfinite(cfg.fallback_gain_db) || cfg.fallback_gain_db < -30 || cfg.fallback_gain_db > 15)
             return AU_ERR_INVALID_ARGUMENT;
-        if (cfg.measure_wait_ms > 10000) return AU_ERR_INVALID_ARGUMENT;
+        if (isnan(cfg.measure_wait_seconds) || cfg.measure_wait_seconds > 10) return AU_ERR_INVALID_ARGUMENT;
     }
     SDL_AtomicIncRef(&ap->request_count);
     Msg *m = msg_new(CMD_SET_REPLAYGAIN);
@@ -1536,14 +1536,14 @@ static TrackPub *pub_for(AudioPlayer *ap, int32_t handle) {
     return pub_find(ap, handle);
 }
 
-AuMediaInfo *au_track_info(const int32_t handle) {
+const AuMediaInfo *au_track_info(const int32_t handle) {
     AudioPlayer *ap = audio_player;
     if (!ap || handle < 0) return NULL;
     SDL_LockMutex(ap->pub_mutex);
     const TrackPub *p = pub_for(ap, handle);
-    AuMediaInfo *copy = p && p->info ? media_info_copy(p->info) : NULL;
+    const AuMediaInfo *ref = p ? media_info_retain(p->info) : NULL;
     SDL_UnlockMutex(ap->pub_mutex);
-    return copy;
+    return ref;
 }
 
 int au_track_gain_db(const int32_t handle, double *out_db) {

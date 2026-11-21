@@ -24,6 +24,7 @@
 
 #include <sys/stat.h>
 
+#include <math.h>
 #include "gain_cache.h"
 #include "once.h"
 #include "numbers.h"
@@ -321,7 +322,7 @@ static bool keep_going(double fraction, void *user) {
     return !interrupted(user);
 }
 
-static void notify(const AuGainScanConfig *cfg, const char *path, const int result, const AuReplayGainInfo *rg) {
+static void notify(const AuGainScanConfig *cfg, const char *path, const int result, const AuReplayGain *rg) {
     if (result != AU_OK) gain_cache_note_failure(path); // a player waiting for this value stops waiting
     if (cfg->on_cached) cfg->on_cached(path, result, rg, cfg->user);
 }
@@ -349,7 +350,7 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
             au_loudness_scanner_reset(one);
             const int ret = au_loudness_scan_file(one, path, &l);
             if (ret == AU_OK) {
-                const AuReplayGainInfo rg = au_loudness_to_replaygain(&l, NULL);
+                const AuReplayGain rg = au_loudness_to_replaygain(&l, NULL);
                 au_gain_cache_set(path, &rg);
                 notify(cfg, path, AU_OK, &rg);
             }
@@ -384,7 +385,7 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
             notify(cfg, job->paths[i], results[i], NULL);
             continue;
         }
-        const AuReplayGainInfo rg = au_loudness_to_replaygain(&tracks[i], have_album ? &album : NULL);
+        const AuReplayGain rg = au_loudness_to_replaygain(&tracks[i], have_album ? &album : NULL);
         au_gain_cache_set(job->paths[i], &rg);
         notify(cfg, job->paths[i], AU_OK, &rg);
     }
@@ -451,8 +452,8 @@ static int request(const char *const *paths, const int count, const bool urgent,
     if (album) {
         bool all_done = true;
         for (int i = 0; i < count && all_done; i++) {
-            AuReplayGainInfo rg;
-            all_done = paths[i] && au_gain_cache_get(paths[i], &rg) && rg.has_album_gain;
+            AuReplayGain rg;
+            all_done = paths[i] && au_gain_cache_get(paths[i], &rg) && !isnan(rg.album_gain_db);
         }
         if (all_done) return 0;
     }

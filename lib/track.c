@@ -183,7 +183,7 @@ static void check_stream_metadata(TrackState *t, AVFormatContext *ic, const AVPa
 }
 
 // Station details from the ICY response headers ("icy-name: ...") into the track's tags
-static bool add_icy_headers(AVFormatContext *ic, AuMediaInfo *info) {
+static bool add_icy_headers(AVFormatContext *ic, MediaDraft *info) {
     uint8_t *headers = NULL;
     bool icy_on = false;
     if (!ic->pb || av_opt_get(ic->pb, "icy_metadata_headers", AV_OPT_SEARCH_CHILDREN, &headers) < 0 || !headers)
@@ -405,7 +405,7 @@ void track_destroy(TrackState *t) {
     SDL_DestroyCond(t->continue_read_thread);
     SDL_DestroyMutex(t->wait_mutex);
     SDL_DestroyMutex(t->seek_mutex);
-    au_media_info_free(t->info);
+    au_media_info_release(t->info);
     av_free(t->filename);
     av_free(t->filtergraph_str);
     av_free(t->http_headers);
@@ -452,14 +452,14 @@ void track_update_gain(TrackState *t, const bool late) {
     SDL_LockMutex(t->seek_mutex);
     const bool known = t->info || t->has_replaygain_override;
     const bool has_override = t->has_replaygain_override;
-    AuReplayGainInfo rg;
+    AuReplayGain rg = AU_REPLAYGAIN_NONE;
     if (has_override) rg = t->replaygain_override;
-    else rg = au_media_replaygain(t->info);
+    else if (t->info) rg = t->info->replaygain;   // not open yet: none
     SDL_UnlockMutex(t->seek_mutex);
 
     if (!known) return; // not open yet: the read thread calls this again once the tags are known
     if (!has_override) {
-        AuReplayGainInfo cached;
+        AuReplayGain cached;
         if (gain_cache_lookup(t->filename, &cached)) rg = cached;
     }
     const double db = replaygain_gain_db(&cfg, &rg);
@@ -467,7 +467,7 @@ void track_update_gain(TrackState *t, const bool late) {
     ff_publish_gain(ap, t->handle, gain_centi_db(SDL_AtomicGet(&t->gain_mb)) / 100.0);
 }
 
-#define DEFAULT_MEASURE_WAIT_MS 500
+#define DEFAULT_MEASURE_WAIT_SECONDS 0.5
 
 // Read thread, before the decoder starts: a track without any ReplayGain value gets an urgent measurement
 // (AuReplayGainConfig.measure_missing) and waits for it a little, so it can start at the right level
@@ -479,14 +479,14 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
 
     if (cfg.mode == AU_REPLAYGAIN_OFF || !cfg.measure_missing || t->has_replaygain_override) return;
     if (au_is_network_url(t->filename) && !network_config(NULL, 0).measure_streams) return; // a download
-    const AuReplayGainInfo tags = au_media_replaygain(info);
-    if (tags.has_track_gain || tags.has_album_gain) return;
+    if (info && (!isnan(info->replaygain.track_gain_db) || !isnan(info->replaygain.album_gain_db))) return;
     if (gain_cache_lookup(t->filename, NULL)) return;
 
     const unsigned failures = gain_cache_failure_mark();
     if (!gain_scan_request_for_player(t->filename)) return; // could not be measured before
-    const int wait_ms = cfg.measure_wait_ms == 0 ? DEFAULT_MEASURE_WAIT_MS : cfg.measure_wait_ms;
-    if (wait_ms <= 0) return;
+    const double wait = cfg.measure_wait_seconds == 0 ? DEFAULT_MEASURE_WAIT_SECONDS : cfg.measure_wait_seconds;
+    if (!(wait > 0)) return;
+    const int wait_ms = (int)lrint(wait * 1000);
     switch (gain_cache_wait(t->filename, wait_ms, &t->abort_request, failures)) {
         case GAIN_WAIT_TIMEOUT:
             ff_log(AU_LOG_INFO, "'%s' starts before its loudness is measured; the gain follows when it is ready",
@@ -838,8 +838,13 @@ static int open_track(TrackState *t) {
 
     // Tags and the ReplayGain gain are ready before the decoder starts, so the first sample is already
     // at the right level
-    AuMediaInfo *info = media_info_from_context(ic, st_index, t->filename);
-    if (info && t->network) t->icy = add_icy_headers(ic, info);
+    MediaDraft draft;
+    const AuMediaInfo *info = NULL;
+    if (media_draft_from_context(&draft, ic, st_index, t->filename) >= 0) {
+        if (t->network) t->icy = add_icy_headers(ic, &draft);
+        info = media_info_freeze(&draft);
+        media_draft_free(&draft);
+    }
     ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
     ic->streams[st_index]->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
     SDL_LockMutex(t->seek_mutex);
@@ -1387,10 +1392,12 @@ StreamMeta *track_take_stream_meta(TrackState *t, const double position) {
     if (m && m->position <= position + 0.05) {
         t->stream_meta = m->next;
         m->next = NULL;
-        if (t->info) {
-            av_dict_set(&t->info->tags, "title", m->title, 0);
-            av_dict_set(&t->info->tags, "artist", m->artist, 0);   // NULL removes it
-            ff_publish_info(t->ap, t->handle, t->info);
+        // A new block: readers may hold the old one
+        const AuMediaInfo *now = media_info_with_title(t->info, m->title, m->artist);
+        if (now) {
+            au_media_info_release(t->info);
+            t->info = now;
+            ff_publish_info(t->ap, t->handle, now);
         }
     }
     else {

@@ -15,7 +15,7 @@ static int done_result[MAX_DONE];
 static SDL_threadID done_thread[MAX_DONE];   // the worker that reported it
 static int done_n = 0;
 
-static void on_cached(const char *path, int result, const AuReplayGainInfo *rg, void *user) {
+static void on_cached(const char *path, int result, const AuReplayGain *rg, void *user) {
     (void)user;
     SDL_LockMutex(done_lock);
     if (done_n < MAX_DONE) {
@@ -82,7 +82,7 @@ static void test_request(void) {
     CHECK(wait_idle(10000));
     CHECK(done_count() == 3);
     for (int i = 0; i < 3; i++) {
-        AuReplayGainInfo rg;
+        AuReplayGain rg;
         CHECK(au_gain_cache_get(paths[i], &rg) && fabs(rg.track_gain_db - 5.0) < 0.1);
     }
     CHECK(done_result[0] == AU_OK && done_result[1] == AU_OK && done_result[2] == AU_OK);
@@ -159,12 +159,12 @@ static void test_album(void) {
     const char *album[2] = { fx("ld_m23_48k.flac"), fx("ld_m33_48k.flac") };
     CHECK(au_gain_cache_request_album(album, 2, AU_SCAN_PREFETCH) == 2);
     CHECK(wait_idle(10000));
-    AuReplayGainInfo a, b;
+    AuReplayGain a, b;
     CHECK(au_gain_cache_get(album[0], &a) && au_gain_cache_get(album[1], &b));
     CHECK(fabs(a.track_gain_db - 5.0) < 0.1 && fabs(b.track_gain_db - 15.0) < 0.1);
     // Album loudness over both tracks: -25.6 LUFS -> +7.6 dB
-    CHECK(a.has_album_gain && fabs(a.album_gain_db - 7.6) < 0.1);
-    CHECK(b.has_album_gain && a.album_gain_db == b.album_gain_db);
+    CHECK(!isnan(a.album_gain_db) && fabs(a.album_gain_db - 7.6) < 0.1);
+    CHECK(!isnan(b.album_gain_db) && a.album_gain_db == b.album_gain_db);
     CHECK(au_gain_cache_request_album(album, 2, AU_SCAN_PREFETCH) == 0); // album values present: skipped
 }
 
@@ -277,7 +277,7 @@ static void test_player_measures_missing(void) {
 
     // No waiting: starts at the fallback gain, the measured value follows
     au_gain_cache_remove(fresh);
-    rg.measure_wait_ms = -1;
+    rg.measure_wait_seconds = -1;
     CHECK(au_set_replaygain(&rg) == AU_OK);
     tc_sleep_ms(50);
     h = au_play(fresh, NULL);
@@ -308,7 +308,7 @@ static void test_player_measures_missing(void) {
     tc_sleep_ms(200);
     CHECK(!au_gain_cache_get(fx("rg_untagged.flac"), NULL));
 
-    const AuReplayGainConfig too_long = { .mode = AU_REPLAYGAIN_TRACK, .measure_wait_ms = 20000 };
+    const AuReplayGainConfig too_long = { .mode = AU_REPLAYGAIN_TRACK, .measure_wait_seconds = 20 };
     CHECK(au_set_replaygain(&too_long) == AU_ERR_INVALID_ARGUMENT);
 
     au_stop();

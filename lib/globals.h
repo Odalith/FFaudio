@@ -172,9 +172,9 @@ typedef struct TrackState {
     AuFade fade_in_override;            // only used when has_fade_in_override
     FadeCurve fade_in_curve;            // its curve, sampled when the track is created
     bool has_fade_in_override;
-    AuReplayGainInfo replaygain_override;   // only used when has_replaygain_override
+    AuReplayGain replaygain_override;   // only used when has_replaygain_override
     bool has_replaygain_override;
-    AuMediaInfo *info;                  // written by the read thread under seek_mutex before `opened` is set
+    const AuMediaInfo *info;            // a reference; replaced (never changed) under seek_mutex
 
     // ReplayGain: target gain (any thread, see gain_pack()), ramped in the mixer
     SDL_atomic_t gain_mb;
@@ -400,7 +400,7 @@ typedef struct Msg {
     bool has_fade_in_override;
     AuCrossfade crossfade;
     AuReplayGainConfig replaygain;
-    AuReplayGainInfo replaygain_override;
+    AuReplayGain replaygain_override;
     bool has_replaygain_override;
     int64_t i64;
     double d;
@@ -446,7 +446,7 @@ typedef struct TrackPub {
     int32_t handle;
     bool gain_known;                // the gain below is the one in use
     double gain_db;
-    AuMediaInfo *info;              // own copy, NULL until the track is open
+    const AuMediaInfo *info;        // a reference, NULL until the track is open
 } TrackPub;
 
 typedef struct AudioPlayer {

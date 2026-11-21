@@ -703,20 +703,15 @@ int au_loudness_analyze(const char *filename, const AuLoudnessConfig *config, Au
     return ret;
 }
 
-AuReplayGainInfo au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album) {
-    AuReplayGainInfo rg;
-    memset(&rg, 0, sizeof(rg));
+AuReplayGain au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album) {
+    AuReplayGain rg = AU_REPLAYGAIN_NONE;
     if (track && !track->silent) {
-        rg.has_track_gain = true;
-        rg.track_gain_db = track->replaygain_gain_db;
-        rg.has_track_peak = track->true_peak > 0;
-        rg.track_peak = track->true_peak;
+        rg.track_gain_db = (float)track->replaygain_gain_db;
+        if (track->true_peak > 0) rg.track_peak = (float)track->true_peak;
     }
     if (album && !album->silent) {
-        rg.has_album_gain = true;
-        rg.album_gain_db = album->replaygain_gain_db;
-        rg.has_album_peak = album->true_peak > 0;
-        rg.album_peak = album->true_peak;
+        rg.album_gain_db = (float)album->replaygain_gain_db;
+        if (album->true_peak > 0) rg.album_peak = (float)album->true_peak;
     }
     return rg;
 }

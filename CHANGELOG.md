@@ -31,6 +31,16 @@ The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.
   `au_get_track_info()` and `au_get_track_gain_db()`) read what the track has published instead of asking the control
   thread; they know a track from `AU_EVENT_TRACK_OPENED` (new: its duration and whether it is live or seekable) until
   `AU_EVENT_TRACK_ENDED`. Calling the API from `on_event` is therefore always safe and never blocks the player.
+- `AuMediaInfo` is a struct to read directly (path, container, codec, layout, duration, rates, live/seekable,
+  track/disc numbers and totals, ReplayGain values, and a `tags` array): one immutable allocation with every string
+  in it, shared by reference. `au_probe()` and `au_track_info()` return `const AuMediaInfo *`, released with
+  `au_media_info_release()`; `au_track_info()` no longer copies anything, and a stream's "now playing" change makes
+  a new block, so one in hand never changes. `au_media_tag()` (with its aliases) stays; the 16 other `au_media_*()`
+  getters and `au_media_info_free()` are gone.
+- `AuReplayGain` (four floats, NAN = missing, 20 bytes) replaces `AuReplayGainInfo` (doubles and `has_*` flags, 72
+  bytes) everywhere: `AuPlayConfig.replaygain`, the ReplayGain cache, the background scan and
+  `au_loudness_to_replaygain()`. `AU_REPLAYGAIN_NONE` is the value with nothing set. The cache file's format is
+  unchanged. `AuReplayGainConfig.measure_wait_seconds` replaces `measure_wait_ms`.
 
 ### Fixed
 - In applications with a comma-decimal locale (`LC_NUMERIC` such as de_DE or fr_FR, which GTK applications set from

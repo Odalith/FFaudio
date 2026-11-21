@@ -86,8 +86,8 @@ static void test_silence(void) {
     AuLoudness l = analyze("ld_silence.flac");
     CHECK(l.silent);
     CHECK(l.replaygain_gain_db == 0 && l.r128_gain_q78 == 0);
-    const AuReplayGainInfo rg = au_loudness_to_replaygain(&l, NULL);
-    CHECK(!rg.has_track_gain);
+    const AuReplayGain rg = au_loudness_to_replaygain(&l, NULL);
+    CHECK(isnan(rg.track_gain_db));
 }
 
 static void test_album(void) {
@@ -109,11 +109,11 @@ static void test_album(void) {
     CHECK_NEAR(album.duration, 20.0, 0.02);
     CHECK(album.true_peak == fmax(a.true_peak, b.true_peak));
 
-    const AuReplayGainInfo rg = au_loudness_to_replaygain(&b, &album);
-    CHECK(rg.has_track_gain && rg.has_album_gain && rg.has_track_peak && rg.has_album_peak);
-    CHECK_NEAR(rg.track_gain_db, b.replaygain_gain_db, 1e-9);
-    CHECK_NEAR(rg.album_gain_db, -18.0 - album.integrated_lufs, 1e-9);
-    CHECK_NEAR(rg.track_peak, b.true_peak, 1e-12);
+    const AuReplayGain rg = au_loudness_to_replaygain(&b, &album);
+    CHECK(!isnan(rg.track_gain_db) && !isnan(rg.album_gain_db) && !isnan(rg.track_peak) && !isnan(rg.album_peak));
+    CHECK_NEAR(rg.track_gain_db, b.replaygain_gain_db, 1e-5);   // floats
+    CHECK_NEAR(rg.album_gain_db, -18.0 - album.integrated_lufs, 1e-5);
+    CHECK_NEAR(rg.track_peak, b.true_peak, 1e-6);
 
     au_loudness_scanner_reset(s);
     CHECK(au_loudness_track_count(s) == 0);

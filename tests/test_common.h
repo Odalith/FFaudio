@@ -189,14 +189,14 @@ static void tc_event_cb(const AuEvent *e, void *ud) {
             tc_bump(&tc_ev.devices_changed);
             break;
         case AU_EVENT_TRACK_OPENED: {
-            AuMediaInfo *info = au_track_info(e->handle);   // the event promises it is there now
+            const AuMediaInfo *info = au_track_info(e->handle);   // the event promises it is there now
             SDL_LockMutex(tc_mutex);
             tc_ev.opened++;
             if (info) tc_ev.opened_with_info++;
             tc_ev.opened_duration = e->data.opened.duration;
             SDL_CondBroadcast(tc_cond);
             SDL_UnlockMutex(tc_mutex);
-            au_media_info_free(info);
+            au_media_info_release(info);
             break;
         }
         case AU_EVENT_DEVICE:

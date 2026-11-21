@@ -543,7 +543,7 @@ static void test_multichannel_routing(void) {
 /* ---------- ReplayGain ---------- */
 
 // Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
-static float replaygain_level(const char *file, const AuReplayGainConfig *cfg, const AuReplayGainInfo *override) {
+static float replaygain_level(const char *file, const AuReplayGainConfig *cfg, const AuReplayGain *override) {
     start_capture("replaygain");
     au_set_volume(1.0f);
     if (cfg) CHECK(au_set_replaygain(cfg) == AU_OK);
@@ -584,7 +584,8 @@ static void test_replaygain_levels(void) {
     CHECK_LEVEL(replaygain_level("rg_hot.flac", &safe, NULL), SINE_DB + 6.02f, 0.1f);
 
     // Values from the application instead of the tags
-    const AuReplayGainInfo mine = { .has_track_gain = true, .track_gain_db = -10 };
+    AuReplayGain mine = AU_REPLAYGAIN_NONE;
+    mine.track_gain_db = -10;
     CHECK_LEVEL(replaygain_level("rg_untagged.flac", &track, &mine), SINE_DB - 10, 0.1f);
     CHECK_LEVEL(replaygain_level("rg_tagged.flac", &track, &mine), SINE_DB - 10, 0.1f);   // override wins
 }
@@ -618,7 +619,8 @@ static void test_gain_change_after_unchanged_late_value(void) {
     CHECK(au_set_replaygain(&cfg) == AU_OK);
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(800);
-    const AuReplayGainInfo same = { .has_track_gain = true, .track_gain_db = 0 };
+    AuReplayGain same = AU_REPLAYGAIN_NONE;
+    same.track_gain_db = 0;
     CHECK(au_gain_cache_set(fx("long_6s.flac"), &same) == AU_OK);
     tc_sleep_ms(300);
     const AuReplayGainConfig quieter = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = -6 };

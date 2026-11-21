@@ -31,7 +31,7 @@
  *   for (int i = 0; i < n; i++)
  *       au_loudness_scan_file(s, files[i], &track[i]);
  *   au_loudness_album(s, &album);
- *   AuReplayGainInfo rg = au_loudness_to_replaygain(&track[0], &album);  // store, then use for playback
+ *   AuReplayGain rg = au_loudness_to_replaygain(&track[0], &album);  // store, then use for playback
  *   au_loudness_scanner_free(s);
  */
 
@@ -96,14 +96,14 @@ extern "C" {
 
     // ReplayGain values for AuPlayConfig.replaygain. album may be NULL. Peaks are the true peaks
     // (the sample peaks when true peak was skipped). Silent results give no gain.
-    DLL_EXPORT AuReplayGainInfo au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album);
+    DLL_EXPORT AuReplayGain au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album);
 
     // The ReplayGain cache entry for `path` (see au_gain_cache_set() in ffaudio.h): returned straight away when
     // cached, otherwise the file is measured (track values only; it blocks for the scan, typically well under a
     // second per song) and the result is stored, which also updates the track if it is already queued or playing.
     // out may be NULL. Returns AU_OK or an error from au_loudness_analyze(); nothing is stored on error.
     // Avoid calling it from player callbacks: they run on the player's control thread, which would be held up.
-    DLL_EXPORT int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGainInfo *out);
+    DLL_EXPORT int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGain *out);
 
     //+-----------------------------------------------------+
     //| Background measurement queue                        |
@@ -116,7 +116,7 @@ extern "C" {
     //   AU_EVENT_TRACK_STARTED: au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
     //
     // With AuReplayGainConfig.measure_missing the player also measures a starting track that has no value at
-    // all, and holds its start for up to measure_wait_ms. Works without au_init(); paths are only read.
+    // all, and holds its start for up to measure_wait_seconds. Works without au_init(); paths are only read.
 
     typedef enum AU_SCAN_PRIORITY {
         AU_SCAN_PREFETCH = 0,     // in request order, after urgent work
@@ -125,7 +125,7 @@ extern "C" {
 
     // A requested file was measured and stored (result AU_OK, rg set), could not be measured (AU_ERR_FILE, ...,
     // rg NULL) or was cancelled while being measured (AU_ERR_CANCELLED). Runs on a worker thread: keep it short.
-    typedef void (*NotifyOfGainCached)(const char *path, int result, const AuReplayGainInfo *rg, void *user);
+    typedef void (*NotifyOfGainCached)(const char *path, int result, const AuReplayGain *rg, void *user);
 
     typedef struct AuGainScanConfig {
         int threads;                  // worker threads, 1..16; 0 = default (2, or 1 on single-core machines)

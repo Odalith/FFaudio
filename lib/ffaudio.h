@@ -36,6 +36,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <math.h>
 
 #define FFAUDIO_VERSION_MAJOR 2
 #define FFAUDIO_VERSION_MINOR 1
@@ -181,17 +182,17 @@ extern "C" {
     // Loudness values of a file. Gains are in dB relative to the ReplayGain 2.0 reference (-18 LUFS);
     // R128_TRACK_GAIN / R128_ALBUM_GAIN tags (the standard for Opus, RFC 7845, but read from any format; relative
     // to -23 LUFS) are used when ReplayGain tags are missing and converted to that reference (+5 dB).
-    typedef struct AuReplayGainInfo {
-        bool has_track_gain;
-        double track_gain_db;
-        bool has_track_peak;
-        double track_peak;           // linear sample peak, 1.0 = full scale
-        bool has_album_gain;
-        double album_gain_db;
-        bool has_album_peak;
-        double album_peak;
+    // NAN marks a missing value: isnan(rg.album_gain_db)
+    typedef struct AuReplayGain {
+        float track_gain_db;
+        float track_peak;            // linear sample peak, 1.0 = full scale
+        float album_gain_db;
+        float album_peak;
         bool from_r128;              // the gains came from R128_TRACK_GAIN / R128_ALBUM_GAIN
-    } AuReplayGainInfo;
+    } AuReplayGain;
+
+    // No values at all
+    #define AU_REPLAYGAIN_NONE ((AuReplayGain){ NAN, NAN, NAN, NAN, false })
 
     typedef enum AU_REPLAYGAIN_MODE {
         AU_REPLAYGAIN_OFF = 0,
@@ -209,8 +210,8 @@ extern "C" {
         // (ffaudio_loudness.h). Off by default because it writes to the per-user cache file.
         bool measure_missing;
         // How long such a track waits for its measurement before it starts at fallback_gain_db; the value is
-        // then faded in over 2 s when it arrives. 0 = 500 ms, < 0 = do not wait. At most 10000.
-        int measure_wait_ms;
+        // then faded in over 2 s when it arrives. 0 = 0.5 s, < 0 = do not wait. At most 10.
+        double measure_wait_seconds;
     } AuReplayGainConfig;
 
     //+-----------------------------------------------------+
@@ -244,7 +245,7 @@ extern "C" {
         // or on_skip for au_queue()).
         const AuFade *fade_in;
         // NULL = the ReplayGain cache, then the file's tags. Values from your own library database.
-        const AuReplayGainInfo *replaygain;
+        const AuReplayGain *replaygain;
         // Network streams only: extra HTTP request headers, one "Name: value" per line, e.g.
         // "Authorization: Bearer abc\nX-Client: myplayer". For servers that want a token in a header.
         const char *http_headers;
@@ -454,10 +455,10 @@ extern "C" {
 
     // Store (or replace) the values for a path. Returns AU_ERR_INVALID_ARGUMENT for a NULL/empty path or rg, and
     // AU_ERR_FILE when the entry is in memory but could not be written to the cache file.
-    DLL_EXPORT int au_gain_cache_set(const char *path, const AuReplayGainInfo *rg);
+    DLL_EXPORT int au_gain_cache_set(const char *path, const AuReplayGain *rg);
 
     // true and *out filled (out may be NULL) when the path is cached
-    DLL_EXPORT bool au_gain_cache_get(const char *path, AuReplayGainInfo *out);
+    DLL_EXPORT bool au_gain_cache_get(const char *path, AuReplayGain *out);
 
     // true when an entry was removed
     DLL_EXPORT bool au_gain_cache_remove(const char *path);
@@ -470,54 +471,58 @@ extern "C" {
     // Visit every entry (a snapshot, so the callback may call au_gain_cache_* functions). Return false from the
     // callback to stop (e.g. to export the cache or drop entries for files that no longer exist).
     // Returns the number of entries visited.
-    typedef bool (*AuGainCacheVisitor)(const char *path, const AuReplayGainInfo *rg, void *user);
+    typedef bool (*AuGainCacheVisitor)(const char *path, const AuReplayGain *rg, void *user);
     DLL_EXPORT int au_gain_cache_foreach(AuGainCacheVisitor visitor, void *user);
 
     //+-----------------------------------------------------+
     //| Metadata                                            |
     //+-----------------------------------------------------+
 
-    typedef struct AuMediaInfo AuMediaInfo;
+    typedef struct AuTag {
+        const char *key;
+        const char *value;
+    } AuTag;
 
-    // Read the tags and format of a file without playing it. Works without au_init() and from
-    // any thread; it blocks while the file is opened. Free the result with au_media_info_free().
-    DLL_EXPORT AuMediaInfo *au_probe(const char *filename, int *out_error);
+    // Everything about a file, in one immutable block: it never changes after it was made, and every pointer in it
+    // stays valid until au_media_info_release(). Strings are UTF-8 and never NULL ("" when unknown).
+    typedef struct AuMediaInfo {
+        const char *path;            // as given to au_probe() / au_play()
+        const char *container;       // e.g. "flac", "mp3", "ogg", "mov,mp4,m4a,3gp,3g2,mj2"
+        const char *codec;           // e.g. "flac", "mp3", "aac", "opus"
+        const char *channel_layout;  // e.g. "stereo", "5.1(side)"
+        double duration;             // seconds, -1 when unknown
+        int64_t bit_rate;            // bits per second, 0 when unknown
+        int sample_rate;
+        int channels;
+        int bits_per_sample;         // 0 for lossy codecs or unknown
+        // A live stream (internet radio, live HLS): no duration and no seeking; it ends only when stopped or on
+        // errors
+        bool live;
+        bool seekable;
+        // From "3/12" style tags or separate TRACKTOTAL / DISCTOTAL tags; 0 when unknown
+        int track_number, track_total, disc_number, disc_total;
+        AuReplayGain replaygain;     // from the ReplayGain / R128 tags
+        int tag_count;               // every tag, for display or export: container tags, then the stream's for keys
+        const AuTag *tags;           // the container lacks
+    } AuMediaInfo;
 
-    // Information about a queued or playing track (handle 0 = the current track), including "now playing" changes
-    // of a stream. Never waits. NULL when the track is unknown, has ended, or is not open yet
-    // (AU_EVENT_TRACK_OPENED). Free the result with au_media_info_free().
-    DLL_EXPORT AuMediaInfo *au_track_info(int32_t handle);
+    // Read the tags and format of a file without playing it. Works without au_init() and from any thread; it blocks
+    // while the file is opened. Release the result with au_media_info_release().
+    DLL_EXPORT const AuMediaInfo *au_probe(const char *path, int *out_error);
 
-    DLL_EXPORT void au_media_info_free(AuMediaInfo *info);
+    // The player's own information about a queued or playing track (handle 0 = the current track), including the
+    // "now playing" changes of a stream (each makes a new block). Never waits, and copies nothing. NULL when the
+    // track is unknown, has ended, or is not open yet (AU_EVENT_TRACK_OPENED). Release it with
+    // au_media_info_release().
+    DLL_EXPORT const AuMediaInfo *au_track_info(int32_t handle);
 
-    DLL_EXPORT const char *au_media_filename(const AuMediaInfo *info);
-    DLL_EXPORT const char *au_media_container(const AuMediaInfo *info);      // e.g. "flac", "mp3", "ogg"
-    DLL_EXPORT const char *au_media_codec(const AuMediaInfo *info);          // e.g. "flac", "mp3", "aac", "opus"
-    DLL_EXPORT const char *au_media_channel_layout(const AuMediaInfo *info); // e.g. "stereo", "5.1(side)"
-    DLL_EXPORT double au_media_duration(const AuMediaInfo *info);            // seconds, -1 when unknown
-    DLL_EXPORT int64_t au_media_bit_rate(const AuMediaInfo *info);           // bits per second, 0 when unknown
-    DLL_EXPORT int au_media_sample_rate(const AuMediaInfo *info);
-    DLL_EXPORT int au_media_channels(const AuMediaInfo *info);
-    DLL_EXPORT int au_media_bits_per_sample(const AuMediaInfo *info);        // 0 for lossy codecs / unknown
-    // A live stream (internet radio, live HLS): no duration and no seeking; it ends only when stopped or on errors
-    DLL_EXPORT bool au_media_is_live(const AuMediaInfo *info);
-    DLL_EXPORT bool au_media_is_seekable(const AuMediaInfo *info);
+    // Done with it (NULL is fine)
+    DLL_EXPORT void au_media_info_release(const AuMediaInfo *info);
 
     // A tag by name, case-insensitive; NULL when absent. Common names are the same in every format:
     // "title", "artist", "album", "album_artist", "date", "genre", "track", "disc", "composer", "comment".
     // Format-specific spellings of album_artist and date ("ALBUMARTIST", "year", ...) are also found.
     DLL_EXPORT const char *au_media_tag(const AuMediaInfo *info, const char *key);
-
-    // All tags, for display or export
-    DLL_EXPORT int au_media_tag_count(const AuMediaInfo *info);
-    DLL_EXPORT bool au_media_tag_at(const AuMediaInfo *info, int index, const char **key, const char **value);
-
-    // Track / disc numbers from "3/12" style tags or separate TRACKTOTAL / DISCTOTAL tags; 0 when unknown
-    DLL_EXPORT void au_media_track_number(const AuMediaInfo *info, int *number, int *total);
-    DLL_EXPORT void au_media_disc_number(const AuMediaInfo *info, int *number, int *total);
-
-    // ReplayGain / R128 values from the tags
-    DLL_EXPORT AuReplayGainInfo au_media_replaygain(const AuMediaInfo *info);
 
     //+-----------------------------------------------------+
     //| Status                                              |

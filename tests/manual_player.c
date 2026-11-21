@@ -177,18 +177,18 @@ static void on_eof(bool skip, bool error, int32_t handle, void *ud) {
 static void on_started(int32_t handle, void *ud) {
     (void)ud;
     clear_queued_if(handle);
-    AuMediaInfo *info = au_track_info(handle);
+    const AuMediaInfo *info = au_track_info(handle);
     double gain = 0;
     const bool has_gain = au_track_gain_db(handle, &gain) == AU_OK && gain != 0;
     bool cached = false;
     if (info) {
         const char *artist = au_media_tag(info, "artist"), *title = au_media_tag(info, "title");
         if (!artist) artist = au_media_tag(info, "icy-name");   // a stream: its station
-        cached = au_gain_cache_get(au_media_filename(info), NULL);
+        cached = au_gain_cache_get(info->path, NULL);
         printf("> now playing #%d: %s - %s  [%s %d Hz %d ch%s]", handle, artist ? artist : "?",
-               title ? title : au_media_filename(info), au_media_codec(info), au_media_sample_rate(info),
-               au_media_channels(info), au_media_replaygain(info).has_track_gain ? ", tagged" : "");
-        au_media_info_free(info);
+               title ? title : info->path, info->codec, info->sample_rate,
+               info->channels, !isnan(info->replaygain.track_gain_db) ? ", tagged" : "");
+        au_media_info_release(info);
     }
     else {
         printf("> now playing #%d", handle);
@@ -210,7 +210,7 @@ static void on_duration(int32_t handle, double duration, void *ud) {
 #define PREFETCH_COUNT 10
 
 // ffaudio measures on its own worker threads; this only reports the results
-static void on_cached(const char *path, int result, const AuReplayGainInfo *rg, void *user) {
+static void on_cached(const char *path, int result, const AuReplayGain *rg, void *user) {
     (void)user;
     if (result == AU_OK) printf("  measured %s: %+.2f dB\n", path, rg->track_gain_db);
     else if (result != AU_ERR_CANCELLED) printf("  could not measure %s (%d)\n", path, result);

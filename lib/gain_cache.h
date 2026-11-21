@@ -22,7 +22,7 @@
 #include "globals.h"
 
 // Thread-safe lookup used by the player (no-op before anything was cached)
-bool gain_cache_lookup(const char *path, AuReplayGainInfo *out);
+bool gain_cache_lookup(const char *path, AuReplayGain *out);
 
 // Block until `path` is in the cache, its measurement fails (gain_cache_note_failure() after `mark`), the timeout
 // passes or *abort becomes non-zero. Take the mark with gain_cache_failure_mark() before the measurement is
