@@ -22,15 +22,15 @@
 #define FFAUDIO_H
 
 #if defined(FFAUDIO_STATIC)
-    #define DLL_EXPORT
+    #define FFAUDIO_API
 #elif defined(_WIN32)
     #if defined(FFAUDIO_BUILDING)
-        #define DLL_EXPORT __declspec(dllexport)
+        #define FFAUDIO_API __declspec(dllexport)
     #else
-        #define DLL_EXPORT __declspec(dllimport)
+        #define FFAUDIO_API __declspec(dllimport)
     #endif
 #else
-    #define DLL_EXPORT __attribute__((visibility("default")))
+    #define FFAUDIO_API __attribute__((visibility("default")))
 #endif
 
 #include <stdbool.h>
@@ -38,8 +38,8 @@
 #include <stdint.h>
 #include <math.h>
 
-#define FFAUDIO_VERSION_MAJOR 2
-#define FFAUDIO_VERSION_MINOR 1
+#define FFAUDIO_VERSION_MAJOR 3
+#define FFAUDIO_VERSION_MINOR 0
 #define FFAUDIO_VERSION_PATCH 0
 
 #ifdef __cplusplus
@@ -129,11 +129,11 @@ extern "C" {
     // The oldest queued event, when AuConfig.on_event is NULL. false = none. Its strings are valid until the next
     // au_poll_event() / au_wait_event() call or au_shutdown(). The queue holds 4096 events; when it is full, log events are dropped
     // first, then the oldest, and the next poll returns AU_EVENT_OVERFLOW with the number dropped.
-    DLL_EXPORT bool au_poll_event(AuEvent *out);
+    FFAUDIO_API bool au_poll_event(AuEvent *out);
 
     // au_poll_event() that waits up to timeout_seconds (< 0 = no limit) for an event, for a thread that only handles
     // events. false on timeout, and once au_shutdown() has been called.
-    DLL_EXPORT bool au_wait_event(AuEvent *out, double timeout_seconds);
+    FFAUDIO_API bool au_wait_event(AuEvent *out, double timeout_seconds);
 
     //+-----------------------------------------------------+
     //| Fades and crossfades                                |
@@ -257,28 +257,28 @@ extern "C" {
 
     // Start the player and open the output device (AuConfig.device); AU_EVENT_DEVICE reports the result. Tracks
     // can be started right away: they wait for the device.
-    DLL_EXPORT int au_init(const AuConfig *config);
+    FFAUDIO_API int au_init(const AuConfig *config);
 
     // Stops playback and frees everything. Not from on_event. au_init() may be called again afterwards.
-    DLL_EXPORT void au_shutdown(void);
+    FFAUDIO_API void au_shutdown(void);
 
     // Switch the output device: a name from au_list_devices(), or NULL for the system default (followed when it
     // changes). Returns at once; AU_EVENT_DEVICE reports the result. A chosen device that can not be opened, or that
     // disappears later, falls back to the system default (fell_back). Choosing the device in use does nothing.
-    DLL_EXPORT int au_set_device(const char *name);
+    FFAUDIO_API int au_set_device(const char *name);
 
     // The names of the output devices, *count of them; NULL when there are none. Free with au_free_devices().
-    DLL_EXPORT char **au_list_devices(int *count);
+    FFAUDIO_API char **au_list_devices(int *count);
 
     // Free a list from au_list_devices() (NULL is fine). Use this rather than free(): on Windows the application and
     // ffaudio can use different C runtimes (e.g. MSVC with /MT), and free() on memory that ffaudio allocated then
     // corrupts the heap.
-    DLL_EXPORT void au_free_devices(char **devices, int count);
+    FFAUDIO_API void au_free_devices(char **devices, int count);
 
     // Name of the output device in use (for the system default, the device it currently resolves to when SDL can
     // tell, otherwise "System default"). "" when no device is open. Returns the length, or AU_ERR_INVALID_ARGUMENT
     // if buf is too small.
-    DLL_EXPORT int au_get_device_name(char *buf, size_t size);
+    FFAUDIO_API int au_get_device_name(char *buf, size_t size);
 
     //+-----------------------------------------------------+
     //| Playback                                            |
@@ -288,47 +288,47 @@ extern "C" {
     // Play a file or URL, replacing the current track (a track queued with au_queue() stays queued). config may be
     // NULL. Returns the track's handle (> 0) at once, or a negative AU_RESULT; a file that can not be opened ends
     // with AU_END_ERROR.
-    DLL_EXPORT int32_t au_play(const char *path, const AuPlayConfig *config);
+    FFAUDIO_API int32_t au_play(const char *path, const AuPlayConfig *config);
 
     // Queue a file to play after the current one (gapless, or crossfaded per AuCrossfade.on_track_end), replacing
     // a queued one. If nothing is playing it starts right away. Returns the handle (> 0) or a negative AU_RESULT.
-    DLL_EXPORT int32_t au_queue(const char *path, const AuPlayConfig *config);
+    FFAUDIO_API int32_t au_queue(const char *path, const AuPlayConfig *config);
 
     // End the current track now and start the queued one (crossfaded per AuCrossfade.on_skip). Without a queued
     // track this stops playback.
-    DLL_EXPORT void au_skip(void);
+    FFAUDIO_API void au_skip(void);
 
     // Remove the queued track
-    DLL_EXPORT void au_clear_queue(void);
+    FFAUDIO_API void au_clear_queue(void);
 
     // Stop everything (fades out per AuCrossfade.on_stop) and clear the queue
-    DLL_EXPORT void au_stop(void);
+    FFAUDIO_API void au_stop(void);
 
     // Pause (fading out per AuCrossfade.on_pause) or resume
-    DLL_EXPORT void au_pause(bool paused);
+    FFAUDIO_API void au_pause(bool paused);
 
     // Seek the current track to this many seconds from its start
-    DLL_EXPORT void au_seek(double seconds);
+    FFAUDIO_API void au_seek(double seconds);
 
     // Seek the current track to this fraction (0..1) of its duration; also before the duration is known
-    DLL_EXPORT void au_seek_fraction(double fraction);
+    FFAUDIO_API void au_seek_fraction(double fraction);
 
     // Set when and how fades and crossfades happen. NULL disables them all (gapless + hard cuts).
-    DLL_EXPORT int au_set_crossfade(const AuCrossfade *config);
+    FFAUDIO_API int au_set_crossfade(const AuCrossfade *config);
 
     // Playback speed for all tracks, 0.25..4 (1 = normal). keep_pitch: change the tempo only (atempo); false:
     // tape-style, the pitch follows the speed. Takes effect within about half a second (the audio already decoded
     // plays out first). Positions, durations and seeking stay in file time; crossfade lengths and
     // prepare_next_seconds stay in wall clock time.
-    DLL_EXPORT int au_set_speed(double speed, bool keep_pitch);
+    FFAUDIO_API int au_set_speed(double speed, bool keep_pitch);
 
     // Linear gain 0..1 for everything played
-    DLL_EXPORT void au_set_volume(float gain);
+    FFAUDIO_API void au_set_volume(float gain);
 
-    DLL_EXPORT void au_set_muted(bool muted);
+    FFAUDIO_API void au_set_muted(bool muted);
 
     // Applies to the current, the queued and future tracks. -1 = infinite, 0 = none.
-    DLL_EXPORT void au_set_loop_count(int count);
+    FFAUDIO_API void au_set_loop_count(int count);
 
     //+-----------------------------------------------------+
     //| Network streams                                     |
@@ -353,10 +353,10 @@ extern "C" {
 
     // Settings for every network stream (player, au_probe(), loudness analysis); NULL restores the defaults. Can be
     // called at any time, also before au_init(); tracks that are already open keep their settings.
-    DLL_EXPORT int au_set_network(const AuNetworkConfig *config);
+    FFAUDIO_API int au_set_network(const AuNetworkConfig *config);
 
     // true for http(s):// and other URLs with a scheme other than file://
-    DLL_EXPORT bool au_is_network_url(const char *path);
+    FFAUDIO_API bool au_is_network_url(const char *path);
 
     //+-----------------------------------------------------+
     //| Filters                                             |
@@ -368,18 +368,18 @@ extern "C" {
 
     // Filters applied to every track, after the track's own (AuPlayConfig.filters). NULL or "" removes them.
     // Returns AU_ERR_INVALID_ARGUMENT (and changes nothing) if the string does not parse.
-    DLL_EXPORT int au_set_filters(const char *filters);
+    FFAUDIO_API int au_set_filters(const char *filters);
 
     // Replace the filters of one track (handle from au_play()/au_queue(), 0 = the current track).
-    DLL_EXPORT int au_set_track_filters(int32_t handle, const char *filters);
+    FFAUDIO_API int au_set_track_filters(int32_t handle, const char *filters);
 
     // Send a runtime command to a filter, see avfilter_graph_send_command() and each filter's
     // "Commands" section, e.g. ("volume", "volume", "0.5") or ("equalizer@eq_3", "g", "-6").
     // `target` is a filter name or instance name ("all" for every filter). handle 0 = every live track.
-    DLL_EXPORT int au_send_filter_command(int32_t handle, const char *target, const char *command, const char *arg);
+    FFAUDIO_API int au_send_filter_command(int32_t handle, const char *target, const char *command, const char *arg);
 
     // Check a filter string against the current output format (or 48 kHz stereo before a device is open)
-    DLL_EXPORT int au_validate_filters(const char *filters);
+    FFAUDIO_API int au_validate_filters(const char *filters);
 
     //+-----------------------------------------------------+
     //| Downmixing                                          |
@@ -401,7 +401,7 @@ extern "C" {
 
     // custom_filters is only used with AU_DOWNMIX_CUSTOM. Applies to playing tracks right away.
     // Returns AU_ERR_INVALID_ARGUMENT if the custom filters do not accept a 7.1 input.
-    DLL_EXPORT int au_set_downmix(AU_DOWNMIX mode, const char *custom_filters);
+    FFAUDIO_API int au_set_downmix(AU_DOWNMIX mode, const char *custom_filters);
 
     //+-----------------------------------------------------+
     //| ReplayGain                                          |
@@ -409,11 +409,11 @@ extern "C" {
 
     // Apply ReplayGain/R128 tags automatically. NULL = off (the default). Applies to playing tracks
     // right away (with a short ramp) and to every later track.
-    DLL_EXPORT int au_set_replaygain(const AuReplayGainConfig *config);
+    FFAUDIO_API int au_set_replaygain(const AuReplayGainConfig *config);
 
     // The ReplayGain gain ffaudio applies to a track (handle 0 = the current track), in dB. Never waits.
     // AU_ERR_NOTHING_TO_DO when the track is unknown, has ended, or is not open yet (AU_EVENT_TRACK_OPENED).
-    DLL_EXPORT int au_track_gain_db(int32_t handle, double *out_db);
+    FFAUDIO_API int au_track_gain_db(int32_t handle, double *out_db);
 
     //+-----------------------------------------------------+
     //| ReplayGain cache                                    |
@@ -445,34 +445,34 @@ extern "C" {
     // Use another cache file (UTF-8 path). NULL = the default location above, "" = memory only (nothing is read
     // or written). Discards the entries in memory and loads the new file. Call it before the first use of the
     // cache if your application wants its own file.
-    DLL_EXPORT int au_gain_cache_set_file(const char *path);
+    FFAUDIO_API int au_gain_cache_set_file(const char *path);
 
     // The cache file in use, "" when memory only. Returns its length, or AU_ERR_INVALID_ARGUMENT if buf is too small.
-    DLL_EXPORT int au_gain_cache_get_file(char *buf, size_t size);
+    FFAUDIO_API int au_gain_cache_get_file(char *buf, size_t size);
 
     // Read the file again, e.g. to pick up entries another process added since this one loaded it
-    DLL_EXPORT int au_gain_cache_reload(void);
+    FFAUDIO_API int au_gain_cache_reload(void);
 
     // Store (or replace) the values for a path. Returns AU_ERR_INVALID_ARGUMENT for a NULL/empty path or rg, and
     // AU_ERR_FILE when the entry is in memory but could not be written to the cache file.
-    DLL_EXPORT int au_gain_cache_set(const char *path, const AuReplayGain *rg);
+    FFAUDIO_API int au_gain_cache_set(const char *path, const AuReplayGain *rg);
 
     // true and *out filled (out may be NULL) when the path is cached
-    DLL_EXPORT bool au_gain_cache_get(const char *path, AuReplayGain *out);
+    FFAUDIO_API bool au_gain_cache_get(const char *path, AuReplayGain *out);
 
     // true when an entry was removed
-    DLL_EXPORT bool au_gain_cache_remove(const char *path);
+    FFAUDIO_API bool au_gain_cache_remove(const char *path);
 
     // Remove every entry, also from the cache file
-    DLL_EXPORT void au_gain_cache_clear(void);
+    FFAUDIO_API void au_gain_cache_clear(void);
 
-    DLL_EXPORT int au_gain_cache_count(void);
+    FFAUDIO_API int au_gain_cache_count(void);
 
     // Visit every entry (a snapshot, so the callback may call au_gain_cache_* functions). Return false from the
     // callback to stop (e.g. to export the cache or drop entries for files that no longer exist).
     // Returns the number of entries visited.
     typedef bool (*AuGainCacheVisitor)(const char *path, const AuReplayGain *rg, void *user);
-    DLL_EXPORT int au_gain_cache_foreach(AuGainCacheVisitor visitor, void *user);
+    FFAUDIO_API int au_gain_cache_foreach(AuGainCacheVisitor visitor, void *user);
 
     //+-----------------------------------------------------+
     //| Metadata                                            |
@@ -508,21 +508,21 @@ extern "C" {
 
     // Read the tags and format of a file without playing it. Works without au_init() and from any thread; it blocks
     // while the file is opened. Release the result with au_media_info_release().
-    DLL_EXPORT const AuMediaInfo *au_probe(const char *path, int *out_error);
+    FFAUDIO_API const AuMediaInfo *au_probe(const char *path, int *out_error);
 
     // The player's own information about a queued or playing track (handle 0 = the current track), including the
     // "now playing" changes of a stream (each makes a new block). Never waits, and copies nothing. NULL when the
     // track is unknown, has ended, or is not open yet (AU_EVENT_TRACK_OPENED). Release it with
     // au_media_info_release().
-    DLL_EXPORT const AuMediaInfo *au_track_info(int32_t handle);
+    FFAUDIO_API const AuMediaInfo *au_track_info(int32_t handle);
 
     // Done with it (NULL is fine)
-    DLL_EXPORT void au_media_info_release(const AuMediaInfo *info);
+    FFAUDIO_API void au_media_info_release(const AuMediaInfo *info);
 
     // A tag by name, case-insensitive; NULL when absent. Common names are the same in every format:
     // "title", "artist", "album", "album_artist", "date", "genre", "track", "disc", "composer", "comment".
     // Format-specific spellings of album_artist and date ("ALBUMARTIST", "year", ...) are also found.
-    DLL_EXPORT const char *au_media_tag(const AuMediaInfo *info, const char *key);
+    FFAUDIO_API const char *au_media_tag(const AuMediaInfo *info, const char *key);
 
     //+-----------------------------------------------------+
     //| Status                                              |
@@ -543,17 +543,17 @@ extern "C" {
     } AuStatus;
 
     // A snapshot of the player; never waits. Without a player: nothing playing, the defaults.
-    DLL_EXPORT void au_get_status(AuStatus *out);
+    FFAUDIO_API void au_get_status(AuStatus *out);
 
     // Convenience function to block the calling thread until au_shutdown() is called from another thread
-    DLL_EXPORT void au_wait_loop(void);
+    FFAUDIO_API void au_wait_loop(void);
 
     // "major.minor.patch"
-    DLL_EXPORT const char *au_get_version(void);
+    FFAUDIO_API const char *au_get_version(void);
 
     // Free memory ffaudio returns without a dedicated free function, such as au_fb_build() strings. Like
     // au_free_devices(), it frees with ffaudio's own C runtime (see there).
-    DLL_EXPORT void au_free(void *ptr);
+    FFAUDIO_API void au_free(void *ptr);
 
 #ifdef __cplusplus
 } // extern "C"

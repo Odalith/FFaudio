@@ -17,6 +17,8 @@ The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.
   `au_get_device_name()` replace `au_get_audio_devices()`, `au_free_audio_devices()` and `au_get_audio_device_name()`.
 - `AuConfig.volume` is a linear gain 0..1 (was `initial_volume` 0..100); `loop_count` was `initial_loop_count`.
 - `delegates.h` is gone; everything is in `ffaudio.h`.
+- The export macro is `FFAUDIO_API` (was `DLL_EXPORT`, a name other libraries use too). The shared library's version is
+  3.0 (`libffaudio.so.3.0`), so 2.x programs never load it by mistake.
 - Playback: `au_play()`, `au_queue()`, `au_skip()`, `au_clear_queue()`, `au_stop()`, `au_pause()`, `au_seek(seconds)`,
   `au_seek_fraction(0..1)`, `au_set_speed()`, `au_set_volume(0..1)` and `au_set_muted()` replace `au_play_audio()`,
   `au_set_next()`, `au_skip_to_next()`, `au_clear_next()`, `au_stop_audio()`, `au_pause_audio()`,

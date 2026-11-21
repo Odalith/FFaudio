@@ -1,6 +1,7 @@
 # ffaudio 3.0 API
 
-What the public headers become in 3.0.0. The decisions it follows (2026-11-21):
+The public API of 3.0.0, as implemented on `stage3` (the headers are the reference). The decisions it follows
+(2026-11-21):
 
 - **One global player.** No player object; every function works on the one player, as in 2.x.
 - **One event type.** `AuEvent` replaces the ten callbacks. It is delivered either to `on_event` on ffaudio's control
@@ -182,6 +183,8 @@ typedef struct AuReplayGain {
     float track_gain_db, track_peak, album_gain_db, album_peak;   // NAN = missing
     bool from_r128;
 } AuReplayGain;
+
+#define AU_REPLAYGAIN_NONE ((AuReplayGain){ NAN, NAN, NAN, NAN, false })
 ```
 
 - One immutable allocation (header, strings, tags), shared by reference: `au_track_info()` returns the player's own
@@ -217,6 +220,7 @@ typedef struct AuLoudnessMeter AuLoudnessMeter;   // one file, or several merged
 int  au_loudness_measure(const char *path, const AuLoudnessConfig *config, AuLoudnessMeter **out);
 int  au_loudness_merge(AuLoudnessMeter *into, const AuLoudnessMeter *other);   // an album = its tracks merged
 int  au_loudness_result(const AuLoudnessMeter *meter, AuLoudness *out);
+int  au_loudness_file_count(const AuLoudnessMeter *meter);
 void au_loudness_meter_free(AuLoudnessMeter *meter);
 int  au_loudness_analyze(const char *path, const AuLoudnessConfig *config, AuLoudness *out);   // one file, at once
 AuReplayGain au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album);
@@ -235,6 +239,7 @@ AuReplayGain au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness
 | `au_initialize(&InitializeConfig)` + `au_configure_audio_device(NULL)` | `au_init(&AuConfig)` |
 | `au_configure_audio_device(&AudioDeviceConfig)` | `au_set_device(name)` + `AU_EVENT_DEVICE` |
 | `au_get_audio_devices` / `au_free_audio_devices` | `au_list_devices` / `au_free_devices` |
+| `au_get_audio_device_name` | `au_get_device_name` |
 | `au_get_output_spec` | `AuStatus.sample_rate`, `.channels` |
 | `au_play_audio` / `au_set_next` | `au_play` / `au_queue` |
 | `au_skip_to_next` / `au_clear_next` / `au_stop_audio` | `au_skip` / `au_clear_queue` / `au_stop` |
@@ -259,10 +264,19 @@ AuReplayGain au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness
 | `au_fb_add_equalizer(fb, channels, &eq)` | `au_fb_add_equalizer(fb, name, &eq)` |
 | `AuReplayGainInfo` (`has_*` flags, doubles) | `AuReplayGain` (floats, NaN = missing) |
 | `AuMediaInfo *` + `au_media_*()` getters + `au_media_info_free` | `const AuMediaInfo *` fields + `au_media_info_release` |
+| `au_media_tag_count` / `au_media_tag_at` | `info->tag_count` / `info->tags[i]` |
+| `au_media_track_number` / `au_media_disc_number` | `info->track_number`, `->track_total`, `->disc_number`, `->disc_total` |
+| `au_media_is_live` / `au_media_is_seekable` / `au_media_filename` | `info->live` / `->seekable` / `->path` |
 | `AuLoudnessScanner` | `AuLoudnessMeter` (`measure` / `merge` / `result`) |
+| `au_loudness_scanner_create` + `au_loudness_scan_file` | `au_loudness_measure` (a meter per file) |
+| `au_loudness_album` / `au_loudness_track_count` | `au_loudness_merge` + `au_loudness_result` / `au_loudness_file_count` |
+| `au_loudness_scanner_reset` / `au_loudness_scanner_free` | a new meter / `au_loudness_meter_free` |
+| `NotifyOfGainCached(path, result, const AuReplayGainInfo *, user)` | the same with `const AuReplayGain *` |
 | `AuReplayGainConfig.measure_wait_ms` | `.measure_wait_seconds` |
 | `DLL_EXPORT` | `FFAUDIO_API` |
 
-Unchanged: the ReplayGain cache (`au_gain_cache_*`), the background scan (`au_gain_scan_*`, `au_gain_cache_request*`),
-`au_set_network()`, `au_set_replaygain()`, `au_set_downmix()`, `au_send_filter_command()`, `au_set_loop_count()`,
-`au_get_version()`, `au_free()`.
+Unchanged: the ReplayGain cache (`au_gain_cache_*`, now with `AuReplayGain`), the background scan (`au_gain_scan_*`,
+`au_gain_cache_request*`), `au_set_network()`, `au_is_network_url()`, `au_set_replaygain()`, `au_set_downmix()`,
+`au_send_filter_command()`, `au_set_loop_count()`, `au_wait_loop()`, `au_get_version()`, `au_free()`, the filter
+builder's `au_fb_create/free/clear/build/peek/last_error/add`, `au_filter_available()`, `au_parametric_eq_parse()`,
+the `*_defaults()` helpers and `au_loudness_analyze()` / `au_loudness_to_replaygain()` (returning `AuReplayGain`).
