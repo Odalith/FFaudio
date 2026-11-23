@@ -456,8 +456,11 @@ static void cmd_set_next(AudioPlayer *ap, const Msg *msg) {
     else set_next_slot(ap, t);
     unlock_mixer(ap);
 
-    if (start_now && SDL_AtomicGet(&ap->paused))
+    if (start_now && SDL_AtomicGet(&ap->paused)) {
         cmd_pause(ap, false);
+        // au_get_status() says so too, unless a pause call came after this one was made
+        if (msg->pause_state & 1) SDL_AtomicCAS(&ap->pause_state, msg->pause_state, msg->pause_state & ~1);
+    }
 
     if (old_next) end_track(ap, old_next, END_SKIPPED);
     update_device_running(ap);
@@ -529,8 +532,16 @@ static void cmd_stop(AudioPlayer *ap) {
     update_device_running(ap);
 }
 
+// au_get_status()'s paused, as an API call sets it (any thread)
+static void pause_state_set(AudioPlayer *ap, const bool paused) {
+    for (;;) {
+        const int old = SDL_AtomicGet(&ap->pause_state);
+        const int next = (int)(((unsigned)old >> 1) + 1u) << 1 | (paused ? 1 : 0);
+        if (SDL_AtomicCAS(&ap->pause_state, old, next)) return;
+    }
+}
+
 static void cmd_pause(AudioPlayer *ap, const bool value) {
-    SDL_AtomicSet(&ap->pause_requested, value); // also when playback unpauses on its own
     if ((SDL_AtomicGet(&ap->paused) != 0) == value) return;
     SDL_AtomicSet(&ap->paused, value);
     lock_mixer(ap);
@@ -1360,6 +1371,7 @@ static int32_t post_track_command(const MsgType type, const char *filename, cons
             m->play_config.replaygain = &m->replaygain_override;
         }
     }
+    m->pause_state = SDL_AtomicGet(&ap->pause_state);
     m->handle = SDL_AtomicAdd(&ap->handle_count, 1) + 1;
     const int32_t handle = m->handle;
     msg_post(ap, m);
@@ -1368,7 +1380,7 @@ static int32_t post_track_command(const MsgType type, const char *filename, cons
 
 int32_t au_play(const char *path, const AuPlayConfig *config) {
     const int32_t handle = post_track_command(CMD_PLAY, path, config);
-    if (handle > 0) SDL_AtomicSet(&audio_player->pause_requested, 0); // playing unpauses
+    if (handle > 0) pause_state_set(audio_player, false); // playing unpauses
     return handle;
 }
 
@@ -1397,7 +1409,7 @@ void au_stop(void) { post_simple(CMD_STOP, 0, 0, false); }
 void au_pause(const bool paused) {
     AudioPlayer *ap = audio_player;
     if (!ap) return;
-    SDL_AtomicSet(&ap->pause_requested, paused);
+    pause_state_set(ap, paused);
     post_simple(CMD_PAUSE, 0, 0, paused);
 }
 
@@ -1647,7 +1659,7 @@ void au_get_status(AuStatus *out) {
     out->position = audible_position(&s);
     out->duration = s.handle ? s.duration : -1;
     out->buffering = s.handle && s.buffering;
-    out->paused = SDL_AtomicGet(&ap->pause_requested) != 0;
+    out->paused = (SDL_AtomicGet(&ap->pause_state) & 1) != 0;
     out->muted = SDL_AtomicGet(&ap->muted) != 0;
     out->volume = atomic_get_float(&ap->volume);
     out->loop_count = SDL_AtomicGet(&ap->loop_count);

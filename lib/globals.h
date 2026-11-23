@@ -406,6 +406,7 @@ typedef struct Msg {
     double d;
     bool b;
     int32_t level;
+    int32_t pause_state;            // AudioPlayer.pause_state when the command was posted
     int64_t request;
     SDL_sem *done;                  // CMD_SHUTDOWN: posted when it is done
     struct Msg *next;
@@ -454,7 +455,9 @@ typedef struct AudioPlayer {
     SDL_atomic_t volume;                // linear gain 0..1, a float (atomic_get_float())
     SDL_atomic_t muted;
     SDL_atomic_t paused;                // applied (control thread)
-    SDL_atomic_t pause_requested;       // as last set by au_pause(), for au_get_status()
+    // For au_get_status(): bit 0 = paused as last set (au_pause(), au_play() unpausing); the other bits count the
+    // calls that set it, so the control thread's own unpause (au_queue() starting a track) can not undo a newer call
+    SDL_atomic_t pause_state;
     SDL_atomic_t loop_count;            // default for new tracks, -1 infinite
     double prepare_next_seconds;
     int32_t output_channels;            // 0 = device preference

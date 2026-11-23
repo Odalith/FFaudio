@@ -138,13 +138,27 @@ static void test_status_reflects_settings(void) {
     au_set_speed(1.0, true);
     au_set_muted(false);
 
-    // Playing unpauses
+    // Playing unpauses, at once and for good: the pause still queued ahead of the play must not show up as paused
     const int32_t h = au_play(fx("long_6s.flac"), NULL);
-    CHECK(!tc_status().paused);
+    int paused_reads = 0;
+    for (int i = 0; i < 200; i++) {
+        paused_reads += tc_status().paused;
+        SDL_Delay(1);
+    }
+    CHECK(paused_reads == 0);
     CHECK(TC_WAIT_FIELD(started, 1, 5000));
     tc_sleep_ms(300);
     st = tc_status();
     CHECK(st.handle == h && st.position > 0 && st.position < 6 && st.duration > 5.9 && st.duration < 6.1);
+
+    // au_queue() with nothing playing starts the track, which unpauses: the status follows once that is done
+    au_stop();
+    CHECK(TC_WAIT_FIELD(eof, 1, 5000));
+    au_pause(true);
+    CHECK(tc_status().paused);
+    au_queue(fx("long_6s.flac"), NULL);
+    CHECK(TC_WAIT_FIELD(started, 2, 5000));
+    CHECK(!tc_status().paused);
     au_shutdown();
 }
 
@@ -197,14 +211,16 @@ static void test_poll_events(void) {
 static void test_poll_overflow(void) {
     REQUIRE(poll_start() == AU_OK);
     REQUIRE(poll_until(AU_EVENT_DEVICE, 0, 5, NULL, NULL));
-    const int tracks = 3000;   // each: an error log and AU_EVENT_TRACK_ENDED, so about 6000 events for 4096 places
+    // Every track ends (AU_EVENT_TRACK_ENDED), so 5000 of them are more than the 4096 places on their own. Most also
+    // log an error, but not all: a track replaced before its open fails is aborted and says nothing (how many depends
+    // on how fast threads start, e.g. fewer logs on Windows).
+    const int tracks = 5000;
     for (int i = 0; i < tracks; i++) au_play(fx("no_such_file.flac"), NULL);
-    // Let the control thread get through them: the end events stop coming in once all are done
-    SDL_Delay(500);
-    for (int i = 0; i < 100; i++) SDL_Delay(100);
+    // Let the control thread get through them
+    for (int i = 0; i < 200; i++) SDL_Delay(100);
     AuEvent e;
     REQUIRE(au_poll_event(&e));
-    CHECK(e.type == AU_EVENT_OVERFLOW && e.data.overflow.dropped > 0);
+    CHECK(e.type == AU_EVENT_OVERFLOW && e.data.overflow.dropped >= tracks - 4096);
     const int dropped = e.type == AU_EVENT_OVERFLOW ? e.data.overflow.dropped : 0;
     int ended = 0, logs = 0, total = 0;
     while (au_poll_event(&e)) {
@@ -213,8 +229,9 @@ static void test_poll_overflow(void) {
         if (e.type == AU_EVENT_LOG) logs++;
     }
     printf("   %d dropped; then %d events: %d track ends, %d logs\n", dropped, total, ended, logs);
-    CHECK(total <= 4096);
-    CHECK(ended == tracks);
+    CHECK(total == 4096);                // full
+    CHECK(logs == 0);                    // logs went first: there were more non-log events than places
+    CHECK(ended >= 4096 - 16 && ended <= tracks);
     au_shutdown();
 }
 
