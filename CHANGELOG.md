@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.0.0 (unreleased)
+## 3.0.0 (2026-11-23)
 
 The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.x.
 
