@@ -1,5 +1,71 @@
 # Changelog
 
+## 3.0.0 (2026-11-23)
+
+The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.x.
+
+### Changed
+- Events: one `AuEvent` (a type, the track's handle and a union) replaces the ten callbacks. It goes to
+  `AuConfig.on_event` on ffaudio's control thread, or, without a callback, into a queue for `au_poll_event()` /
+  `au_wait_event()` on the application's own thread (4096 events; log events are dropped first when it is full, and
+  `AU_EVENT_OVERFLOW` says how many). A track's end is `AU_EVENT_TRACK_ENDED` with `AU_END_FINISHED`, `_SKIPPED` or
+  `_ERROR`.
+- `au_init(&AuConfig)` replaces `au_initialize()` and opens the output device itself (`AuConfig.device`, NULL = the
+  system default). `au_set_device(name)` replaces `au_configure_audio_device()` and returns at once; the result comes
+  as `AU_EVENT_DEVICE` (opened, or not; `fell_back` when the chosen device failed and the default was opened). The
+  device index is gone: indexes change as devices come and go. `au_list_devices()`, `au_free_devices()` and
+  `au_get_device_name()` replace `au_get_audio_devices()`, `au_free_audio_devices()` and `au_get_audio_device_name()`.
+- `AuConfig.volume` is a linear gain 0..1 (was `initial_volume` 0..100); `loop_count` was `initial_loop_count`.
+- `delegates.h` is gone; everything is in `ffaudio.h`.
+- The export macro is `FFAUDIO_API` (was `DLL_EXPORT`, a name other libraries use too). The shared library's version is
+  3.0 (`libffaudio.so.3.0`), so 2.x programs never load it by mistake.
+- Playback: `au_play()`, `au_queue()`, `au_skip()`, `au_clear_queue()`, `au_stop()`, `au_pause()`, `au_seek(seconds)`,
+  `au_seek_fraction(0..1)`, `au_set_speed()`, `au_set_volume(0..1)` and `au_set_muted()` replace `au_play_audio()`,
+  `au_set_next()`, `au_skip_to_next()`, `au_clear_next()`, `au_stop_audio()`, `au_pause_audio()`,
+  `au_seek_time(ms)`, `au_seek_percent(0..100)`, `au_set_playback_speed()`, `au_set_audio_volume(0..100)` and
+  `au_mute_audio()`. `AuPlayConfig` (`start_seconds`, `length_seconds`, `filters`) and `AuCrossfade` replace
+  `PlayAudioConfig` (`skip_seconds`, `play_duration`, `av_filtergraph`) and `CrossfadeConfig`.
+- `au_get_status()` fills one `AuStatus` snapshot (the audible track, its position and duration, buffering, the
+  output format, and the settings as last set, also before the control thread has applied them). It replaces
+  `au_get_current_handle()`, `au_get_audio_play_time()`, `au_get_audio_duration()`, `au_get_output_spec()`,
+  `au_is_paused()`, `au_is_muted()`, `au_get_audio_volume()`, `au_get_playback_speed()` and `au_get_loop_count()`.
+- No function waits for the control thread any more. `au_track_info()` and `au_track_gain_db()` (were
+  `au_get_track_info()` and `au_get_track_gain_db()`) read what the track has published instead of asking the control
+  thread; they know a track from `AU_EVENT_TRACK_OPENED` (new: its duration and whether it is live or seekable) until
+  `AU_EVENT_TRACK_ENDED`. Calling the API from `on_event` is therefore always safe and never blocks the player.
+- `AuMediaInfo` is a struct to read directly (path, container, codec, layout, duration, rates, live/seekable,
+  track/disc numbers and totals, ReplayGain values, and a `tags` array): one immutable allocation with every string
+  in it, shared by reference. `au_probe()` and `au_track_info()` return `const AuMediaInfo *`, released with
+  `au_media_info_release()`; `au_track_info()` no longer copies anything, and a stream's "now playing" change makes
+  a new block, so one in hand never changes. `au_media_tag()` (with its aliases) stays; the 16 other `au_media_*()`
+  getters and `au_media_info_free()` are gone.
+- `AuReplayGain` (four floats, NAN = missing, 20 bytes) replaces `AuReplayGainInfo` (doubles and `has_*` flags, 72
+  bytes) everywhere: `AuPlayConfig.replaygain`, the ReplayGain cache, the background scan and
+  `au_loudness_to_replaygain()`. `AU_REPLAYGAIN_NONE` is the value with nothing set. The cache file's format is
+  unchanged. `AuReplayGainConfig.measure_wait_seconds` replaces `measure_wait_ms`.
+- Filters: `au_set_filters()`, `au_set_track_filters()` and `au_validate_filters()` replace
+  `au_set_global_filtergraph()`, `au_update_filtergraph()` and `au_validate_filtergraph()`. Every `au_fb_add_*()`
+  helper takes the instance name as its second argument (NULL = none) instead of `au_fb_set_name()` setting it for
+  the next call.
+- The graphic equalizer (`au_fb_add_equalizer()`) is one peaking biquad per band (FFmpeg `equalizer`, in double
+  precision) instead of `anequalizer`: it no longer takes the output channel count, and each band can be changed
+  while playing on its own (`equalizer@<name>_<band>`, commands `f`, `w`, `g`). It sounds slightly different, since
+  the bands are cookbook biquads rather than anequalizer's filters.
+- Loudness: `AuLoudnessMeter` replaces `AuLoudnessScanner`. `au_loudness_measure()` measures a file into a new meter,
+  `au_loudness_merge()` adds one meter to another, `au_loudness_result()` gives the values and
+  `au_loudness_file_count()` how many files a meter holds. A meter can be made on any thread and merged later, so an
+  album's tracks can be measured in parallel; merging is exact (the same result in any order, and as measuring all
+  of it at once). `au_loudness_analyze()` stays for a single file.
+
+### Fixed
+- In applications with a comma-decimal locale (`LC_NUMERIC` such as de_DE or fr_FR, which GTK applications set from
+  the user's settings), filter strings with decimals failed: FFmpeg reads option values with `strtod()`, so
+  `volume=0.5`, the filter builder's strings, `au_set_downmix()` matrices and `au_validate_filtergraph()` were all
+  rejected, and a track with such a filter played silence. ffaudio's threads now use the C locale, and the calls that
+  parse filter strings on the application's thread switch to it while they do.
+- `au_probe()` now opens inputs like the player does: MPEG-TS programs announced late are found, and network inputs
+  get the reconnect settings.
+
 ## 2.1.0 (2026-11-20)
 
 ### Added

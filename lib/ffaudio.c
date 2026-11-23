@@ -39,6 +39,8 @@
 #include "metadata.h"
 #include "gain_cache.h"
 #include "once.h"
+#include "numbers.h"
+#include "events.h"
 
 
 // The control thread sleeps until a message or a mixer event wakes it, or for this long: while tracks are loaded
@@ -123,7 +125,7 @@ void ff_post_track_msg(const MsgType type, const int32_t handle, const double d)
 
 void ff_log(const enum AU_LOG_LEVEL level, const char *fmt, ...) {
     AudioPlayer *ap = audio_player;
-    if (!fmt || !ap || !ap->notify_of_log_callback) return;
+    if (!fmt || !ap) return;
 
     va_list args;
     va_start(args, fmt);
@@ -149,19 +151,10 @@ void ff_log(const enum AU_LOG_LEVEL level, const char *fmt, ...) {
 //| Notifications (user callbacks)                      |
 //+-----------------------------------------------------+
 
-typedef enum NoteType {
-    NOTE_LOG, NOTE_EOF, NOTE_RESTART, NOTE_DURATION, NOTE_PREPARE_NEXT, NOTE_TRACK_STARTED, NOTE_DEVICE,
-    NOTE_DEVICES_CHANGED, NOTE_BUFFERING, NOTE_STREAM_METADATA,
-} NoteType;
-
+// An event and the strings it owns (s1: log message, device name or title; s2: artist)
 typedef struct Note {
-    NoteType type;
-    int32_t handle;
-    double d;
-    bool b1, b2;
-    int32_t i;
-    int64_t request;
-    char *text, *text2;
+    AuEvent ev;
+    char *s1, *s2;
 } Note;
 
 typedef struct NoteList {
@@ -171,67 +164,115 @@ typedef struct NoteList {
 
 static NoteList notes;  // control thread only
 
-static void note_add(const Note n) {
+static void note_add_owned(const AuEvent ev, char *s1, char *s2) {
     if (notes.n == notes.cap) {
         const int cap = notes.cap ? notes.cap * 2 : 32;
         Note *items = av_realloc_array(notes.items, cap, sizeof(Note));
-        if (!items) { av_free(n.text); av_free(n.text2); return; }
+        if (!items) { av_free(s1); av_free(s2); return; }
         notes.items = items;
         notes.cap = cap;
     }
-    notes.items[notes.n++] = n;
+    notes.items[notes.n++] = (Note){ .ev = ev, .s1 = s1, .s2 = s2 };
+}
+
+static void note_add(const AuEvent ev) {
+    note_add_owned(ev, NULL, NULL);
 }
 
 static void dispatch_notes(AudioPlayer *ap) {
-    void *ud = ap->user_data;
-    // Each note is copied out before its callback: a callback can run API calls inline that add notes and move the
-    // array. Notes added meanwhile are dispatched in this same pass.
+    // Each note is copied out before it is delivered: the list may grow meanwhile (notes added during this pass are
+    // delivered in it too)
     for (int i = 0; i < notes.n; i++) {
-        const Note n = notes.items[i];
+        Note n = notes.items[i];
         if (!SDL_AtomicGet(&ap->shutting_down)) {
-            switch (n.type) {
-                case NOTE_LOG:
-                    if (ap->notify_of_log_callback) ap->notify_of_log_callback(n.text, n.request, (enum AU_LOG_LEVEL)n.i, ud);
-                    break;
-                case NOTE_EOF:
-                    if (ap->notify_of_eof_callback) ap->notify_of_eof_callback(n.b1, n.b2, n.handle, ud);
-                    break;
-                case NOTE_RESTART:
-                    if (ap->notify_of_restart_callback) ap->notify_of_restart_callback(n.handle, n.d, n.b1, n.i, ud);
-                    break;
-                case NOTE_DURATION:
-                    if (ap->notify_of_duration_update_callback) ap->notify_of_duration_update_callback(n.handle, n.d, ud);
-                    break;
-                case NOTE_PREPARE_NEXT:
-                    if (ap->notify_of_prepare_next_callback) ap->notify_of_prepare_next_callback(n.handle, ud);
-                    break;
-                case NOTE_TRACK_STARTED:
-                    if (ap->notify_of_track_started_callback) ap->notify_of_track_started_callback(n.handle, ud);
-                    break;
-                case NOTE_STREAM_METADATA:
-                    if (ap->notify_of_stream_metadata_callback)
-                        ap->notify_of_stream_metadata_callback(n.handle, n.text, n.text2, ud);
-                    break;
-                case NOTE_BUFFERING:
-                    if (ap->notify_of_buffering_callback) ap->notify_of_buffering_callback(n.handle, n.b1, n.d, ud);
-                    break;
-                case NOTE_DEVICES_CHANGED:
-                    if (ap->notify_of_audio_devices_changed_callback) ap->notify_of_audio_devices_changed_callback(ud);
-                    break;
-                case NOTE_DEVICE:
-                    if (ap->notify_of_audio_device_update_callback) ap->notify_of_audio_device_update_callback(n.i, (int32_t)n.d, ud);
-                    break;
+            switch (n.ev.type) {
+                case AU_EVENT_LOG:             n.ev.data.log.message = n.s1; break;
+                case AU_EVENT_DEVICE:          n.ev.data.device.name = n.s1; break;
+                case AU_EVENT_STREAM_METADATA: n.ev.data.metadata.title = n.s1; n.ev.data.metadata.artist = n.s2; break;
+                default: break;
             }
+            if (ap->on_event) ap->on_event(&n.ev, ap->user_data);
+            else events_push(&n.ev);
         }
-        av_free(n.text);
-        av_free(n.text2);
+        av_free(n.s1);
+        av_free(n.s2);
     }
     notes.n = 0;
+}
+
+static AU_END end_reason(const TrackEndReason r) {
+    return r == END_SKIPPED ? AU_END_SKIPPED : r == END_ERROR ? AU_END_ERROR : AU_END_FINISHED;
 }
 
 //+-----------------------------------------------------+
 //| Track registry (control thread)                     |
 //+-----------------------------------------------------+
+
+//+-----------------------------------------------------+
+//| Published track state (any thread)                  |
+//+-----------------------------------------------------+
+
+// pub_mutex held
+static TrackPub *pub_find(AudioPlayer *ap, const int32_t handle) {
+    for (int i = 0; i < ap->n_pubs; i++)
+        if (ap->pubs[i].handle == handle) return &ap->pubs[i];
+    return NULL;
+}
+
+static void pub_add(AudioPlayer *ap, const int32_t handle) {
+    SDL_LockMutex(ap->pub_mutex);
+    if (ap->n_pubs == ap->cap_pubs) {
+        const int cap = ap->cap_pubs ? ap->cap_pubs * 2 : 8;
+        TrackPub *arr = av_realloc_array(ap->pubs, cap, sizeof(TrackPub));
+        if (!arr) { SDL_UnlockMutex(ap->pub_mutex); return; } // the track is then just not published
+        ap->pubs = arr;
+        ap->cap_pubs = cap;
+    }
+    ap->pubs[ap->n_pubs++] = (TrackPub){ .handle = handle };
+    SDL_UnlockMutex(ap->pub_mutex);
+}
+
+static void pub_remove(AudioPlayer *ap, const int32_t handle) {
+    SDL_LockMutex(ap->pub_mutex);
+    TrackPub *p = pub_find(ap, handle);
+    if (p) {
+        au_media_info_release(p->info);
+        *p = ap->pubs[--ap->n_pubs];
+    }
+    SDL_UnlockMutex(ap->pub_mutex);
+}
+
+static void pub_clear(AudioPlayer *ap) {
+    SDL_LockMutex(ap->pub_mutex);
+    for (int i = 0; i < ap->n_pubs; i++) au_media_info_release(ap->pubs[i].info);
+    ap->n_pubs = 0;
+    SDL_UnlockMutex(ap->pub_mutex);
+}
+
+void ff_publish_info(AudioPlayer *ap, const int32_t handle, const AuMediaInfo *info) {
+    const AuMediaInfo *ref = media_info_retain(info);
+    SDL_LockMutex(ap->pub_mutex);
+    TrackPub *p = pub_find(ap, handle);
+    const AuMediaInfo *old = NULL;
+    if (p) {
+        old = p->info;
+        p->info = ref;
+        ref = NULL;
+    }
+    SDL_UnlockMutex(ap->pub_mutex);
+    au_media_info_release(old);
+    au_media_info_release(ref);
+}
+
+void ff_publish_gain(AudioPlayer *ap, const int32_t handle, const double gain_db) {
+    SDL_LockMutex(ap->pub_mutex);
+    TrackPub *p = pub_find(ap, handle);
+    if (p) {
+        p->gain_db = gain_db;
+        p->gain_known = true;
+    }
+    SDL_UnlockMutex(ap->pub_mutex);
+}
 
 static TrackState *registry_find(AudioPlayer *ap, const int32_t handle) {
     for (int i = 0; i < ap->n_tracks; i++)
@@ -249,6 +290,7 @@ static bool registry_add(AudioPlayer *ap, TrackState *t) {
         ap->cap_tracks = cap;
     }
     ap->tracks[ap->n_tracks++] = t;
+    pub_add(ap, t->handle);
     return true;
 }
 
@@ -256,6 +298,7 @@ static void registry_remove(AudioPlayer *ap, const TrackState *t) {
     for (int i = 0; i < ap->n_tracks; i++) {
         if (ap->tracks[i] == t) {
             ap->tracks[i] = ap->tracks[--ap->n_tracks];
+            pub_remove(ap, t->handle);
             return;
         }
     }
@@ -268,16 +311,23 @@ static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
     if (reason == END_NATURAL && SDL_AtomicGet(&t->had_error))
         reason = END_ERROR;
     t->ended = true;
-    note_add((Note){ .type = NOTE_EOF, .handle = t->handle, .b1 = reason == END_SKIPPED, .b2 = reason == END_ERROR });
-    (void)ap;
+    pub_remove(ap, t->handle); // ended: au_track_info() no longer knows it, before the event says so
+    note_add((AuEvent){ .type = AU_EVENT_TRACK_ENDED, .handle = t->handle, .data.ended.reason = end_reason(reason) });
 }
+
+static void lock_mixer(AudioPlayer *ap);
+static void unlock_mixer(AudioPlayer *ap);
 
 // Ended tracks are stopped here and freed once their worker has returned (MSG_TRACK_EXITED wakes the loop): the control
 // thread never waits for a worker
 static void destroy_ended_tracks(AudioPlayer *ap) {
     for (int i = ap->n_tracks - 1; i >= 0; i--) {
         TrackState *t = ap->tracks[i];
-        if (!t->ended || t->role != ROLE_NONE) continue;
+        if (!t->ended) continue;
+        lock_mixer(ap); // the SDL callback moves tracks out of its slots
+        const bool in_mixer = mixer_has_track(&ap->mixer, t);
+        unlock_mixer(ap);
+        if (in_mixer) continue;
         if (ap->n_dying == ap->cap_dying) {
             const int cap = ap->cap_dying ? ap->cap_dying * 2 : 8;
             TrackState **arr = av_realloc_array(ap->dying, cap, sizeof(TrackState *));
@@ -314,24 +364,19 @@ static void remove_from_mixer(AudioPlayer *ap, TrackState *t) {
     if (m->current == t) { m->current = NULL; m->in_fade.active = false; }
     if (m->next == t) m->next = NULL;
     if (m->outgoing == t) { m->outgoing = NULL; m->out_fade.active = false; }
-    t->role = ROLE_NONE;
 }
 
 static void set_next_slot(AudioPlayer *ap, TrackState *t) {
     ap->mixer.next = t;
-    if (t) t->role = ROLE_NEXT;
 }
 
 static void set_current_slot(AudioPlayer *ap, TrackState *t) {
     ap->mixer.current = t;
     ap->mixer.in_fade.active = false;
-    if (t) {
-        if (ap->mixer.next == t) ap->mixer.next = NULL;
-        t->role = ROLE_CURRENT;
-    }
+    if (t && ap->mixer.next == t) ap->mixer.next = NULL;
 }
 
-// Seconds and sampled curve of the fade into `incoming`: its own (PlayAudioConfig.fade_in) or the configured one
+// Seconds and sampled curve of the fade into `incoming`: its own (AuPlayConfig.fade_in) or the configured one
 static double fade_for(const TrackState *incoming, const AuFade *fallback, const FadeCurve *fallback_curve,
                        const FadeCurve **curve) {
     if (incoming && incoming->has_fade_in_override) {
@@ -365,7 +410,7 @@ static TrackState *create_track(AudioPlayer *ap, const Msg *msg) {
     if (!t || !registry_add(ap, t)) {
         if (t) track_destroy(t);
         ff_log(AU_LOG_FATAL, "Failed to create a track for '%s'", msg->str);
-        note_add((Note){ .type = NOTE_EOF, .handle = msg->handle, .b1 = false, .b2 = true });
+        note_add((AuEvent){ .type = AU_EVENT_TRACK_ENDED, .handle = msg->handle, .data.ended.reason = AU_END_ERROR });
         return NULL;
     }
     return t;
@@ -411,8 +456,11 @@ static void cmd_set_next(AudioPlayer *ap, const Msg *msg) {
     else set_next_slot(ap, t);
     unlock_mixer(ap);
 
-    if (start_now && SDL_AtomicGet(&ap->paused))
+    if (start_now && SDL_AtomicGet(&ap->paused)) {
         cmd_pause(ap, false);
+        // au_get_status() says so too, unless a pause call came after this one was made
+        if (msg->pause_state & 1) SDL_AtomicCAS(&ap->pause_state, msg->pause_state, msg->pause_state & ~1);
+    }
 
     if (old_next) end_track(ap, old_next, END_SKIPPED);
     update_device_running(ap);
@@ -484,6 +532,15 @@ static void cmd_stop(AudioPlayer *ap) {
     update_device_running(ap);
 }
 
+// au_get_status()'s paused, as an API call sets it (any thread)
+static void pause_state_set(AudioPlayer *ap, const bool paused) {
+    for (;;) {
+        const int old = SDL_AtomicGet(&ap->pause_state);
+        const int next = (int)(((unsigned)old >> 1) + 1u) << 1 | (paused ? 1 : 0);
+        if (SDL_AtomicCAS(&ap->pause_state, old, next)) return;
+    }
+}
+
 static void cmd_pause(AudioPlayer *ap, const bool value) {
     if ((SDL_AtomicGet(&ap->paused) != 0) == value) return;
     SDL_AtomicSet(&ap->paused, value);
@@ -523,7 +580,7 @@ static void cmd_set_loop(AudioPlayer *ap, const int loop_count) {
 }
 
 // The curves are sampled here, on the control thread: a custom curve is called now and never by the mixer
-static void apply_crossfade_config(AudioPlayer *ap, const CrossfadeConfig *cfg) {
+static void apply_crossfade_config(AudioPlayer *ap, const AuCrossfade *cfg) {
     ap->crossfade = *cfg;
     fade_curve_build(&ap->play_curve, &cfg->on_play);
     fade_curve_build(&ap->skip_curve, &cfg->on_skip);
@@ -603,10 +660,12 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
     output_close(ap);
 
     int ret = output_open(ap, use_default, name, index);
+    bool fell_back = false;
     if (ret < 0 && !use_default) {
         ff_log(AU_LOG_ERROR, "Failed to open audio device '%s', trying the default device", name ? name : "?");
         ret = output_open(ap, true, NULL, -1);
         if (ret >= 0) {
+            fell_back = true;
             ap->use_default_device = true;
             av_freep(&ap->audio_device_name);
             ap->audio_device_index = -1;
@@ -614,6 +673,8 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
     }
     if (ret < 0) {
         ff_log(AU_LOG_ERROR, "Failed to open the default audio device");
+        note_add_owned((AuEvent){ .type = AU_EVENT_DEVICE, .data.device = { .ok = false } },
+                       name && !use_default ? av_strdup(name) : NULL, NULL);
         return ret;
     }
 
@@ -635,28 +696,29 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
         }
     }
 
-    note_add((Note){ .type = NOTE_DEVICE, .i = m->channels, .d = m->rate });
+    note_add_owned((AuEvent){ .type = AU_EVENT_DEVICE,
+                              .data.device = { .ok = true, .fell_back = fell_back, .sample_rate = m->rate,
+                                               .channels = m->channels } },
+                   av_strdup(ap->device_in_use ? ap->device_in_use : ""), NULL);
     update_device_running(ap);
     return AU_OK;
 }
 
+// msg->str: the device's name, NULL = the system default
 static int cmd_configure_device(AudioPlayer *ap, const Msg *msg) {
-    const bool use_default = !msg->has_device;
-    if (!use_default && (!msg->device.audio_device || msg->device.audio_device_index < 0))
-        return AU_ERR_INVALID_ARGUMENT;
-
+    const bool use_default = !msg->str;
     if (ap->device_id) {
         if (use_default && ap->use_default_device)
             return AU_ERR_NOTHING_TO_DO;
         if (!use_default && !ap->use_default_device && ap->audio_device_name &&
-            strcmp(ap->audio_device_name, msg->device.audio_device) == 0)
+            strcmp(ap->audio_device_name, msg->str) == 0)
             return AU_ERR_NOTHING_TO_DO;
     }
 
     av_freep(&ap->audio_device_name);
     ap->use_default_device = use_default;
-    ap->audio_device_index = use_default ? -1 : msg->device.audio_device_index;
-    if (!use_default && !(ap->audio_device_name = av_strdup(msg->device.audio_device)))
+    ap->audio_device_index = -1;
+    if (!use_default && !(ap->audio_device_name = av_strdup(msg->str)))
         return AU_ERR_NO_MEMORY;
 
     return reopen_output(ap, use_default, ap->audio_device_name, ap->audio_device_index);
@@ -682,7 +744,7 @@ static void msg_track_failed(AudioPlayer *ap, TrackState *t) {
 
     // Give the application a chance to queue something else
     if ((was_next || was_current) && !have_next)
-        note_add((Note){ .type = NOTE_PREPARE_NEXT, .handle = cur ? cur->handle : 0 });
+        note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = cur ? cur->handle : 0 });
     update_device_running(ap);
 }
 
@@ -692,7 +754,7 @@ static void report_duration(TrackState *t) {
     if (!t->duration_reported || fabs(d - t->reported_duration) > 0.01) {
         t->duration_reported = true;
         t->reported_duration = d;
-        note_add((Note){ .type = NOTE_DURATION, .handle = t->handle, .d = d });
+        note_add((AuEvent){ .type = AU_EVENT_DURATION, .handle = t->handle, .data.duration.seconds = d });
     }
 }
 
@@ -702,6 +764,12 @@ static void handle_track_msg(AudioPlayer *ap, const Msg *msg) {
 
     switch (msg->type) {
         case MSG_TRACK_OPENED:
+            SDL_LockMutex(t->seek_mutex);
+            const AuEvent opened = { .type = AU_EVENT_TRACK_OPENED, .handle = t->handle,
+                                     .data.opened = { track_duration(t), t->live,
+                                                      t->info ? t->info->seekable : false } };
+            SDL_UnlockMutex(t->seek_mutex);
+            note_add(opened);
             report_duration(t);
             break;
         case MSG_TRACK_FAILED:
@@ -714,14 +782,14 @@ static void handle_track_msg(AudioPlayer *ap, const Msg *msg) {
             unlock_mixer(ap);
             if (is_current_alone && !t->prepare_next_sent && SDL_AtomicGet(&t->loops_remaining) == 0) {
                 t->prepare_next_sent = true;
-                note_add((Note){ .type = NOTE_PREPARE_NEXT, .handle = t->handle });
+                note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = t->handle });
             }
             break;
         }
         case MSG_TRACK_SEEKED:
             t->prepare_next_sent = false; // after a seek back, the end comes again
-            note_add((Note){ .type = NOTE_RESTART, .handle = t->handle, .d = msg->d, .b1 = false,
-                             .i = SDL_AtomicGet(&t->loops_remaining) });
+            note_add((AuEvent){ .type = AU_EVENT_RESTARTED, .handle = t->handle,
+                                .data.restarted = { msg->d, false, SDL_AtomicGet(&t->loops_remaining) } });
             break;
         default:
             break;
@@ -744,11 +812,11 @@ static void process_mixer_events(AudioPlayer *ap) {
         if (t->ended) continue;
         switch (e->type) {
             case MIX_EV_TRACK_STARTED:
-                note_add((Note){ .type = NOTE_TRACK_STARTED, .handle = t->handle });
+                note_add((AuEvent){ .type = AU_EVENT_TRACK_STARTED, .handle = t->handle });
                 break;
             case MIX_EV_TRACK_LOOPED:
-                note_add((Note){ .type = NOTE_RESTART, .handle = t->handle, .d = e->position, .b1 = true,
-                                 .i = SDL_AtomicGet(&t->loops_remaining) });
+                note_add((AuEvent){ .type = AU_EVENT_RESTARTED, .handle = t->handle,
+                                    .data.restarted = { e->position, true, SDL_AtomicGet(&t->loops_remaining) } });
                 break;
             case MIX_EV_TRACK_ENDED:
                 end_track(ap, t, END_NATURAL);
@@ -764,7 +832,7 @@ static void process_mixer_events(AudioPlayer *ap) {
         lock_mixer(ap);
         for (int i = 0; i < ap->n_tracks; i++) {
             TrackState *t = ap->tracks[i];
-            if (!t->ended && t->role == ROLE_NONE) {
+            if (!t->ended && !mixer_has_track(&ap->mixer, t)) {
                 unlock_mixer(ap);
                 end_track(ap, t, END_NATURAL);
                 lock_mixer(ap);
@@ -812,7 +880,7 @@ static void check_device_list(AudioPlayer *ap) {
     ap->n_known_devices = n;
     if (had_list) {
         ff_log(AU_LOG_INFO, "Audio output devices changed (%d now)", n);
-        note_add((Note){ .type = NOTE_DEVICES_CHANGED });
+        note_add((AuEvent){ .type = AU_EVENT_DEVICES_CHANGED });
     }
 }
 
@@ -846,7 +914,7 @@ static void housekeeping(AudioPlayer *ap) {
         SDL_UnlockMutex(ap->format_mutex);
         if (end >= 0 && (end - pos) / speed <= lead) { // lead is wall clock time
             cur->prepare_next_sent = true;
-            note_add((Note){ .type = NOTE_PREPARE_NEXT, .handle = cur->handle });
+            note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = cur->handle });
         }
     }
 
@@ -860,7 +928,7 @@ static void housekeeping(AudioPlayer *ap) {
         unlock_mixer(ap);
         if (!playing) continue;
         for (StreamMeta *m; (m = track_take_stream_meta(t, at));) {
-            note_add((Note){ .type = NOTE_STREAM_METADATA, .handle = t->handle, .text = m->title, .text2 = m->artist });
+            note_add_owned((AuEvent){ .type = AU_EVENT_STREAM_METADATA, .handle = t->handle }, m->title, m->artist);
             m->title = m->artist = NULL;   // owned by the note now
             track_free_stream_meta(m);
         }
@@ -873,8 +941,8 @@ static void housekeeping(AudioPlayer *ap) {
         if (t->ended || !t->network) continue;
         const int b = SDL_AtomicGet(&t->buffering);
         if (b != t->buffering_reported || (b && now - t->buffering_note_ticks >= 500)) {
-            note_add((Note){ .type = NOTE_BUFFERING, .handle = t->handle, .b1 = b != 0,
-                             .d = SDL_AtomicGet(&t->buffered_ms) / 1000.0 });
+            note_add((AuEvent){ .type = AU_EVENT_BUFFERING, .handle = t->handle,
+                                .data.buffering = { b != 0, SDL_AtomicGet(&t->buffered_ms) / 1000.0 } });
             t->buffering_reported = b;
             t->buffering_note_ticks = now;
         }
@@ -901,8 +969,7 @@ static void housekeeping(AudioPlayer *ap) {
 //| Control thread                                      |
 //+-----------------------------------------------------+
 
-static void finish_sync(Msg *msg, const int result) {
-    if (msg->result) *msg->result = result;
+static void finish_sync(Msg *msg) {
     if (msg->done) SDL_SemPost(msg->done);
 }
 
@@ -922,7 +989,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_SET_DOWNMIX:
         case CMD_UPDATE_TRACK_FILTERS:
         case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
-        case CMD_CONFIGURE_DEVICE: finish_sync(msg, cmd_configure_device(ap, msg)); msg->done = NULL; break;
+        case CMD_CONFIGURE_DEVICE: cmd_configure_device(ap, msg); break;
         case CMD_GAIN_CACHE_CHANGED:
             for (int i = 0; i < ap->n_tracks; i++) {
                 TrackState *t = ap->tracks[i];
@@ -939,22 +1006,10 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
                 if (!ap->tracks[i]->ended)
                     track_update_gain(ap->tracks[i], false);
             break;
-        case CMD_GET_TRACK_INFO: {
-            TrackState *t = track_for_handle(ap, msg->handle);
-            *msg->out_ptr = (t && !t->ended) ? track_copy_info(t) : NULL;
-            break;
-        }
-        case CMD_GET_TRACK_GAIN: {
-            TrackState *t = track_for_handle(ap, msg->handle);
-            const bool known = t && !t->ended && ffa_load_acquire(&t->opened);
-            if (known) *msg->out_double = gain_centi_db(SDL_AtomicGet(&t->gain_mb)) / 100.0;
-            finish_sync(msg, known ? AU_OK : AU_ERR_NOTHING_TO_DO);
-            msg->done = NULL;
-            break;
-        }
         case CMD_SHUTDOWN:         return false;
         case MSG_LOG:
-            note_add((Note){ .type = NOTE_LOG, .text = msg->str, .i = msg->level, .request = msg->request });
+            note_add_owned((AuEvent){ .type = AU_EVENT_LOG,
+                                      .data.log = { (AU_LOG_LEVEL)msg->level, NULL, msg->request } }, msg->str, NULL);
             msg->str = NULL;
             break;
         case MSG_TRACK_OPENED:
@@ -980,12 +1035,14 @@ static void shutdown_tracks(AudioPlayer *ap) {
     for (int i = 0; i < ap->n_tracks; i++)
         track_destroy(ap->tracks[i]);
     ap->n_tracks = 0;
+    pub_clear(ap);
     for (int i = 0; i < ap->n_dying; i++)
         track_destroy(ap->dying[i]);
     ap->n_dying = 0;
 }
 
 static int control_thread(void *arg) {
+    ff_thread_use_c_locale();
     AudioPlayer *ap = arg;
     Msg *shutdown_msg = NULL;
     // Recognising itself is what lets callbacks call the API inline. SDL2 sets the id SDL_GetThreadID() returns only
@@ -1007,8 +1064,8 @@ static int control_thread(void *arg) {
             Msg *msg = list;
             list = list->next;
             if (shutdown_msg) {
-                // Commands after shutdown are dropped; synchronous callers must not hang
-                finish_sync(msg, AU_ERR_NOT_INITIALIZED);
+                // Commands after shutdown are dropped
+                finish_sync(msg);
                 msg_free(msg);
                 continue;
             }
@@ -1016,7 +1073,6 @@ static int control_thread(void *arg) {
                 shutdown_msg = msg;
                 continue;
             }
-            if (msg->done) finish_sync(msg, AU_OK);
             msg_free(msg);
             // Run callbacks between messages so they always see a consistent state
             process_mixer_events(ap);
@@ -1036,7 +1092,7 @@ static int control_thread(void *arg) {
     dispatch_notes(ap); // frees pending notes without calling back
     av_freep(&notes.items);
     notes.n = notes.cap = 0;
-    finish_sync(shutdown_msg, AU_OK);
+    finish_sync(shutdown_msg);
     msg_free(shutdown_msg);
     return 0;
 }
@@ -1045,15 +1101,23 @@ static int control_thread(void *arg) {
 //| Public API: lifetime                                |
 //+-----------------------------------------------------+
 
-int au_initialize(const InitializeConfig* config) {
+// A log message before the control thread runs (au_init() failing): straight to the application
+static void early_log(const AuConfig *config, const char *message) {
+    const AuEvent e = { .type = AU_EVENT_LOG, .data.log = { AU_LOG_FATAL, message, 0 } };
+    if (config->on_event) config->on_event(&e, config->user_data);
+    else events_push(&e);
+}
+
+int au_init(const AuConfig *config) {
     if (!config) return AU_ERR_INVALID_ARGUMENT;
     if (audio_player) return AU_ERR_ALREADY_INITIALIZED;
 
     AudioPlayer *ap = av_mallocz(sizeof(AudioPlayer));
     if (!ap) return AU_ERR_NO_MEMORY;
 
-    SDL_AtomicSet(&ap->volume, config->initial_volume >= 0 ? FFMIN(config->initial_volume, 100) : 100);
-    SDL_AtomicSet(&ap->loop_count, config->initial_loop_count);
+    const float volume = config->volume < 0 || !isfinite(config->volume) ? 1.0f : fminf(config->volume, 1.0f);
+    atomic_set_float(&ap->volume, volume);
+    SDL_AtomicSet(&ap->loop_count, config->loop_count);
     ap->prepare_next_seconds = config->prepare_next_seconds > 0 ? config->prepare_next_seconds : DEFAULT_PREPARE_NEXT_SECONDS;
     if (config->output_channels < 0 || config->output_channels > 8 ||
         (config->output_sample_rate != 0 && (config->output_sample_rate < 8000 || config->output_sample_rate > 384000))) {
@@ -1065,26 +1129,17 @@ int au_initialize(const InitializeConfig* config) {
     ap->downmix = AU_DOWNMIX_FULL_LEVEL;
     ap->speed = 1.0;
     ap->keep_pitch = true;
-    ap->find_stream_info = 1;
     ap->audio_device_index = -1;
     ap->use_default_device = true;
     ap->user_data = config->user_data;
-    ap->notify_of_log_callback = config->on_log;
-    ap->notify_of_eof_callback = config->on_eof;
-    ap->notify_of_restart_callback = config->on_restart;
-    ap->notify_of_duration_update_callback = config->on_duration_update;
-    ap->notify_of_prepare_next_callback = config->on_prepare_next;
-    ap->notify_of_track_started_callback = config->on_track_started;
-    ap->notify_of_audio_device_update_callback = config->on_audio_device_update;
-    ap->notify_of_audio_devices_changed_callback = config->on_audio_devices_changed;
-    ap->notify_of_buffering_callback = config->on_buffering;
-    ap->notify_of_stream_metadata_callback = config->on_stream_metadata;
+    ap->on_event = config->on_event;
+    events_open();
     ap->audio_target.fmt = AV_SAMPLE_FMT_NONE;
     ap->mixer.pause_gain = 1.0f;
     ap->mixer.pause_to = 1.0f;
-    ap->mixer.vol_gain = (float)SDL_AtomicGet(&ap->volume) / 100.0f;
+    ap->mixer.vol_gain = volume;
     fade_curve_build(&ap->mixer.linear_curve, NULL);
-    const CrossfadeConfig no_fades = {0};
+    const AuCrossfade no_fades = {0};
     apply_crossfade_config(ap, &no_fades); // no device yet: lock_mixer() does nothing
 
     ap->msg_mutex = SDL_CreateMutex();
@@ -1094,7 +1149,8 @@ int au_initialize(const InitializeConfig* config) {
     ap->status_mutex = SDL_CreateMutex();
     ap->ring_pool_mutex = SDL_CreateMutex();
     ap->started_sem = SDL_CreateSemaphore(0);
-    if (!ap->msg_mutex || !ap->wake_sem || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
+    ap->pub_mutex = SDL_CreateMutex();
+    if (!ap->pub_mutex || !ap->msg_mutex || !ap->wake_sem || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
         !ap->ring_pool_mutex || !ap->started_sem)
         goto fail_sync;
     publish_idle_status(ap);
@@ -1116,7 +1172,7 @@ int au_initialize(const InitializeConfig* config) {
     SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
 
     if (SDL_InitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) {
-        if (config->on_log) config->on_log(SDL_GetError(), 0, AU_LOG_FATAL, config->user_data);
+        early_log(config, SDL_GetError());
         goto fail_sync;
     }
     SDL_AddEventWatch(device_event_watch, ap);
@@ -1133,7 +1189,7 @@ int au_initialize(const InitializeConfig* config) {
     SDL_UnlockMutex(lock);
     ap->control_thread = SDL_CreateThread(control_thread, "ffa_control", ap);
     if (!ap->control_thread) {
-        if (config->on_log) config->on_log(SDL_GetError(), 0, AU_LOG_FATAL, config->user_data);
+        early_log(config, SDL_GetError());
         SDL_LockMutex(lock);
         audio_player = NULL;
         SDL_UnlockMutex(lock);
@@ -1149,6 +1205,7 @@ int au_initialize(const InitializeConfig* config) {
         goto fail_sync;
     }
     SDL_SemWait(ap->started_sem); // control_thread_id is set
+    au_set_device(config->device);   // AU_EVENT_DEVICE reports how it went
 
     ff_log(AU_LOG_INFO, "ffaudio %s initialized (audio driver: %s, resampler: %s)", au_get_version(),
            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "none", ap->use_soxr ? "soxr" : "swr");
@@ -1162,6 +1219,7 @@ fail_sync:
     SDL_DestroyMutex(ap->status_mutex);
     SDL_DestroyMutex(ap->ring_pool_mutex);
     SDL_DestroySemaphore(ap->started_sem);
+    SDL_DestroyMutex(ap->pub_mutex);
     av_free(ap);
     return AU_ERR_SDL;
 }
@@ -1196,12 +1254,13 @@ void au_shutdown(void) {
     Msg *rest = ap->msg_head;
     while (rest) {
         Msg *n = rest->next;
-        finish_sync(rest, AU_ERR_NOT_INITIALIZED);
+        finish_sync(rest);
         msg_free(rest);
         rest = n;
     }
     av_free(ap->tracks);
     av_free(ap->dying);
+    av_free(ap->pubs);
     av_free(ap->audio_device_name);
     av_free(ap->device_in_use);
     free_device_list(ap->known_devices, ap->n_known_devices);
@@ -1216,83 +1275,56 @@ void au_shutdown(void) {
     ring_storage_free_all(ap); // the tracks gave their storage back when they were destroyed
     SDL_DestroyMutex(ap->ring_pool_mutex);
     SDL_DestroySemaphore(ap->started_sem);
+    SDL_DestroyMutex(ap->pub_mutex);
     av_free(ap);
 
     avformat_network_deinit();
     SDL_QuitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS);
+    events_close();
 }
 
-// Posts a message and waits for its result, or runs it inline when called from a callback
-static int run_sync(AudioPlayer *ap, Msg *m) {
-    int32_t result = AU_OK;
-    if (on_control_thread(ap)) {
-        m->result = &result;
-        handle_msg(ap, m);
-        msg_free(m);
-        return result;
-    }
-    SDL_sem *done = SDL_CreateSemaphore(0);
-    if (!done) { msg_free(m); return AU_ERR_SDL; }
-    m->done = done;
-    m->result = &result;
-    msg_post(ap, m);
-    SDL_SemWait(done);
-    SDL_DestroySemaphore(done);
-    return result;
-}
-
-int au_configure_audio_device(const AudioDeviceConfig* custom_config) {
+int au_set_device(const char *name) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
+    if (name && !name[0]) return AU_ERR_INVALID_ARGUMENT;
     SDL_AtomicIncRef(&ap->request_count);
 
     Msg *m = msg_new(CMD_CONFIGURE_DEVICE);
     if (!m) return AU_ERR_NO_MEMORY;
-    if (custom_config) {
-        if (!custom_config->audio_device || custom_config->audio_device_index < 0) {
-            msg_free(m);
-            return AU_ERR_INVALID_ARGUMENT;
-        }
-        m->has_device = true;
-        if (!(m->str = av_strdup(custom_config->audio_device))) { msg_free(m); return AU_ERR_NO_MEMORY; }
-        m->device.audio_device = m->str;
-        m->device.audio_device_index = custom_config->audio_device_index;
-    }
-    return run_sync(ap, m);
+    if (name && !(m->str = av_strdup(name))) { msg_free(m); return AU_ERR_NO_MEMORY; }
+    msg_post(ap, m);
+    return AU_OK;
 }
 
-int au_get_audio_devices(int *out_total, char ***out_devices) {
-    if (!out_total || !out_devices) return AU_ERR_INVALID_ARGUMENT;
-    *out_total = 0;
-    *out_devices = NULL;
-    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+char **au_list_devices(int *count) {
+    if (count) *count = 0;
+    if (!count || !audio_player) return NULL;
 
-    const int count = SDL_GetNumAudioDevices(0);
-    if (count <= 0) return count == 0 ? AU_OK : AU_ERR_SDL;
+    const int n = SDL_GetNumAudioDevices(0);
+    if (n <= 0) return NULL;
 
-    char **devices = calloc((size_t)count, sizeof(char *));
-    if (!devices) return AU_ERR_NO_MEMORY;
+    char **devices = calloc((size_t)n, sizeof(char *));
+    if (!devices) return NULL;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < n; i++) {
         const char *name = SDL_GetAudioDeviceName(i, 0);
         if (!name || !(devices[i] = strdup(name))) {
             for (int j = 0; j < i; j++) free(devices[j]);
             free(devices);
-            return AU_ERR_SDL;
+            return NULL;
         }
     }
-    *out_total = count;
-    *out_devices = devices;
-    return AU_OK;
+    *count = n;
+    return devices;
 }
 
-void au_free_audio_devices(char **devices, const int total) {
+void au_free_devices(char **devices, const int total) {
     if (!devices) return;
     for (int i = 0; i < total; i++) free(devices[i]);
     free(devices);
 }
 
-int au_get_audio_device_name(char *buf, const size_t size) {
+int au_get_device_name(char *buf, const size_t size) {
     AudioPlayer *ap = audio_player;
     if (!buf || !size) return AU_ERR_INVALID_ARGUMENT;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
@@ -1305,24 +1337,11 @@ int au_get_audio_device_name(char *buf, const size_t size) {
     return ret;
 }
 
-int au_get_output_spec(int *out_sample_rate, int *out_channels) {
-    AudioPlayer *ap = audio_player;
-    if (!ap) return AU_ERR_NOT_INITIALIZED;
-    SDL_LockMutex(ap->format_mutex);
-    const bool ready = ap->output_ready;
-    const int rate = ap->audio_target.freq, channels = ap->audio_target.ch_layout.nb_channels;
-    SDL_UnlockMutex(ap->format_mutex);
-    if (!ready) return AU_ERR_DEVICE;
-    if (out_sample_rate) *out_sample_rate = rate;
-    if (out_channels) *out_channels = channels;
-    return AU_OK;
-}
-
 //+-----------------------------------------------------+
 //| Public API: playback                                |
 //+-----------------------------------------------------+
 
-static int32_t post_track_command(const MsgType type, const char *filename, const PlayAudioConfig *config) {
+static int32_t post_track_command(const MsgType type, const char *filename, const AuPlayConfig *config) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
     if (!filename || !filename[0]) return AU_ERR_INVALID_ARGUMENT;
@@ -1333,9 +1352,9 @@ static int32_t post_track_command(const MsgType type, const char *filename, cons
     if (config) {
         m->has_play_config = true;
         m->play_config = *config;
-        if (config->av_filtergraph) {
-            if (!(m->str2 = av_strdup(config->av_filtergraph))) { msg_free(m); return AU_ERR_NO_MEMORY; }
-            m->play_config.av_filtergraph = m->str2;
+        if (config->filters) {
+            if (!(m->str2 = av_strdup(config->filters))) { msg_free(m); return AU_ERR_NO_MEMORY; }
+            m->play_config.filters = m->str2;
         }
         if (config->http_headers) {
             if (!(m->str3 = av_strdup(config->http_headers))) { msg_free(m); return AU_ERR_NO_MEMORY; }
@@ -1352,18 +1371,21 @@ static int32_t post_track_command(const MsgType type, const char *filename, cons
             m->play_config.replaygain = &m->replaygain_override;
         }
     }
+    m->pause_state = SDL_AtomicGet(&ap->pause_state);
     m->handle = SDL_AtomicAdd(&ap->handle_count, 1) + 1;
     const int32_t handle = m->handle;
     msg_post(ap, m);
     return handle;
 }
 
-int32_t au_play_audio(const char *filename, const PlayAudioConfig* config) {
-    return post_track_command(CMD_PLAY, filename, config);
+int32_t au_play(const char *path, const AuPlayConfig *config) {
+    const int32_t handle = post_track_command(CMD_PLAY, path, config);
+    if (handle > 0) pause_state_set(audio_player, false); // playing unpauses
+    return handle;
 }
 
-int32_t au_set_next(const char *filename, const PlayAudioConfig *config) {
-    return post_track_command(CMD_SET_NEXT, filename, config);
+int32_t au_queue(const char *path, const AuPlayConfig *config) {
+    return post_track_command(CMD_SET_NEXT, path, config);
 }
 
 static void post_simple(const MsgType type, const int64_t i64, const double d, const bool b) {
@@ -1378,30 +1400,30 @@ static void post_simple(const MsgType type, const int64_t i64, const double d, c
     msg_post(ap, m);
 }
 
-void au_skip_to_next(void) { post_simple(CMD_SKIP, 0, 0, false); }
+void au_skip(void) { post_simple(CMD_SKIP, 0, 0, false); }
 
-void au_clear_next(void) { post_simple(CMD_CLEAR_NEXT, 0, 0, false); }
+void au_clear_queue(void) { post_simple(CMD_CLEAR_NEXT, 0, 0, false); }
 
-void au_stop_audio(void) { post_simple(CMD_STOP, 0, 0, false); }
+void au_stop(void) { post_simple(CMD_STOP, 0, 0, false); }
 
-void au_pause_audio(const bool value) { post_simple(CMD_PAUSE, 0, 0, value); }
-
-bool au_is_paused(void) {
+void au_pause(const bool paused) {
     AudioPlayer *ap = audio_player;
-    return ap && SDL_AtomicGet(&ap->paused);
+    if (!ap) return;
+    pause_state_set(ap, paused);
+    post_simple(CMD_PAUSE, 0, 0, paused);
 }
 
-void au_seek_percent(const double percentPos) {
-    if (percentPos < 0.0 || percentPos > 100.0 || isnan(percentPos)) return;
-    post_simple(CMD_SEEK_PERCENT, 0, percentPos, false);
+void au_seek(const double seconds) {
+    if (!isfinite(seconds) || seconds < 0) return;
+    post_simple(CMD_SEEK_US, llround(seconds * 1e6), 0, false);
 }
 
-void au_seek_time(const int64_t milliseconds) {
-    if (milliseconds < 0) return;
-    post_simple(CMD_SEEK_US, milliseconds * 1000, 0, false);
+void au_seek_fraction(const double fraction) {
+    if (!(fraction >= 0.0 && fraction <= 1.0)) return;
+    post_simple(CMD_SEEK_PERCENT, 0, fraction * 100.0, false);
 }
 
-int au_set_playback_speed(const double speed, const bool keep_pitch) {
+int au_set_speed(const double speed, const bool keep_pitch) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
     if (!isfinite(speed) || speed < 0.25 || speed > 4.0) return AU_ERR_INVALID_ARGUMENT;
@@ -1417,16 +1439,7 @@ int au_set_playback_speed(const double speed, const bool keep_pitch) {
     return AU_OK;
 }
 
-double au_get_playback_speed(void) {
-    AudioPlayer *ap = audio_player;
-    if (!ap) return 1.0;
-    SDL_LockMutex(ap->format_mutex);
-    const double speed = ap->speed;
-    SDL_UnlockMutex(ap->format_mutex);
-    return speed;
-}
-
-int au_set_crossfade(const CrossfadeConfig *config) {
+int au_set_crossfade(const AuCrossfade *config) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
     SDL_AtomicIncRef(&ap->request_count);
@@ -1441,7 +1454,7 @@ int au_set_crossfade(const CrossfadeConfig *config) {
 //| Public API: filters                                 |
 //+-----------------------------------------------------+
 
-int au_validate_filtergraph(const char *filters) {
+int au_validate_filters(const char *filters) {
     AudioPlayer *ap = audio_player;
     if (!filters || !filters[0]) return AU_OK;
 
@@ -1456,7 +1469,9 @@ int au_validate_filtergraph(const char *filters) {
         SDL_UnlockMutex(ap->format_mutex);
     }
     FilterChain c = {0};
+    const FfLocale saved = ff_c_locale_begin(); // parsed on the caller's thread
     const int ret = build_user_graph(&c, filters, NULL, rate, &layout, 0);
+    ff_c_locale_end(saved);
     free_filter_chain(&c);
     av_channel_layout_uninit(&layout);
     return ret < 0 ? AU_ERR_INVALID_ARGUMENT : AU_OK;
@@ -1477,19 +1492,19 @@ static int post_filter_msg(const MsgType type, const int32_t handle, const char 
     return AU_OK;
 }
 
-int au_set_global_filtergraph(const char *filters) {
+int au_set_filters(const char *filters) {
     if (!audio_player) return AU_ERR_NOT_INITIALIZED;
-    if (au_validate_filtergraph(filters) != AU_OK) {
+    if (au_validate_filters(filters) != AU_OK) {
         ff_log(AU_LOG_ERROR, "au_set_global_filtergraph: invalid filters \"%s\"", filters);
         return AU_ERR_INVALID_ARGUMENT;
     }
     return post_filter_msg(CMD_SET_GLOBAL_FILTERS, 0, filters, NULL, NULL);
 }
 
-int au_update_filtergraph(const int32_t handle, const char *filters) {
+int au_set_track_filters(const int32_t handle, const char *filters) {
     if (!audio_player) return AU_ERR_NOT_INITIALIZED;
     if (handle < 0) return AU_ERR_INVALID_ARGUMENT;
-    if (au_validate_filtergraph(filters) != AU_OK) {
+    if (au_validate_filters(filters) != AU_OK) {
         ff_log(AU_LOG_ERROR, "au_update_filtergraph: invalid filters \"%s\"", filters);
         return AU_ERR_INVALID_ARGUMENT;
     }
@@ -1512,7 +1527,7 @@ int au_set_replaygain(const AuReplayGainConfig *config) {
         if (!isfinite(cfg.preamp_db) || cfg.preamp_db < -15 || cfg.preamp_db > 15) return AU_ERR_INVALID_ARGUMENT;
         if (!isfinite(cfg.fallback_gain_db) || cfg.fallback_gain_db < -30 || cfg.fallback_gain_db > 15)
             return AU_ERR_INVALID_ARGUMENT;
-        if (cfg.measure_wait_ms > 10000) return AU_ERR_INVALID_ARGUMENT;
+        if (isnan(cfg.measure_wait_seconds) || cfg.measure_wait_seconds > 10) return AU_ERR_INVALID_ARGUMENT;
     }
     SDL_AtomicIncRef(&ap->request_count);
     Msg *m = msg_new(CMD_SET_REPLAYGAIN);
@@ -1522,27 +1537,37 @@ int au_set_replaygain(const AuReplayGainConfig *config) {
     return AU_OK;
 }
 
-AuMediaInfo *au_get_track_info(const int32_t handle) {
-    AudioPlayer *ap = audio_player;
-    if (!ap || handle < 0) return NULL;
-    void *info = NULL;
-    Msg *m = msg_new(CMD_GET_TRACK_INFO);
-    if (!m) return NULL;
-    m->handle = handle;
-    m->out_ptr = &info;
-    run_sync(ap, m);
-    return info;
+// handle 0 = the current track; pub_mutex held
+static TrackPub *pub_for(AudioPlayer *ap, int32_t handle) {
+    if (handle == 0) {
+        SDL_LockMutex(ap->status_mutex);
+        handle = ap->status.handle;
+        SDL_UnlockMutex(ap->status_mutex);
+        if (!handle) return NULL;
+    }
+    return pub_find(ap, handle);
 }
 
-int au_get_track_gain_db(const int32_t handle, double *out_gain_db) {
+const AuMediaInfo *au_track_info(const int32_t handle) {
+    AudioPlayer *ap = audio_player;
+    if (!ap || handle < 0) return NULL;
+    SDL_LockMutex(ap->pub_mutex);
+    const TrackPub *p = pub_for(ap, handle);
+    const AuMediaInfo *ref = p ? media_info_retain(p->info) : NULL;
+    SDL_UnlockMutex(ap->pub_mutex);
+    return ref;
+}
+
+int au_track_gain_db(const int32_t handle, double *out_db) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
-    if (handle < 0 || !out_gain_db) return AU_ERR_INVALID_ARGUMENT;
-    Msg *m = msg_new(CMD_GET_TRACK_GAIN);
-    if (!m) return AU_ERR_NO_MEMORY;
-    m->handle = handle;
-    m->out_double = out_gain_db;
-    return run_sync(ap, m);
+    if (handle < 0 || !out_db) return AU_ERR_INVALID_ARGUMENT;
+    SDL_LockMutex(ap->pub_mutex);
+    const TrackPub *p = pub_for(ap, handle);
+    const bool known = p && p->gain_known && p->info;
+    if (known) *out_db = p->gain_db;
+    SDL_UnlockMutex(ap->pub_mutex);
+    return known ? AU_OK : AU_ERR_NOTHING_TO_DO;
 }
 
 int au_set_downmix(const AU_DOWNMIX mode, const char *custom_filters) {
@@ -1579,37 +1604,26 @@ int au_send_filter_command(const int32_t handle, const char *target, const char 
 //| Public API: volume, looping, status                 |
 //+-----------------------------------------------------+
 
-void au_set_audio_volume(const int volume) {
+void au_set_volume(const float gain) {
     AudioPlayer *ap = audio_player;
-    if (!ap || volume < 0 || volume > 100) return;
+    if (!ap || !(gain >= 0.0f && gain <= 1.0f)) return;
     SDL_AtomicIncRef(&ap->request_count);
-    SDL_AtomicSet(&ap->volume, volume);
+    atomic_set_float(&ap->volume, gain);
 }
 
-int au_get_audio_volume(void) {
-    AudioPlayer *ap = audio_player;
-    return ap ? SDL_AtomicGet(&ap->volume) : -1;
-}
-
-void au_mute_audio(const bool value) {
+void au_set_muted(const bool muted) {
     AudioPlayer *ap = audio_player;
     if (!ap) return;
     SDL_AtomicIncRef(&ap->request_count);
-    SDL_AtomicSet(&ap->muted, value);
+    SDL_AtomicSet(&ap->muted, muted);
 }
 
-bool au_is_muted(void) {
+void au_set_loop_count(const int count) {
     AudioPlayer *ap = audio_player;
-    return ap && SDL_AtomicGet(&ap->muted);
-}
-
-void au_set_loop_count(const int loop_count) {
-    post_simple(CMD_SET_LOOP, loop_count < -1 ? -1 : loop_count, 0, false);
-}
-
-int au_get_loop_count(void) {
-    AudioPlayer *ap = audio_player;
-    return ap ? SDL_AtomicGet(&ap->loop_count) : 0;
+    if (!ap) return;
+    const int c = count < -1 ? -1 : count;
+    SDL_AtomicSet(&ap->loop_count, c);   // as last set; the command applies it to the tracks
+    post_simple(CMD_SET_LOOP, c, 0, false);
 }
 
 static StatusSnapshot read_status(AudioPlayer *ap) {
@@ -1619,31 +1633,44 @@ static StatusSnapshot read_status(AudioPlayer *ap) {
     return s;
 }
 
-int32_t au_get_current_handle(void) {
-    AudioPlayer *ap = audio_player;
-    return ap ? read_status(ap).handle : 0;
-}
-
-double au_get_audio_play_time(void) {
-    AudioPlayer *ap = audio_player;
-    if (!ap) return -1;
-    const StatusSnapshot s = read_status(ap);
-    if (!s.handle || s.position < 0) return -1;
-    if (!s.advancing) return s.position;
-
-    // The position is that of the last sample handed to SDL; what is audible lags by the buffered audio
-    const double period = s.period;
+// The position as heard: the snapshot has the last sample handed to SDL, which plays a buffer or two later
+static double audible_position(const StatusSnapshot *s) {
+    if (!s->handle || s->position < 0) return -1;
+    if (!s->advancing) return s->position;
+    const double period = s->period;
     const double now = (double)SDL_GetPerformanceCounter() / (double)SDL_GetPerformanceFrequency();
-    const double elapsed = FFMIN(FFMAX(now - s.callback_time, 0.0), period);
-    const double speed = s.speed > 0 ? s.speed : 1.0;
-    return FFMAX(0.0, s.position + (elapsed - 2 * period) * speed);
+    const double elapsed = FFMIN(FFMAX(now - s->callback_time, 0.0), period);
+    const double speed = s->speed > 0 ? s->speed : 1.0;
+    return FFMAX(0.0, s->position + (elapsed - 2 * period) * speed);
 }
 
-double au_get_audio_duration(void) {
+void au_get_status(AuStatus *out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->position = out->duration = -1;
+    out->volume = 1.0f;
+    out->speed = 1.0;
+    out->keep_pitch = true;
     AudioPlayer *ap = audio_player;
-    if (!ap) return -1;
+    if (!ap) return;
+
     const StatusSnapshot s = read_status(ap);
-    return s.handle ? s.duration : -1;
+    out->handle = s.handle;
+    out->position = audible_position(&s);
+    out->duration = s.handle ? s.duration : -1;
+    out->buffering = s.handle && s.buffering;
+    out->paused = (SDL_AtomicGet(&ap->pause_state) & 1) != 0;
+    out->muted = SDL_AtomicGet(&ap->muted) != 0;
+    out->volume = atomic_get_float(&ap->volume);
+    out->loop_count = SDL_AtomicGet(&ap->loop_count);
+    SDL_LockMutex(ap->format_mutex);
+    out->speed = ap->speed;
+    out->keep_pitch = ap->keep_pitch;
+    if (ap->output_ready) {
+        out->sample_rate = ap->audio_target.freq;
+        out->channels = ap->audio_target.ch_layout.nb_channels;
+    }
+    SDL_UnlockMutex(ap->format_mutex);
 }
 
 void au_wait_loop(void) {

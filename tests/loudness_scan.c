@@ -59,8 +59,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    AuLoudnessScanner *scanner = au_loudness_scanner_create(&config);
-    if (!scanner) return 1;
+    AuLoudnessMeter *album = NULL;   // every file measured, merged
 
     if (csv) printf("file,integrated_lufs,lra_lu,true_peak_dbtp,sample_peak_dbfs,replaygain_db,r128_q78\n");
     else printf("   LUFS     LRA    dBTP    dBFS      RG    R128  file\n");
@@ -68,19 +67,26 @@ int main(int argc, char **argv) {
     int failed = 0;
     for (int i = first; i < argc; i++) {
         AuLoudness l;
-        const int ret = au_loudness_scan_file(scanner, argv[i], &l);
+        AuLoudnessMeter *m = NULL;
+        const int ret = au_loudness_measure(argv[i], &config, &m);
         if (ret != AU_OK) {
             fprintf(stderr, "%s: could not be measured (%d)\n", argv[i], ret);
             failed++;
             continue;
         }
+        au_loudness_result(m, &l);
         print_row(csv, argv[i], &l);
+        if (!album) album = m;
+        else {
+            au_loudness_merge(album, m);
+            au_loudness_meter_free(m);
+        }
     }
 
-    AuLoudness album;
-    if (au_loudness_track_count(scanner) > 1 && au_loudness_album(scanner, &album) == AU_OK)
-        print_row(csv, "(album)", &album);
+    AuLoudness values;
+    if (au_loudness_file_count(album) > 1 && au_loudness_result(album, &values) == AU_OK)
+        print_row(csv, "(album)", &values);
 
-    au_loudness_scanner_free(scanner);
+    au_loudness_meter_free(album);
     return failed ? 2 : 0;
 }

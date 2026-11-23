@@ -17,7 +17,7 @@
  */
 
 /*
- * Persistent ReplayGain cache: path -> AuReplayGainInfo.
+ * Persistent ReplayGain cache: path -> AuReplayGain.
  *
  * In memory it is a hash table behind one mutex. On disk it is an append-only text file in the platform's
  * per-user data directory: every change appends one line, so a change is a single small write and a crash can
@@ -37,7 +37,6 @@
  */
 
 #include <errno.h>
-#include <locale.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #ifndef _WIN32
@@ -53,6 +52,7 @@
 
 #include "gain_cache.h"
 #include "once.h"
+#include "numbers.h"
 #include "ffaudio_loudness.h"
 #include "SDL2/SDL_atomic.h"
 #include "SDL2/SDL_filesystem.h"
@@ -65,7 +65,7 @@
 typedef struct Entry {
     char *path;
     uint32_t hash;
-    AuReplayGainInfo rg;
+    AuReplayGain rg;
     struct Entry *next;
 } Entry;
 
@@ -221,36 +221,24 @@ static char *default_dir(void) {
 //| Record encoding                                     |
 //+-----------------------------------------------------+
 
-// "%.6f" with '.' whatever the C locale says
-static void put_number(AVBPrint *bp, const bool has, const double v) {
-    if (!has || !isfinite(v)) {
+// "%.6f" in the C locale, "-" when missing
+static void put_number(AVBPrint *bp, const float v) {
+    if (!isfinite(v)) {
         av_bprint_chars(bp, '-', 1);
         return;
     }
     char tmp[64];
-    snprintf(tmp, sizeof(tmp), "%.6f", v);
-    const struct lconv *lc = localeconv();
-    const char dp = (lc && lc->decimal_point && lc->decimal_point[0]) ? lc->decimal_point[0] : '.';
-    for (char *c = tmp; *c; c++)
-        if (*c == dp) *c = '.';
-    av_bprintf(bp, "%s", tmp);
+    av_bprintf(bp, "%s", ff_format_number(tmp, sizeof(tmp), v, 6, 'f'));
 }
 
-static bool parse_number(const char *s, bool *has, double *v) {
-    *has = false;
-    *v = 0;
+// A number, or "-" for a missing one (NAN)
+static bool parse_number(const char *s, float *v) {
+    *v = NAN;
     if (!strcmp(s, "-")) return true;
-    double sign = 1, value = 0, scale = 0.1;
-    if (*s == '-' || *s == '+') { if (*s == '-') sign = -1; s++; }
-    bool digits = false;
-    while (*s >= '0' && *s <= '9') { value = value * 10 + (*s++ - '0'); digits = true; }
-    if (*s == '.') {
-        s++;
-        while (*s >= '0' && *s <= '9') { value += (*s++ - '0') * scale; scale *= 0.1; digits = true; }
-    }
-    if (*s || !digits) return false;
-    *has = true;
-    *v = sign * value;
+    const char *end;
+    double d;
+    if (!ff_parse_number(s, &end, &d, false) || *end) return false;
+    *v = (float)d;
     return true;
 }
 
@@ -281,15 +269,15 @@ static void unescape_path(char *p) {
     *w = '\0';
 }
 
-static void encode_set(AVBPrint *bp, const char *path, const AuReplayGainInfo *rg) {
+static void encode_set(AVBPrint *bp, const char *path, const AuReplayGain *rg) {
     av_bprintf(bp, "S\t");
-    put_number(bp, rg->has_track_gain, rg->track_gain_db);
+    put_number(bp, rg->track_gain_db);
     av_bprint_chars(bp, '\t', 1);
-    put_number(bp, rg->has_track_peak, rg->track_peak);
+    put_number(bp, rg->track_peak);
     av_bprint_chars(bp, '\t', 1);
-    put_number(bp, rg->has_album_gain, rg->album_gain_db);
+    put_number(bp, rg->album_gain_db);
     av_bprint_chars(bp, '\t', 1);
-    put_number(bp, rg->has_album_peak, rg->album_peak);
+    put_number(bp, rg->album_peak);
     av_bprintf(bp, "\t%d\t", rg->from_r128 ? 1 : 0);
     put_path(bp, path);
     av_bprint_chars(bp, '\n', 1);
@@ -336,7 +324,7 @@ static bool grow(void) {
     return true;
 }
 
-static int table_set(const char *path, const AuReplayGainInfo *rg) {
+static int table_set(const char *path, const AuReplayGain *rg) {
     const uint32_t hash = hash_path(path);
     Entry **slot = find_slot(path, hash);
     if (slot && *slot) {
@@ -497,12 +485,9 @@ static void apply_line(char *line) {
     }
     fields[5] = p;
 
-    AuReplayGainInfo rg;
-    memset(&rg, 0, sizeof(rg));
-    if (!parse_number(fields[0], &rg.has_track_gain, &rg.track_gain_db) ||
-        !parse_number(fields[1], &rg.has_track_peak, &rg.track_peak) ||
-        !parse_number(fields[2], &rg.has_album_gain, &rg.album_gain_db) ||
-        !parse_number(fields[3], &rg.has_album_peak, &rg.album_peak))
+    AuReplayGain rg = AU_REPLAYGAIN_NONE;
+    if (!parse_number(fields[0], &rg.track_gain_db) || !parse_number(fields[1], &rg.track_peak) ||
+        !parse_number(fields[2], &rg.album_gain_db) || !parse_number(fields[3], &rg.album_peak))
         return;
     rg.from_r128 = fields[4][0] == '1';
     unescape_path(fields[5]);
@@ -650,7 +635,7 @@ static int append_record(const char *record, const size_t len) {
 //| Player side                                         |
 //+-----------------------------------------------------+
 
-bool gain_cache_lookup(const char *path, AuReplayGainInfo *out) {
+bool gain_cache_lookup(const char *path, AuReplayGain *out) {
     if (!path || !path[0]) return false;
     SDL_mutex *m = cache_mutex();
     if (!m) return false;
@@ -718,7 +703,7 @@ int au_gain_cache_reload(void) {
     return AU_OK;
 }
 
-int au_gain_cache_set(const char *path, const AuReplayGainInfo *rg) {
+int au_gain_cache_set(const char *path, const AuReplayGain *rg) {
     if (!path || !path[0] || !rg) return AU_ERR_INVALID_ARGUMENT;
     SDL_mutex *m = cache_mutex();
     if (!m) return AU_ERR_SDL;
@@ -794,7 +779,7 @@ GainWait gain_cache_wait(const char *path, const int timeout_ms, SDL_atomic_t *a
     return result;
 }
 
-bool au_gain_cache_get(const char *path, AuReplayGainInfo *out) {
+bool au_gain_cache_get(const char *path, AuReplayGain *out) {
     return gain_cache_lookup(path, out);
 }
 
@@ -879,9 +864,9 @@ int au_gain_cache_foreach(const AuGainCacheVisitor visitor, void *user) {
     return visited;
 }
 
-int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGainInfo *out) {
+int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGain *out) {
     if (!path || !path[0]) return AU_ERR_INVALID_ARGUMENT;
-    AuReplayGainInfo rg;
+    AuReplayGain rg;
     if (gain_cache_lookup(path, &rg)) {
         if (out) *out = rg;
         return AU_OK;

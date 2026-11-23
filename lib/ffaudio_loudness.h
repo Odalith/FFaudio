@@ -20,19 +20,23 @@
  * Loudness analysis (EBU R128 / ITU-R BS.1770-4, ReplayGain 2.0), independent of playback.
  *
  * Measures files and returns the values; it never modifies them. Store the results in your own library
- * database and pass them to playback with PlayAudioConfig.replaygain (see au_loudness_to_replaygain()).
+ * database and pass them to playback with AuPlayConfig.replaygain (see au_loudness_to_replaygain()).
  *
- * - No au_initialize() needed, and it does not affect playback: scan while music plays.
+ * - No au_init() needed, and it does not affect playback: scan while music plays.
  * - A scanner is used by one thread at a time; run several scanners in parallel to scan faster.
- * - Album values: scan every track of the album with the same scanner, then call au_loudness_album().
+ * - Album values: measure every track of the album into its own meter (on as many threads as you like), merge
+ *   them, and take the result: the album's loudness is measured over all its audio, not averaged.
  *
- *   AuLoudnessScanner *s = au_loudness_scanner_create(NULL);
- *   AuLoudness track[12], album;
- *   for (int i = 0; i < n; i++)
- *       au_loudness_scan_file(s, files[i], &track[i]);
- *   au_loudness_album(s, &album);
- *   AuReplayGainInfo rg = au_loudness_to_replaygain(&track[0], &album);  // store, then use for playback
- *   au_loudness_scanner_free(s);
+ *   AuLoudnessMeter *album = NULL;
+ *   for (int i = 0; i < n; i++) {
+ *       AuLoudnessMeter *m;
+ *       if (au_loudness_measure(files[i], NULL, &m) != AU_OK) continue;
+ *       au_loudness_result(m, &track[i]);
+ *       if (!album) album = m;
+ *       else { au_loudness_merge(album, m); au_loudness_meter_free(m); }
+ *   }
+ *   au_loudness_result(album, &album_values);
+ *   au_loudness_meter_free(album);
  */
 
 #ifndef FFAUDIO_LOUDNESS_H
@@ -68,42 +72,40 @@ extern "C" {
         void *progress_user;
     } AuLoudnessConfig;
 
-    typedef struct AuLoudnessScanner AuLoudnessScanner;
+    // A measurement: one file, or several merged (an album). About 320 KB (two histograms of 0.01 LU bins).
+    typedef struct AuLoudnessMeter AuLoudnessMeter;
 
-    // config may be NULL (defaults: true peak on, no progress callback)
-    DLL_EXPORT AuLoudnessScanner *au_loudness_scanner_create(const AuLoudnessConfig *config);
-    DLL_EXPORT void au_loudness_scanner_free(AuLoudnessScanner *scanner);
+    // Measure one file into a new meter (*out; free it with au_loudness_meter_free()). config may be NULL
+    // (defaults: true peak on, no progress callback). Returns AU_OK, AU_ERR_FILE (can not be opened/decoded),
+    // AU_ERR_CANCELLED, AU_ERR_UNSUPPORTED (a live stream: it never ends), AU_ERR_INVALID_ARGUMENT or
+    // AU_ERR_NO_MEMORY; *out is NULL on error. URLs work too (the file is downloaded).
+    FFAUDIO_API int au_loudness_measure(const char *path, const AuLoudnessConfig *config, AuLoudnessMeter **out);
 
-    // Forget the scanned tracks (start a new album)
-    DLL_EXPORT void au_loudness_scanner_reset(AuLoudnessScanner *scanner);
+    // Add what `other` measured to `into` (an album is its tracks merged); `other` is unchanged. Exact: merging
+    // gives the same result as measuring everything in one go.
+    FFAUDIO_API int au_loudness_merge(AuLoudnessMeter *into, const AuLoudnessMeter *other);
 
-    // Measure one file and add it to the scanner's album. A file that fails or is cancelled is not added.
-    // Returns AU_OK, AU_ERR_FILE (can not be opened/decoded), AU_ERR_CANCELLED, AU_ERR_INVALID_ARGUMENT
-    // or AU_ERR_NO_MEMORY. out may be NULL if only the album values are wanted.
-    DLL_EXPORT int au_loudness_scan_file(AuLoudnessScanner *scanner, const char *filename, AuLoudness *out);
+    // The values of everything measured into the meter. Peaks are the largest of its files.
+    FFAUDIO_API int au_loudness_result(const AuLoudnessMeter *meter, AuLoudness *out);
 
-    // Album values over every file scanned since the scanner was created or reset. Album loudness is
-    // measured over all tracks together (not an average of the track values); peaks are the maximum.
-    // AU_ERR_NOTHING_TO_DO when no file has been scanned.
-    DLL_EXPORT int au_loudness_album(const AuLoudnessScanner *scanner, AuLoudness *out);
+    // How many files the meter holds (1 after au_loudness_measure(), more after merges)
+    FFAUDIO_API int au_loudness_file_count(const AuLoudnessMeter *meter);
 
-    // Number of files in the current album
-    DLL_EXPORT int au_loudness_track_count(const AuLoudnessScanner *scanner);
+    FFAUDIO_API void au_loudness_meter_free(AuLoudnessMeter *meter);
 
-    // Measure a single file without keeping a scanner around (track values only). URLs work too (it downloads the
-    // file); a live stream (no duration) returns AU_ERR_UNSUPPORTED, since it never ends.
-    DLL_EXPORT int au_loudness_analyze(const char *filename, const AuLoudnessConfig *config, AuLoudness *out);
+    // au_loudness_measure() and au_loudness_result() in one, for a single file
+    FFAUDIO_API int au_loudness_analyze(const char *path, const AuLoudnessConfig *config, AuLoudness *out);
 
-    // ReplayGain values for PlayAudioConfig.replaygain. album may be NULL. Peaks are the true peaks
+    // ReplayGain values for AuPlayConfig.replaygain. album may be NULL. Peaks are the true peaks
     // (the sample peaks when true peak was skipped). Silent results give no gain.
-    DLL_EXPORT AuReplayGainInfo au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album);
+    FFAUDIO_API AuReplayGain au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album);
 
     // The ReplayGain cache entry for `path` (see au_gain_cache_set() in ffaudio.h): returned straight away when
     // cached, otherwise the file is measured (track values only; it blocks for the scan, typically well under a
     // second per song) and the result is stored, which also updates the track if it is already queued or playing.
     // out may be NULL. Returns AU_OK or an error from au_loudness_analyze(); nothing is stored on error.
     // Avoid calling it from player callbacks: they run on the player's control thread, which would be held up.
-    DLL_EXPORT int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGainInfo *out);
+    FFAUDIO_API int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGain *out);
 
     //+-----------------------------------------------------+
     //| Background measurement queue                        |
@@ -113,10 +115,10 @@ extern "C" {
     // paths that are cached, queued or being measured are skipped, so it is fine to re-send a playlist window
     // whenever the position changes:
     //
-    //   on_track_started: au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
+    //   AU_EVENT_TRACK_STARTED: au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
     //
     // With AuReplayGainConfig.measure_missing the player also measures a starting track that has no value at
-    // all, and holds its start for up to measure_wait_ms. Works without au_initialize(); paths are only read.
+    // all, and holds its start for up to measure_wait_seconds. Works without au_init(); paths are only read.
 
     typedef enum AU_SCAN_PRIORITY {
         AU_SCAN_PREFETCH = 0,     // in request order, after urgent work
@@ -125,7 +127,7 @@ extern "C" {
 
     // A requested file was measured and stored (result AU_OK, rg set), could not be measured (AU_ERR_FILE, ...,
     // rg NULL) or was cancelled while being measured (AU_ERR_CANCELLED). Runs on a worker thread: keep it short.
-    typedef void (*NotifyOfGainCached)(const char *path, int result, const AuReplayGainInfo *rg, void *user);
+    typedef void (*NotifyOfGainCached)(const char *path, int result, const AuReplayGain *rg, void *user);
 
     typedef struct AuGainScanConfig {
         int threads;                  // worker threads, 1..16; 0 = default (2, or 1 on single-core machines)
@@ -135,27 +137,27 @@ extern "C" {
     } AuGainScanConfig;
 
     // Optional; NULL restores the defaults. Can be called at any time.
-    DLL_EXPORT int au_gain_scan_configure(const AuGainScanConfig *config);
+    FFAUDIO_API int au_gain_scan_configure(const AuGainScanConfig *config);
 
     // Measure these files (track values). Returns the number of paths queued (skipped ones not counted).
     // Skipped: paths already cached, already queued, and files that could not be measured before (not audio,
     // unreadable) and have not changed since (same size and modification time). Those failures are remembered
     // until au_gain_scan_stop(), so a playlist can be requested again and again without re-reading bad files.
-    DLL_EXPORT int au_gain_cache_request(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
+    FFAUDIO_API int au_gain_cache_request(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
 
     // Measure these files as one album: each gets its track values and the album values. Skipped only when
     // every path already has album values in the cache. Returns the number of paths queued.
-    DLL_EXPORT int au_gain_cache_request_album(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
+    FFAUDIO_API int au_gain_cache_request_album(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
 
     // Drop every queued request and stop the measurement in progress (the player's own requests stay)
-    DLL_EXPORT void au_gain_cache_cancel_requests(void);
+    FFAUDIO_API void au_gain_cache_cancel_requests(void);
 
     // Paths queued or being measured
-    DLL_EXPORT int au_gain_cache_pending(void);
+    FFAUDIO_API int au_gain_cache_pending(void);
 
     // Cancel everything (including the player's requests) and stop the worker threads; they start again on
     // the next request. Call it before unloading the library, or let the process exit.
-    DLL_EXPORT void au_gain_scan_stop(void);
+    FFAUDIO_API void au_gain_scan_stop(void);
 
 #ifdef __cplusplus
 } // extern "C"

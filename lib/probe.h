@@ -47,4 +47,18 @@ static inline bool ff_input_lacks_audio(const AVFormatContext *ic) {
     return true;
 }
 
+typedef enum FfOpenStep { FF_OPEN_OK, FF_OPEN_INPUT, FF_OPEN_NO_AUDIO, FF_OPEN_STREAM_INFO } FfOpenStep;
+
+// Open a file or URL for its audio, the same way everywhere (lib/input.c): the protocol whitelist, the network
+// settings and request headers (NULL for none), the interrupt callback (NULL for none), every MPEG-TS program,
+// the stream info, and the best audio stream, with every other stream discarded. On success *out_ic is open and
+// *out_stream is that stream's index; on failure *out_ic is NULL, the result is an AVERROR and *failed says which
+// step failed. Logs nothing: the callers word their own messages.
+int ff_open_audio_input(const char *path, const char *http_headers, const AVIOInterruptCB *interrupt,
+                        AVFormatContext **out_ic, int *out_stream, FfOpenStep *failed);
+
+struct AVCodecContext;
+// An open decoder for the stream with `threads` threads. AVERROR_DECODER_NOT_FOUND when FFmpeg has none.
+int ff_open_decoder(const AVStream *st, int threads, struct AVCodecContext **out);
+
 #endif //FFAUDIO_PROBE_H

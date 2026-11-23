@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ffAudio VERSION 2.1.0 LANGUAGES C)
+project(ffAudio VERSION 3.0.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -54,8 +54,7 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 set(FFAUDIO_PUBLIC_HEADERS
         lib/ffaudio.h
         lib/ffaudio_filters.h
-        lib/ffaudio_loudness.h
-        lib/delegates.h)
+        lib/ffaudio_loudness.h)
 
 add_library(ffaudio
         ${FFAUDIO_PUBLIC_HEADERS}
@@ -67,6 +66,11 @@ add_library(ffaudio
         lib/gain_cache.h
         lib/gain_scan.c
         lib/network.c
+        lib/input.c
+        lib/numbers.c
+        lib/events.c
+        lib/events.h
+        lib/numbers.h
         lib/network.h
         lib/once.h
         lib/metadata.h

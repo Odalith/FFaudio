@@ -17,22 +17,21 @@
  */
 
 /*
- * Helpers that build FFmpeg filter strings for PlayAudioConfig.av_filtergraph,
- * au_set_global_filtergraph() and au_update_filtergraph().
+ * Helpers that build FFmpeg filter strings for AuPlayConfig.filters, au_set_filters() and au_set_track_filters().
  *
  *   AuFilterBuilder *fb = au_fb_create();
  *   AuEqualizer eq = au_equalizer_defaults();
  *   eq.gain_db[0] = 3.0;                      // +3 dB at 31 Hz
- *   au_fb_add_equalizer(fb, channels, &eq);   // channels: see au_get_output_spec()
- *   au_fb_add_crossfeed(fb, NULL);            // NULL = default settings
- *   char *filters = au_fb_build(fb);          // "anequalizer=...,crossfeed=..."
- *   au_set_global_filtergraph(filters);
+ *   au_fb_add_equalizer(fb, "eq", &eq);       // named "eq": its bands can be changed while playing
+ *   au_fb_add_crossfeed(fb, NULL, NULL);      // no name, default settings
+ *   char *filters = au_fb_build(fb);          // "equalizer@eq_0=...,crossfeed=..."
+ *   au_set_filters(filters);
  *   au_free(filters);
  *   au_fb_free(fb);
  *
- * Every au_fb_add_* function returns AU_OK or a negative AU_RESULT and leaves the builder unchanged
- * on error; au_fb_last_error() explains what was wrong. Numbers are written independently of the
- * C locale, so a comma decimal separator can not break the strings.
+ * Every au_fb_add_* function returns AU_OK or a negative AU_RESULT and leaves the builder unchanged on error;
+ * au_fb_last_error() explains what was wrong. Numbers are written independently of the C locale, so a comma
+ * decimal separator can not break the strings.
  */
 
 #ifndef FFAUDIO_FILTERS_H
@@ -47,48 +46,45 @@ extern "C" {
 
     typedef struct AuFilterBuilder AuFilterBuilder;
 
-    DLL_EXPORT AuFilterBuilder *au_fb_create(void);
-    DLL_EXPORT void au_fb_free(AuFilterBuilder *fb);
-    DLL_EXPORT void au_fb_clear(AuFilterBuilder *fb);
+    FFAUDIO_API AuFilterBuilder *au_fb_create(void);
+    FFAUDIO_API void au_fb_free(AuFilterBuilder *fb);
+    FFAUDIO_API void au_fb_clear(AuFilterBuilder *fb);
 
     // The filter string so far, or NULL when nothing was added. Free it with au_free().
-    DLL_EXPORT char *au_fb_build(const AuFilterBuilder *fb);
+    FFAUDIO_API char *au_fb_build(const AuFilterBuilder *fb);
 
     // The filter string so far ("" when empty), owned by the builder
-    DLL_EXPORT const char *au_fb_peek(const AuFilterBuilder *fb);
+    FFAUDIO_API const char *au_fb_peek(const AuFilterBuilder *fb);
 
     // Why the last au_fb_add_* call failed ("" when it did not)
-    DLL_EXPORT const char *au_fb_last_error(const AuFilterBuilder *fb);
+    FFAUDIO_API const char *au_fb_last_error(const AuFilterBuilder *fb);
 
     // au_free() (declared in ffaudio.h) frees the strings au_fb_build() returns
 
     // Append any filter (or filter chain) as-is, e.g. "atempo=1.25"
-    DLL_EXPORT int au_fb_add(AuFilterBuilder *fb, const char *filter);
+    FFAUDIO_API int au_fb_add(AuFilterBuilder *fb, const char *filter);
 
     // Whether this FFmpeg build has a filter. Most are always there; bs2b needs FFmpeg built with libbs2b
     // (sofalizer, rubberband and others also depend on build options). The au_fb_add_* helpers check this
     // themselves and return AU_ERR_UNSUPPORTED.
-    DLL_EXPORT bool au_filter_available(const char *name);
+    FFAUDIO_API bool au_filter_available(const char *name);
 
     //+-----------------------------------------------------+
     //| Changing filters while playing                      |
     //+-----------------------------------------------------+
-    // Give the filters added by the NEXT au_fb_add_* call an instance name (letters, digits and '_', up to
-    // 32 characters), so au_send_filter_command() can change them while playing without rebuilding the chain.
-    // The command target is "<filter>@<name>"; each helper below lists the filters it adds, e.g.
+    // Every au_fb_add_* helper takes an instance name for the filters it adds (letters, digits and '_', up to 32
+    // characters; NULL or "" = none), so au_send_filter_command() can change them while playing without rebuilding
+    // the chain. The command target is "<filter>@<name>"; each helper below lists the filters it adds, e.g.
     //
-    //   au_fb_set_name(fb, "st");
-    //   au_fb_add_stereo(fb, &stereo);                                   // stereotools@st
+    //   au_fb_add_stereo(fb, "st", &stereo);                             // stereotools@st
     //   ...
     //   au_send_filter_command(0, "stereotools@st", "balance_out", "-0.3");
     //
-    // The name is used once (cleared by the next add call, also on error); NULL clears it. With a name, helpers
-    // also add the filters they would otherwise leave out because they change nothing (0 dB bands, balance
-    // 0, ...), so they are there to be changed. au_fb_add() ignores the name.
+    // With a name, helpers also add the filters they would otherwise leave out because they change nothing (0 dB
+    // bands, balance 0, ...), so they are there to be changed. au_fb_add() takes no name.
     //
-    // A command changes the tracks that are playing (handle 0) right away; tracks that start later are built
-    // from the filter string. To keep a change, also set an updated string (au_set_global_filtergraph()).
-    DLL_EXPORT int au_fb_set_name(AuFilterBuilder *fb, const char *name);
+    // A command changes the tracks that are playing (handle 0) right away; tracks that start later are built from
+    // the filter string. To keep a change, also set an updated string (au_set_filters()).
 
     //+-----------------------------------------------------+
     //| Gain                                                |
@@ -97,7 +93,7 @@ extern "C" {
     // Constant gain in dB (-60..+30). For loudness normalization use au_set_replaygain() instead: it reads the
     // file's ReplayGain/R128 tags and applies the gain in the mixer without a filter.
     // Filter: volume@<name>, command "volume" (e.g. "-3dB").
-    DLL_EXPORT int au_fb_add_volume_db(AuFilterBuilder *fb, double gain_db);
+    FFAUDIO_API int au_fb_add_volume_db(AuFilterBuilder *fb, const char *name, double gain_db);
 
     //+-----------------------------------------------------+
     //| Equalizer                                           |
@@ -105,7 +101,7 @@ extern "C" {
 
     #define AU_EQ_BANDS 10
 
-    // 10-band parametric equalizer (FFmpeg anequalizer), applied to every channel.
+    // 10-band equalizer: one peaking biquad (FFmpeg equalizer) per band, applied to every channel.
     typedef struct AuEqualizer {
         double gain_db[AU_EQ_BANDS];       // -30..+30 dB; 0 = band not used
         double frequency_hz[AU_EQ_BANDS];  // centre frequencies, see au_equalizer_defaults()
@@ -115,13 +111,12 @@ extern "C" {
     } AuEqualizer;
 
     // Octave bands at 31.25, 62.5, 125, 250, 500, 1k, 2k, 4k, 8k and 16k Hz, all gains 0
-    DLL_EXPORT AuEqualizer au_equalizer_defaults(void);
+    FFAUDIO_API AuEqualizer au_equalizer_defaults(void);
 
-    // channels: the output channel count (au_get_output_spec()), filters run at the output layout.
-    // Adds nothing when every gain is 0. Filters: volume@<name> (preamp, when not 0) and anequalizer@<name>;
-    // anequalizer's "change" command takes "<index>|f=<Hz>|w=<Hz>|g=<dB>", where the index counts the bands
-    // it was built with, channel by channel.
-    DLL_EXPORT int au_fb_add_equalizer(AuFilterBuilder *fb, int channels, const AuEqualizer *eq);
+    // Adds nothing when every gain is 0 (unless named). Filters: volume@<name> (preamp, when not 0) and one per band,
+    // equalizer@<name>_<band index> (0..9, the band's place in AuEqualizer); each takes the commands f (Hz),
+    // w (width in Hz) and g (dB), e.g. ("equalizer@eq_3", "g", "-2.5").
+    FFAUDIO_API int au_fb_add_equalizer(AuFilterBuilder *fb, const char *name, const AuEqualizer *eq);
 
     //+-----------------------------------------------------+
     //| Parametric equalizer (headphone correction)         |
@@ -155,7 +150,7 @@ extern "C" {
     // Filters: volume@<name> (preamp, when not 0) and one per band, <filter>@<name>_<band index>, where the filter
     // is equalizer, lowshelf, highshelf, lowpass or highpass. Each takes the commands f, w (Q) and g (dB), e.g.
     // ("equalizer@hp_3", "g", "-2.5").
-    DLL_EXPORT int au_fb_add_parametric_eq(AuFilterBuilder *fb, const AuParametricEq *eq);
+    FFAUDIO_API int au_fb_add_parametric_eq(AuFilterBuilder *fb, const char *name, const AuParametricEq *eq);
 
     // Read EqualizerAPO text, e.g. the "ParametricEQ.txt" files AutoEq publishes for most headphones:
     //
@@ -167,7 +162,7 @@ extern "C" {
     // "BW Oct <octaves>"; a missing Q is 0.7071. OFF filters, comments (#) and blank lines are skipped; several
     // Preamp lines add up. Anything else (per-channel sections, GraphicEQ, other filter types) is an error, so a
     // profile is never applied half right. On error, `error` (may be NULL) says which line and why.
-    DLL_EXPORT int au_parametric_eq_parse(const char *text, AuParametricEq *out, char *error, size_t error_size);
+    FFAUDIO_API int au_parametric_eq_parse(const char *text, AuParametricEq *out, char *error, size_t error_size);
 
     //+-----------------------------------------------------+
     //| Tone, stereo image, dynamics                        |
@@ -175,7 +170,7 @@ extern "C" {
 
     // Bass and treble controls: shelves at 100 Hz and 10 kHz, -20..+20 dB each. A 0 dB control is left out
     // (unless named). Filters: bass@<name> and treble@<name>, command "g" (dB).
-    DLL_EXPORT int au_fb_add_tone(AuFilterBuilder *fb, double bass_db, double treble_db);
+    FFAUDIO_API int au_fb_add_tone(AuFilterBuilder *fb, const char *name, double bass_db, double treble_db);
 
     // Stereo output only (like crossfeed and bs2b)
     typedef struct AuStereo {
@@ -188,11 +183,11 @@ extern "C" {
     } AuStereo;
 
     // balance 0, width 1, no swap
-    DLL_EXPORT AuStereo au_stereo_defaults(void);
+    FFAUDIO_API AuStereo au_stereo_defaults(void);
 
     // Adds nothing for the defaults (unless named). Filter: stereotools@<name>; commands balance_out (-1..1),
     // slev (width, 0.015625..64) and mode ("lr>lr", "lr>l+r" = mono, "lr>rl" = swap).
-    DLL_EXPORT int au_fb_add_stereo(AuFilterBuilder *fb, const AuStereo *stereo);
+    FFAUDIO_API int au_fb_add_stereo(AuFilterBuilder *fb, const char *name, const AuStereo *stereo);
 
     typedef struct AuLimiter {
         double ceiling_db;     // -24..0, default -1: peaks above this are turned down smoothly
@@ -200,13 +195,13 @@ extern "C" {
         double release_ms;     // 1..8000, default 50
     } AuLimiter;
 
-    DLL_EXPORT AuLimiter au_limiter_defaults(void);
+    FFAUDIO_API AuLimiter au_limiter_defaults(void);
 
     // A look-ahead peak limiter: a safety net after equalizer boosts, widening or compression. It does not raise
     // quiet audio. It runs before ffaudio's volume and ReplayGain stage, so with ReplayGain boosts also enable
     // AuReplayGainConfig.prevent_clipping. config NULL = defaults. Filter: alimiter@<name>; commands limit
     // (linear 0.0625..1), attack, release.
-    DLL_EXPORT int au_fb_add_limiter(AuFilterBuilder *fb, const AuLimiter *config);
+    FFAUDIO_API int au_fb_add_limiter(AuFilterBuilder *fb, const char *name, const AuLimiter *config);
 
     typedef struct AuCompressor {
         double threshold_db;   // -60..0: compression starts above this level
@@ -218,14 +213,14 @@ extern "C" {
     } AuCompressor;
 
     // Gentle levelling for mixed playlists: -18 dB, 2:1, 20 ms / 250 ms, 6 dB knee, +3 dB makeup
-    DLL_EXPORT AuCompressor au_compressor_defaults(void);
+    FFAUDIO_API AuCompressor au_compressor_defaults(void);
     // Night mode, quiet passages up and loud ones down for low-volume listening: -32 dB, 4:1, 10 ms / 300 ms,
     // 8 dB knee, +9 dB makeup. Best followed by a limiter.
-    DLL_EXPORT AuCompressor au_compressor_night(void);
+    FFAUDIO_API AuCompressor au_compressor_night(void);
 
     // Dynamic range compressor (all channels linked). config NULL = au_compressor_defaults(). Filter:
     // acompressor@<name>; commands threshold and makeup (linear), ratio, attack, release, knee (linear 1..8).
-    DLL_EXPORT int au_fb_add_compressor(AuFilterBuilder *fb, const AuCompressor *config);
+    FFAUDIO_API int au_fb_add_compressor(AuFilterBuilder *fb, const char *name, const AuCompressor *config);
 
     //+-----------------------------------------------------+
     //| Headphones                                          |
@@ -239,11 +234,11 @@ extern "C" {
         double level_out;    // output gain 0..1, default 1.0
     } AuCrossfeed;
 
-    DLL_EXPORT AuCrossfeed au_crossfeed_defaults(void);
+    FFAUDIO_API AuCrossfeed au_crossfeed_defaults(void);
 
     // FFmpeg crossfeed (stereo output only). config NULL = defaults. Filter: crossfeed@<name>; commands strength,
     // range, slope, level_in, level_out.
-    DLL_EXPORT int au_fb_add_crossfeed(AuFilterBuilder *fb, const AuCrossfeed *config);
+    FFAUDIO_API int au_fb_add_crossfeed(AuFilterBuilder *fb, const char *name, const AuCrossfeed *config);
 
     typedef enum AU_BS2B_PROFILE {
         AU_BS2B_DEFAULT = 0,   // fcut 700 Hz, feed 4.5 dB
@@ -252,10 +247,10 @@ extern "C" {
     } AU_BS2B_PROFILE;
 
     // Bauer stereo-to-binaural (stereo output only; needs FFmpeg built with libbs2b). Filter: bs2b@<name>
-    DLL_EXPORT int au_fb_add_bs2b_profile(AuFilterBuilder *fb, AU_BS2B_PROFILE profile);
+    FFAUDIO_API int au_fb_add_bs2b_profile(AuFilterBuilder *fb, const char *name, AU_BS2B_PROFILE profile);
 
     // fcut_hz: 300..2000, feed_tenth_db: 10..150 (1.0..15.0 dB)
-    DLL_EXPORT int au_fb_add_bs2b(AuFilterBuilder *fb, int fcut_hz, int feed_tenth_db);
+    FFAUDIO_API int au_fb_add_bs2b(AuFilterBuilder *fb, const char *name, int fcut_hz, int feed_tenth_db);
 
 #ifdef __cplusplus
 } // extern "C"

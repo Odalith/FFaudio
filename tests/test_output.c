@@ -3,6 +3,7 @@
  * sample by sample (gapless joins, crossfade length, fades, volume ramps, filters).
  */
 #include "test_common.h"
+#include <locale.h>
 #include <math.h>
 #ifndef _WIN32
 #include <sys/stat.h> // mkfifo
@@ -47,7 +48,8 @@ static void start_capture_channels(const char *name, const int channels) {
 static Capture stop_capture(void) {
     Capture c = {0};
     int rate = 0, channels = 0;
-    au_get_output_spec(&rate, &channels);
+    rate = tc_status().sample_rate;
+    channels = tc_status().channels;
     au_shutdown();
 
     FILE *f = fopen(out_path, "rb");
@@ -123,8 +125,8 @@ static void wait_until_idle(int eofs, uint32_t timeout_ms) {
 
 static void test_gapless_join(void) {
     start_capture("gapless");
-    au_play_audio(fx("join_a.flac"), NULL);
-    au_set_next(fx("join_b.flac"), NULL);
+    au_play(fx("join_a.flac"), NULL);
+    au_queue(fx("join_b.flac"), NULL);
     wait_until_idle(2, 6000);
     Capture c = stop_capture();
 
@@ -143,8 +145,8 @@ static void test_gapless_join(void) {
 static void test_gapless_resampled(void) {
     // Second track at 44.1 kHz: resampled to the output rate, the join must still be seamless
     start_capture("gapless_rs");
-    au_play_audio(fx("join_a.flac"), NULL);
-    au_set_next(fx("join_c_44k.flac"), NULL);
+    au_play(fx("join_a.flac"), NULL);
+    au_queue(fx("join_c_44k.flac"), NULL);
     wait_until_idle(2, 6000);
     Capture c = stop_capture();
 
@@ -161,10 +163,10 @@ static void test_gapless_resampled(void) {
 
 static void test_crossfade_at_end(void) {
     start_capture("crossfade");
-    const CrossfadeConfig xf = { .on_track_end = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER } };
+    const AuCrossfade xf = { .on_track_end = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER } };
     au_set_crossfade(&xf);
-    au_play_audio(fx("join_a.flac"), NULL);
-    au_set_next(fx("join_b.flac"), NULL);
+    au_play(fx("join_a.flac"), NULL);
+    au_queue(fx("join_b.flac"), NULL);
     wait_until_idle(2, 6000);
     Capture c = stop_capture();
 
@@ -179,11 +181,11 @@ static void test_crossfade_at_end(void) {
 
 static void test_fade_out_on_stop(void) {
     start_capture("stopfade");
-    const CrossfadeConfig xf = { .on_stop = { .seconds = 0.3, .curve = AU_FADE_LINEAR } };
+    const AuCrossfade xf = { .on_stop = { .seconds = 0.3, .curve = AU_FADE_LINEAR } };
     au_set_crossfade(&xf);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(800);
-    au_stop_audio();
+    au_stop();
     wait_until_idle(1, 3000);
     Capture c = stop_capture();
 
@@ -203,15 +205,15 @@ static void test_fade_out_on_stop(void) {
 
 static void test_volume_ramp(void) {
     start_capture("volume");
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(600);
-    au_set_audio_volume(100);
+    au_set_volume(1.0f);
     tc_sleep_ms(300);
-    au_set_audio_volume(0);
+    au_set_volume(0.0f);
     tc_sleep_ms(300);
-    au_set_audio_volume(50);
+    au_set_volume(0.5f);
     tc_sleep_ms(300);
-    au_stop_audio();
+    au_stop();
     wait_until_idle(1, 3000);
     Capture c = stop_capture();
 
@@ -224,13 +226,13 @@ static void test_volume_ramp(void) {
     free(c.samples);
 }
 
-static void test_user_filter(void) {
-    // volume=0.5 halves the level: compare against the same file without the filter
-    start_capture("filter");
-    const PlayAudioConfig plain = {0};
-    const PlayAudioConfig halved = { .av_filtergraph = "volume=0.5" };
-    au_play_audio(fx("join_a.flac"), &plain);
-    au_set_next(fx("join_b.flac"), &halved);
+// volume=0.5 halves the level: compare against the same file without the filter
+static void check_user_filter(const char *name) {
+    start_capture(name);
+    const AuPlayConfig plain = {0};
+    const AuPlayConfig halved = { .filters = "volume=0.5" };
+    au_play(fx("join_a.flac"), &plain);
+    au_queue(fx("join_b.flac"), &halved);
     wait_until_idle(2, 6000);
     Capture c = stop_capture();
 
@@ -240,9 +242,45 @@ static void test_user_filter(void) {
     const size_t mid = first + (size_t)c.rate; // join point
     for (size_t i = first + c.rate / 10; i < mid - c.rate / 10; i++) p1 = fmaxf(p1, frame_peak(&c, i));
     for (size_t i = mid + c.rate / 10; i < last - c.rate / 10; i++) p2 = fmaxf(p2, frame_peak(&c, i));
-    printf("   filter: peak %.3f then %.3f\n", p1, p2);
-    CHECK(fabsf(p2 / p1 - 0.5f) < 0.02f);
+    printf("   %s: peak %.3f then %.3f\n", name, p1, p2);
+    CHECK(p1 > 0 && fabsf(p2 / p1 - 0.5f) < 0.02f);
     free(c.samples);
+}
+
+static void test_user_filter(void) {
+    check_user_filter("filter");
+}
+
+// An application with a comma-decimal locale (GTK applications set the user's): FFmpeg reads "0.5" with strtod(),
+// so the tracks' threads must not use that locale
+static void test_user_filter_comma_locale(void) {
+    const char *locales[] = { "de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "nl_NL.UTF-8" };
+    const char *set = NULL;
+    for (size_t i = 0; i < sizeof(locales) / sizeof(locales[0]) && !set; i++)
+        set = setlocale(LC_NUMERIC, locales[i]);
+    if (!set) {
+        printf("   (no comma-decimal locale installed, skipped)\n");
+        return;
+    }
+    CHECK(au_validate_filters("volume=0.5") == AU_OK);   // parsed on this thread
+    check_user_filter("filter, comma locale");
+
+    // The downmix check (this thread) and a speed stage with "tempo=0.866025404" (the track's thread)
+    start_capture("speed, comma locale");
+    CHECK(au_set_downmix(AU_DOWNMIX_CUSTOM, "pan=stereo|c0=0.5*FL+0.5*FC|c1=0.5*FR+0.5*FC") == AU_OK);
+    CHECK(au_set_downmix(AU_DOWNMIX_FULL_LEVEL, NULL) == AU_OK);
+    CHECK(au_set_speed(1.5, true) == AU_OK);
+    au_play(fx("join_a.flac"), NULL);
+    CHECK(TC_WAIT_FIELD(eof, 1, 5000));
+    CHECK(tc_snapshot().eof_error == 0);
+    Capture c = stop_capture();
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const double seconds = (double)(last - first) / c.rate;
+    printf("   1 s at 1.5x: %.3f s audible\n", seconds);
+    CHECK(seconds > 0.6 && seconds < 0.75);
+    free(c.samples);
+    setlocale(LC_NUMERIC, "C");
 }
 
 // Audible length of a two-track transition, plus sanity checks shared by the crossfade tests
@@ -264,12 +302,12 @@ static float linear_curve(float t, void *user) { (void)user; return t; }
 
 static void test_crossfade_on_skip(void) {
     start_capture("skipfade");
-    const CrossfadeConfig xf = { .on_skip = { .seconds = 0.3, .curve = AU_FADE_LINEAR } };
+    const AuCrossfade xf = { .on_skip = { .seconds = 0.3, .curve = AU_FADE_LINEAR } };
     au_set_crossfade(&xf);
-    au_play_audio(fx("long_6s.flac"), NULL);
-    au_set_next(fx("join_b.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
+    au_queue(fx("join_b.flac"), NULL);
     tc_sleep_ms(800);
-    au_skip_to_next();
+    au_skip();
     wait_until_idle(2, 5000);
     size_t silence;
     float jump;
@@ -284,11 +322,11 @@ static void test_crossfade_on_skip(void) {
 
 static void test_crossfade_on_play(void) {
     start_capture("playfade");
-    const CrossfadeConfig xf = { .on_play = { .seconds = 0.3, .curve = AU_FADE_S_CURVE } };
+    const AuCrossfade xf = { .on_play = { .seconds = 0.3, .curve = AU_FADE_S_CURVE } };
     au_set_crossfade(&xf);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(800);
-    au_play_audio(fx("join_b.flac"), NULL);
+    au_play(fx("join_b.flac"), NULL);
     wait_until_idle(2, 5000);
     size_t silence;
     float jump;
@@ -300,16 +338,16 @@ static void test_crossfade_on_play(void) {
 
 static void test_pause_fade(void) {
     start_capture("pausefade");
-    const CrossfadeConfig xf = { .on_pause = { .seconds = 0.2, .curve = AU_FADE_S_CURVE } };
+    const AuCrossfade xf = { .on_pause = { .seconds = 0.2, .curve = AU_FADE_S_CURVE } };
     au_set_crossfade(&xf);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(600);
-    au_pause_audio(true);
+    au_pause(true);
     tc_sleep_ms(500);
-    CHECK(au_is_paused());
-    au_pause_audio(false);
+    CHECK(tc_status().paused);
+    au_pause(false);
     tc_sleep_ms(500);
-    au_stop_audio();
+    au_stop();
     wait_until_idle(1, 3000);
     size_t silence;
     float jump;
@@ -322,9 +360,9 @@ static void test_per_track_fade_override(void) {
     start_capture("override");
     // No crossfade configured, but the queued track asks for a 0.4 s fade in
     const AuFade fade = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER };
-    const PlayAudioConfig cfg = { .fade_in = &fade };
-    au_play_audio(fx("join_a.flac"), NULL);
-    au_set_next(fx("join_b.flac"), &cfg);
+    const AuPlayConfig cfg = { .fade_in = &fade };
+    au_play(fx("join_a.flac"), NULL);
+    au_queue(fx("join_b.flac"), &cfg);
     wait_until_idle(2, 6000);
     const double s = transition_seconds("override", NULL, NULL);
     CHECK(fabs(s - 1.6) < 0.005);
@@ -333,10 +371,10 @@ static void test_per_track_fade_override(void) {
 static void test_short_tracks_stay_gapless(void) {
     start_capture("shortrule");
     // 0.6 s fades need tracks of at least 1.2 s (default rule); 1 s tracks play gapless instead
-    const CrossfadeConfig xf = { .on_track_end = { .seconds = 0.6, .curve = AU_FADE_EQUAL_POWER } };
+    const AuCrossfade xf = { .on_track_end = { .seconds = 0.6, .curve = AU_FADE_EQUAL_POWER } };
     au_set_crossfade(&xf);
-    au_play_audio(fx("join_a.flac"), NULL);
-    au_set_next(fx("join_b.flac"), NULL);
+    au_play(fx("join_a.flac"), NULL);
+    au_queue(fx("join_b.flac"), NULL);
     wait_until_idle(2, 6000);
     const double s = transition_seconds("short rule", NULL, NULL);
     CHECK(fabs(s - 2.0) < 0.01);
@@ -344,10 +382,10 @@ static void test_short_tracks_stay_gapless(void) {
 
 static void test_custom_curve(void) {
     start_capture("custom");
-    const CrossfadeConfig xf = { .on_track_end = { .seconds = 0.3, .curve = AU_FADE_CUSTOM, .custom = linear_curve } };
+    const AuCrossfade xf = { .on_track_end = { .seconds = 0.3, .curve = AU_FADE_CUSTOM, .custom = linear_curve } };
     au_set_crossfade(&xf);
-    au_play_audio(fx("join_a.flac"), NULL);
-    au_set_next(fx("join_b.flac"), NULL);
+    au_play(fx("join_a.flac"), NULL);
+    au_queue(fx("join_b.flac"), NULL);
     wait_until_idle(2, 6000);
     size_t silence;
     const double s = transition_seconds("custom curve", &silence, NULL);
@@ -366,13 +404,13 @@ static float window_peak(const Capture *c, size_t first, double from_s, double t
 // equal-power fade the level is cos(45 deg) = 0.71 of what it was (it used to be 1 - sin(45 deg) = 0.29)
 static void test_pause_fade_curve(void) {
     start_capture("pausecurve");
-    const CrossfadeConfig xf = { .on_pause = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER } };
+    const AuCrossfade xf = { .on_pause = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER } };
     au_set_crossfade(&xf);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(1000);
-    au_pause_audio(true);
+    au_pause(true);
     tc_sleep_ms(800);
-    au_stop_audio();
+    au_stop();
     wait_until_idle(1, 3000);
     Capture c = stop_capture();
     size_t first, last;
@@ -387,16 +425,16 @@ static void test_pause_fade_curve(void) {
 
 static void test_live_filter_changes(void) {
     start_capture("livefilters");
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(1000);
-    CHECK(au_set_global_filtergraph("not_a_filter=1") == AU_ERR_INVALID_ARGUMENT); // rejected, nothing changes
-    CHECK(au_set_global_filtergraph("volume=0.5") == AU_OK);
+    CHECK(au_set_filters("not_a_filter=1") == AU_ERR_INVALID_ARGUMENT); // rejected, nothing changes
+    CHECK(au_set_filters("volume=0.5") == AU_OK);
     tc_sleep_ms(1500);
     CHECK(au_send_filter_command(0, "volume", "volume", "0.25") == AU_OK);
     tc_sleep_ms(1500);
-    CHECK(au_update_filtergraph(0, "volume=2") == AU_OK); // track filter runs before the global one
+    CHECK(au_set_track_filters(0, "volume=2") == AU_OK); // track filter runs before the global one
     tc_sleep_ms(1500);
-    au_stop_audio();
+    au_stop();
     wait_until_idle(1, 3000);
     Capture c = stop_capture();
 
@@ -428,9 +466,9 @@ static float channel_peak_db(const Capture *c, const int channel) {
 static Capture capture_file(const char *name, const char *file, const int channels, const AU_DOWNMIX mode,
                             const char *custom) {
     start_capture_channels(name, channels);
-    au_set_audio_volume(100);
+    au_set_volume(1.0f);
     if (mode != AU_DOWNMIX_FULL_LEVEL) CHECK(au_set_downmix(mode, custom) == AU_OK);
-    au_play_audio(fx(file), NULL);
+    au_play(fx(file), NULL);
     wait_until_idle(1, 4000);
     return stop_capture();
 }
@@ -505,12 +543,12 @@ static void test_multichannel_routing(void) {
 /* ---------- ReplayGain ---------- */
 
 // Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
-static float replaygain_level(const char *file, const AuReplayGainConfig *cfg, const AuReplayGainInfo *override) {
+static float replaygain_level(const char *file, const AuReplayGainConfig *cfg, const AuReplayGain *override) {
     start_capture("replaygain");
-    au_set_audio_volume(100);
+    au_set_volume(1.0f);
     if (cfg) CHECK(au_set_replaygain(cfg) == AU_OK);
-    const PlayAudioConfig pc = { .replaygain = override };
-    au_play_audio(fx(file), override ? &pc : NULL);
+    const AuPlayConfig pc = { .replaygain = override };
+    au_play(fx(file), override ? &pc : NULL);
     wait_until_idle(1, 4000);
     Capture c = stop_capture();
     const float db = channel_peak_db(&c, 0);
@@ -546,7 +584,8 @@ static void test_replaygain_levels(void) {
     CHECK_LEVEL(replaygain_level("rg_hot.flac", &safe, NULL), SINE_DB + 6.02f, 0.1f);
 
     // Values from the application instead of the tags
-    const AuReplayGainInfo mine = { .has_track_gain = true, .track_gain_db = -10 };
+    AuReplayGain mine = AU_REPLAYGAIN_NONE;
+    mine.track_gain_db = -10;
     CHECK_LEVEL(replaygain_level("rg_untagged.flac", &track, &mine), SINE_DB - 10, 0.1f);
     CHECK_LEVEL(replaygain_level("rg_tagged.flac", &track, &mine), SINE_DB - 10, 0.1f);   // override wins
 }
@@ -575,18 +614,19 @@ static int feed_fifo(void *arg) {
 static void test_gain_change_after_unchanged_late_value(void) {
     CHECK(au_gain_cache_set_file("") == AU_OK); // memory only
     start_capture("late_unchanged");
-    au_set_audio_volume(100);
+    au_set_volume(1.0f);
     const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK }; // no tags, nothing cached: the fallback, 0 dB
     CHECK(au_set_replaygain(&cfg) == AU_OK);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(800);
-    const AuReplayGainInfo same = { .has_track_gain = true, .track_gain_db = 0 };
+    AuReplayGain same = AU_REPLAYGAIN_NONE;
+    same.track_gain_db = 0;
     CHECK(au_gain_cache_set(fx("long_6s.flac"), &same) == AU_OK);
     tc_sleep_ms(300);
     const AuReplayGainConfig quieter = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = -6 };
     CHECK(au_set_replaygain(&quieter) == AU_OK);
     tc_sleep_ms(1500);
-    au_stop_audio();
+    au_stop();
     wait_until_idle(1, 3000);
     Capture c = stop_capture();
     au_gain_cache_remove(fx("long_6s.flac"));
@@ -615,11 +655,11 @@ static void test_replaygain_from_first_sample(void) {
     snprintf(src, sizeof(src), "%s", fx("rg_tagged.flac")); // track gain -6 dB
 
     start_capture("replaygain_first_sample");
-    au_set_audio_volume(100);
+    au_set_volume(1.0f);
     const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK };
     CHECK(au_set_replaygain(&cfg) == AU_OK);
     SDL_Thread *writer = SDL_CreateThread(feed_fifo, "fifo", src);
-    au_play_audio(fifo_path, NULL);
+    au_play(fifo_path, NULL);
     wait_until_idle(1, 6000);
     SDL_WaitThread(writer, NULL);
     Capture c = stop_capture();
@@ -639,8 +679,8 @@ static void test_replaygain_from_first_sample(void) {
 static void test_replaygain_live_change(void) {
     // Switching ReplayGain on while playing ramps the level down instead of jumping
     start_capture("replaygain_live");
-    au_set_audio_volume(100);
-    au_play_audio(fx("rg_long.flac"), NULL);
+    au_set_volume(1.0f);
+    au_play(fx("rg_long.flac"), NULL);
     tc_sleep_ms(1000);
     const AuReplayGainConfig track = { .mode = AU_REPLAYGAIN_TRACK };
     CHECK(au_set_replaygain(&track) == AU_OK);
@@ -678,8 +718,8 @@ typedef struct SpeedResult {
 
 static SpeedResult play_at_speed(const char *name, const char *file, const double speed, const bool keep_pitch) {
     start_capture(name);
-    CHECK(au_set_playback_speed(speed, keep_pitch) == AU_OK);
-    au_play_audio(fx(file), NULL);
+    CHECK(au_set_speed(speed, keep_pitch) == AU_OK);
+    au_play(fx(file), NULL);
     wait_until_idle(1, 15000);
     Capture c = stop_capture();
     size_t first, last;
@@ -708,23 +748,23 @@ static void test_speed(void) {
     CHECK(fabs(r.seconds - 2.0) < 0.1);
     CHECK(fabs(r.frequency - 440) < 5);
 
-    CHECK(au_initialize(NULL) != AU_OK); // (no player: the setter below must refuse)
-    CHECK(au_set_playback_speed(2.0, true) == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_init(NULL) != AU_OK); // (no player: the setter below must refuse)
+    CHECK(au_set_speed(2.0, true) == AU_ERR_NOT_INITIALIZED);
 }
 
 static void test_speed_limits_and_position(void) {
     start_capture("speed_position");
-    CHECK(au_set_playback_speed(5.0, true) == AU_ERR_INVALID_ARGUMENT);
-    CHECK(au_set_playback_speed(0.1, true) == AU_ERR_INVALID_ARGUMENT);
-    CHECK(au_set_playback_speed(2.0, true) == AU_OK);
-    CHECK(au_get_playback_speed() == 2.0);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    CHECK(au_set_speed(5.0, true) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_speed(0.1, true) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_speed(2.0, true) == AU_OK);
+    CHECK(tc_status().speed == 2.0);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(1000);
-    const double pos = au_get_audio_play_time();
-    printf("   after 1 s at 2x the position is %.2f s of %.2f s\n", pos, au_get_audio_duration());
+    const double pos = tc_status().position;
+    printf("   after 1 s at 2x the position is %.2f s of %.2f s\n", pos, tc_status().duration);
     CHECK(pos > 1.6 && pos < 2.4);                    // file time advances twice as fast
-    CHECK(fabs(au_get_audio_duration() - 6.0) < 0.1); // duration stays in file time
-    au_stop_audio();
+    CHECK(fabs(tc_status().duration - 6.0) < 0.1); // duration stays in file time
+    au_stop();
     wait_until_idle(1, 3000);
     Capture c = stop_capture();
     free(c.samples);
@@ -733,9 +773,9 @@ static void test_speed_limits_and_position(void) {
 static void test_speed_gapless_and_crossfade(void) {
     // Gapless at 2x: two 1 s tracks join into 1 s without a gap
     start_capture("speed_gapless");
-    au_set_playback_speed(2.0, true);
-    au_play_audio(fx("join_a.flac"), NULL);
-    au_set_next(fx("join_b.flac"), NULL);
+    au_set_speed(2.0, true);
+    au_play(fx("join_a.flac"), NULL);
+    au_queue(fx("join_b.flac"), NULL);
     wait_until_idle(2, 6000);
     size_t silence;
     double s = transition_seconds("gapless at 2x", &silence, NULL);
@@ -744,12 +784,12 @@ static void test_speed_gapless_and_crossfade(void) {
 
     // A 0.25 s crossfade at 2x: 3 s + 0.5 s - 0.25 s (fade lengths are wall clock time)
     start_capture("speed_crossfade");
-    au_set_playback_speed(2.0, true);
-    const CrossfadeConfig xf = { .on_track_end = { .seconds = 0.25, .curve = AU_FADE_EQUAL_POWER },
+    au_set_speed(2.0, true);
+    const AuCrossfade xf = { .on_track_end = { .seconds = 0.25, .curve = AU_FADE_EQUAL_POWER },
                                  .min_track_seconds = 0.4 };
     au_set_crossfade(&xf);
-    au_play_audio(fx("long_6s.flac"), NULL);
-    au_set_next(fx("join_b.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
+    au_queue(fx("join_b.flac"), NULL);
     wait_until_idle(2, 8000);
     s = transition_seconds("crossfade at 2x", &silence, NULL);
     CHECK(fabs(s - 3.25) < 0.08);
@@ -758,13 +798,13 @@ static void test_speed_gapless_and_crossfade(void) {
 
 static void test_speed_change_while_playing(void) {
     start_capture("speed_change");
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(1000);
-    CHECK(au_set_playback_speed(2.0, true) == AU_OK);  // 1x -> 2x: a speed stage is inserted
+    CHECK(au_set_speed(2.0, true) == AU_OK);  // 1x -> 2x: a speed stage is inserted
     tc_sleep_ms(1000);
-    CHECK(au_set_playback_speed(1.5, true) == AU_OK);  // 2x -> 1.5x: a command to the running filters
+    CHECK(au_set_speed(1.5, true) == AU_OK);  // 2x -> 1.5x: a command to the running filters
     tc_sleep_ms(500);
-    CHECK(au_set_playback_speed(1.0, true) == AU_OK);  // back to normal: the stage plays out and goes away
+    CHECK(au_set_speed(1.0, true) == AU_OK);  // back to normal: the stage plays out and goes away
     wait_until_idle(1, 10000);
     Capture c = stop_capture();
     size_t first, last;
@@ -790,24 +830,23 @@ static float channel_window_peak_db(const Capture *c, const int channel, size_t 
 static void test_limiter_and_named_command(void) {
     // +15 dB into a -6 dB limiter: the sine (-18 dB) would peak at -3 dB without it
     AuFilterBuilder *fb = au_fb_create();
-    au_fb_add_volume_db(fb, 15);
+    au_fb_add_volume_db(fb, NULL, 15);
     AuLimiter lim = au_limiter_defaults();
     lim.ceiling_db = -6;
-    CHECK(au_fb_add_limiter(fb, &lim) == AU_OK);
+    CHECK(au_fb_add_limiter(fb, NULL, &lim) == AU_OK);
     const AuStereo st = au_stereo_defaults();
-    CHECK(au_fb_set_name(fb, "st") == AU_OK);
-    CHECK(au_fb_add_stereo(fb, &st) == AU_OK); // named, so it is there to be changed
+    CHECK(au_fb_add_stereo(fb, "st", &st) == AU_OK); // named, so it is there to be changed
     printf("   filters: %s\n", au_fb_peek(fb));
 
     start_capture("named_filters");
-    au_set_audio_volume(100);
-    CHECK(au_set_global_filtergraph(au_fb_peek(fb)) == AU_OK);
+    au_set_volume(1.0f);
+    CHECK(au_set_filters(au_fb_peek(fb)) == AU_OK);
     au_fb_free(fb);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(1500);
     CHECK(au_send_filter_command(0, "stereotools@st", "balance_out", "1") == AU_OK); // right only
     tc_sleep_ms(1500);
-    au_stop_audio();
+    au_stop();
     wait_until_idle(1, 3000);
     Capture c = stop_capture();
 
@@ -826,8 +865,8 @@ static void test_limiter_and_named_command(void) {
 
 static void test_bad_filter_fails_cleanly(void) {
     start_capture("badfilter");
-    const PlayAudioConfig bad = { .av_filtergraph = "this_filter_does_not_exist=1" };
-    au_play_audio(fx("join_a.flac"), &bad);
+    const AuPlayConfig bad = { .filters = "this_filter_does_not_exist=1" };
+    au_play(fx("join_a.flac"), &bad);
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
     CHECK(tc_snapshot().eof_error == 1);
     Capture c = stop_capture();
@@ -842,6 +881,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_fade_out_on_stop);
     RUN_TEST(test_volume_ramp);
     RUN_TEST(test_user_filter);
+    RUN_TEST(test_user_filter_comma_locale);
     RUN_TEST(test_crossfade_on_skip);
     RUN_TEST(test_crossfade_on_play);
     RUN_TEST(test_pause_fade);

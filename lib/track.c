@@ -27,6 +27,7 @@
 #include "track.h"
 #include "metadata.h"
 #include "probe.h"
+#include "numbers.h"
 #include "network.h"
 #include "gain_cache.h"
 #include "output.h"
@@ -182,7 +183,7 @@ static void check_stream_metadata(TrackState *t, AVFormatContext *ic, const AVPa
 }
 
 // Station details from the ICY response headers ("icy-name: ...") into the track's tags
-static bool add_icy_headers(AVFormatContext *ic, AuMediaInfo *info) {
+static bool add_icy_headers(AVFormatContext *ic, MediaDraft *info) {
     uint8_t *headers = NULL;
     bool icy_on = false;
     if (!ic->pb || av_opt_get(ic->pb, "icy_metadata_headers", AV_OPT_SEARCH_CHILDREN, &headers) < 0 || !headers)
@@ -273,7 +274,7 @@ double track_duration(TrackState *t) {
 //| Lifetime                                            |
 //+-----------------------------------------------------+
 
-TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *filename, const PlayAudioConfig *config) {
+TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *filename, const AuPlayConfig *config) {
     TrackState *t = av_mallocz(sizeof(TrackState));
     if (!t) return NULL;
 
@@ -302,14 +303,14 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     }
 
     if (config) {
-        if (config->av_filtergraph && config->av_filtergraph[0] && !(t->filtergraph_str = av_strdup(config->av_filtergraph)))
+        if (config->filters && config->filters[0] && !(t->filtergraph_str = av_strdup(config->filters)))
             goto fail;
         if (config->http_headers && config->http_headers[0] && !(t->http_headers = av_strdup(config->http_headers)))
             goto fail;
-        if (config->play_duration > 0)
-            t->play_duration = SecondsToMicroseconds(config->play_duration);
-        if (config->skip_seconds > 0)
-            t->start_time = SecondsToMicroseconds(config->skip_seconds);
+        if (config->length_seconds > 0)
+            t->play_duration = SecondsToMicroseconds(config->length_seconds);
+        if (config->start_seconds > 0)
+            t->start_time = SecondsToMicroseconds(config->start_seconds);
         if (config->fade_in) {
             t->fade_in_override = *config->fade_in;
             fade_curve_build(&t->fade_in_curve, config->fade_in); // control thread: a custom curve is called here
@@ -398,14 +399,13 @@ void track_destroy(TrackState *t) {
     SDL_DestroyMutex(t->ring_mutex);
     if (t->audio_queue.mutex) packet_queue_destroy(&t->audio_queue);
     av_channel_layout_uninit(&t->audio_filter_src.ch_layout);
-    av_dict_free(&t->format_opts_n);
     free_stream_meta(t->stream_meta);
     av_free(t->last_icy);
     av_free(t->last_meta);
     SDL_DestroyCond(t->continue_read_thread);
     SDL_DestroyMutex(t->wait_mutex);
     SDL_DestroyMutex(t->seek_mutex);
-    au_media_info_free(t->info);
+    au_media_info_release(t->info);
     av_free(t->filename);
     av_free(t->filtergraph_str);
     av_free(t->http_headers);
@@ -448,25 +448,26 @@ void track_update_gain(TrackState *t, const bool late) {
     const AuReplayGainConfig cfg = ap->replaygain;
     SDL_UnlockMutex(ap->format_mutex);
 
-    // Values come from, in order: PlayAudioConfig.replaygain, the ReplayGain cache, the file's tags
+    // Values come from, in order: AuPlayConfig.replaygain, the ReplayGain cache, the file's tags
     SDL_LockMutex(t->seek_mutex);
     const bool known = t->info || t->has_replaygain_override;
     const bool has_override = t->has_replaygain_override;
-    AuReplayGainInfo rg;
+    AuReplayGain rg = AU_REPLAYGAIN_NONE;
     if (has_override) rg = t->replaygain_override;
-    else rg = au_media_replaygain(t->info);
+    else if (t->info) rg = t->info->replaygain;   // not open yet: none
     SDL_UnlockMutex(t->seek_mutex);
 
     if (!known) return; // not open yet: the read thread calls this again once the tags are known
     if (!has_override) {
-        AuReplayGainInfo cached;
+        AuReplayGain cached;
         if (gain_cache_lookup(t->filename, &cached)) rg = cached;
     }
     const double db = replaygain_gain_db(&cfg, &rg);
     SDL_AtomicSet(&t->gain_mb, gain_pack((int)lrint(db * 100.0), late));
+    ff_publish_gain(ap, t->handle, gain_centi_db(SDL_AtomicGet(&t->gain_mb)) / 100.0);
 }
 
-#define DEFAULT_MEASURE_WAIT_MS 500
+#define DEFAULT_MEASURE_WAIT_SECONDS 0.5
 
 // Read thread, before the decoder starts: a track without any ReplayGain value gets an urgent measurement
 // (AuReplayGainConfig.measure_missing) and waits for it a little, so it can start at the right level
@@ -478,14 +479,14 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
 
     if (cfg.mode == AU_REPLAYGAIN_OFF || !cfg.measure_missing || t->has_replaygain_override) return;
     if (au_is_network_url(t->filename) && !network_config(NULL, 0).measure_streams) return; // a download
-    const AuReplayGainInfo tags = au_media_replaygain(info);
-    if (tags.has_track_gain || tags.has_album_gain) return;
+    if (info && (!isnan(info->replaygain.track_gain_db) || !isnan(info->replaygain.album_gain_db))) return;
     if (gain_cache_lookup(t->filename, NULL)) return;
 
     const unsigned failures = gain_cache_failure_mark();
     if (!gain_scan_request_for_player(t->filename)) return; // could not be measured before
-    const int wait_ms = cfg.measure_wait_ms == 0 ? DEFAULT_MEASURE_WAIT_MS : cfg.measure_wait_ms;
-    if (wait_ms <= 0) return;
+    const double wait = cfg.measure_wait_seconds == 0 ? DEFAULT_MEASURE_WAIT_SECONDS : cfg.measure_wait_seconds;
+    if (!(wait > 0)) return;
+    const int wait_ms = (int)lrint(wait * 1000);
     switch (gain_cache_wait(t->filename, wait_ms, &t->abort_request, failures)) {
         case GAIN_WAIT_TIMEOUT:
             ff_log(AU_LOG_INFO, "'%s' starts before its loudness is measured; the gain follows when it is ready",
@@ -497,13 +498,6 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
         default:
             break;
     }
-}
-
-AuMediaInfo *track_copy_info(TrackState *t) {
-    SDL_LockMutex(t->seek_mutex);
-    AuMediaInfo *copy = media_info_copy(t->info);
-    SDL_UnlockMutex(t->seek_mutex);
-    return copy;
 }
 
 int track_set_filters(TrackState *t, const char *filters) {
@@ -550,36 +544,16 @@ static int queue_get_packet(void *ctx, AVPacket *pkt, int *serial) {
 // Open the decoder for the stream (no thread: the worker runs it)
 static int stream_component_open(TrackState *t, const int stream_index) {
     AVFormatContext *ic = t->ic;
-    AVDictionary *opts = NULL;
-    int ret;
-
-    if (stream_index < 0 || stream_index >= (int)ic->nb_streams)
-        return AVERROR(EINVAL);
-
-    AVCodecContext *avctx = avcodec_alloc_context3(NULL);
-    if (!avctx)
-        return AVERROR(ENOMEM);
-
-    if ((ret = avcodec_parameters_to_context(avctx, ic->streams[stream_index]->codecpar)) < 0)
-        goto fail;
-    avctx->pkt_timebase = ic->streams[stream_index]->time_base;
-
-    const AVCodec *codec = avcodec_find_decoder(avctx->codec_id);
-    if (!codec) {
-        ff_log(AU_LOG_WARNING, "No decoder could be found for codec %s", avcodec_get_name(avctx->codec_id));
-        ret = AVERROR(EINVAL);
-        goto fail;
-    }
-    avctx->codec_id = codec->id;
-
+    AVCodecContext *avctx = NULL;
     // One thread: audio decodes hundreds of times faster than real time, and "auto" gave e.g. the FLAC decoder a
     // frame thread per core (13 threads per track on 12 cores) for nothing
-    av_dict_set(&opts, "threads", "1", 0);
-
-    if ((ret = avcodec_open2(avctx, codec, &opts)) < 0)
-        goto fail;
-
-    ic->streams[stream_index]->discard = AVDISCARD_DEFAULT;
+    int ret = ff_open_decoder(ic->streams[stream_index], 1, &avctx);
+    if (ret < 0) {
+        if (ret == AVERROR_DECODER_NOT_FOUND)
+            ff_log(AU_LOG_WARNING, "No decoder could be found for codec %s",
+                   avcodec_get_name(ic->streams[stream_index]->codecpar->codec_id));
+        return ret;
+    }
 
     t->audio_filter_src.freq = avctx->sample_rate;
     if ((ret = av_channel_layout_copy(&t->audio_filter_src.ch_layout, &avctx->ch_layout)) < 0)
@@ -602,7 +576,6 @@ static int stream_component_open(TrackState *t, const int stream_index) {
 
 fail:
     avcodec_free_context(&avctx);
-    av_dict_free(&opts);
     return ret;
 }
 
@@ -754,6 +727,7 @@ static int local_get_packet(void *ctx, AVPacket *pkt, int *serial) {
 
 // Network streams: read ahead into the packet queue, so the worker keeps decoding while the connection stalls
 static int net_reader(void *arg) {
+    ff_thread_use_c_locale();
     TrackState *t = arg;
     AVFormatContext *ic = t->ic;
     AVPacket *pkt = av_packet_alloc();
@@ -833,43 +807,23 @@ static void read_thread_fail(TrackState *t) {
 
 // Open the input and the decoder, read the tags and publish the duration. < 0 = the track can not be played.
 static int open_track(TrackState *t) {
-    AudioPlayer *ap = t->ap;
-    AVFormatContext *ic = avformat_alloc_context();
-    int ret;
-    if (!ic) {
-        ff_log(AU_LOG_FATAL, "Could not allocate context.");
-        return AVERROR(ENOMEM);
-    }
-    ic->interrupt_callback.callback = decode_interrupt_cb;
-    ic->interrupt_callback.opaque = t;
-
-    av_dict_set(&t->format_opts_n, "scan_all_pmts", "1", AV_DICT_DONT_OVERWRITE);
-    network_input_options(&t->format_opts_n, t->filename, t->http_headers);
-    ret = avformat_open_input(&ic, t->filename, NULL, &t->format_opts_n); // probed: never chosen by the file's name
+    const AVIOInterruptCB interrupt = { decode_interrupt_cb, t };
+    AVFormatContext *ic = NULL;
+    int st_index = -1;
+    FfOpenStep failed;
+    int ret = ff_open_audio_input(t->filename, t->http_headers, &interrupt, &ic, &st_index, &failed);
     if (ret < 0) {
-        // avformat_open_input frees ic on failure
-        if (!SDL_AtomicGet(&t->abort_request))
-            ff_log(AU_LOG_ERROR, "Could not open input '%s': %s", t->filename, av_err2str(ret));
+        if (!SDL_AtomicGet(&t->abort_request)) {
+            if (failed == FF_OPEN_NO_AUDIO)
+                ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
+            else if (failed == FF_OPEN_STREAM_INFO)
+                ff_log(AU_LOG_WARNING, "%s: could not find codec parameters", t->filename);
+            else
+                ff_log(AU_LOG_ERROR, "Could not open input '%s': %s", t->filename, av_err2str(ret));
+        }
         return ret;
     }
-    av_dict_set(&t->format_opts_n, "scan_all_pmts", NULL, AV_DICT_MATCH_CASE);
     t->ic = ic;
-    network_after_open(ic, t->filename);
-
-    if (ff_input_lacks_audio(ic)) {
-        if (!SDL_AtomicGet(&t->abort_request))
-            ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
-        return AVERROR_STREAM_NOT_FOUND;
-    }
-
-    if (ap->find_stream_info) {
-        ret = avformat_find_stream_info(ic, NULL);
-        if (ret < 0) {
-            if (!SDL_AtomicGet(&t->abort_request))
-                ff_log(AU_LOG_WARNING, "%s: could not find codec parameters", t->filename);
-            return ret;
-        }
-    }
 
     if (ic->pb)
         ic->pb->eof_reached = 0; // FIXME hack, ffplay maybe should not use avio_feof() to test for the end
@@ -882,26 +836,25 @@ static int open_track(TrackState *t) {
     if (t->start_time != AV_NOPTS_VALUE && seek_file(t, t->start_time) < 0)
         ff_log(AU_LOG_WARNING, "%s: could not seek to position %0.3f", t->filename, t->start_time / AV_TIME_BASE_DOUBLE);
 
-    for (unsigned int i = 0; i < ic->nb_streams; i++)
-        ic->streams[i]->discard = AVDISCARD_ALL;
-
-    const int st_index = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-
     // Tags and the ReplayGain gain are ready before the decoder starts, so the first sample is already
     // at the right level
-    if (st_index >= 0) {
-        AuMediaInfo *info = media_info_from_context(ic, st_index, t->filename);
-        if (info && t->network) t->icy = add_icy_headers(ic, info);
-        ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
-        ic->streams[st_index]->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
-        SDL_LockMutex(t->seek_mutex);
-        t->info = info;
-        SDL_UnlockMutex(t->seek_mutex);
-        wait_for_measurement(t, info);
-        track_update_gain(t, false);
+    MediaDraft draft;
+    const AuMediaInfo *info = NULL;
+    if (media_draft_from_context(&draft, ic, st_index, t->filename) >= 0) {
+        if (t->network) t->icy = add_icy_headers(ic, &draft);
+        info = media_info_freeze(&draft);
+        media_draft_free(&draft);
     }
+    ic->event_flags &= ~AVFMT_EVENT_FLAG_METADATA_UPDATED;
+    ic->streams[st_index]->event_flags &= ~AVSTREAM_EVENT_FLAG_METADATA_UPDATED;
+    SDL_LockMutex(t->seek_mutex);
+    t->info = info;
+    SDL_UnlockMutex(t->seek_mutex);
+    ff_publish_info(t->ap, t->handle, info);   // before MSG_TRACK_OPENED: AU_EVENT_TRACK_OPENED promises it
+    wait_for_measurement(t, info);
+    track_update_gain(t, false);
 
-    if (st_index < 0 || stream_component_open(t, st_index) < 0 || t->audio_stream < 0) {
+    if (stream_component_open(t, st_index) < 0 || t->audio_stream < 0) {
         if (!SDL_AtomicGet(&t->abort_request))
             ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
         return AVERROR_STREAM_NOT_FOUND;
@@ -923,6 +876,7 @@ static int open_track(TrackState *t) {
 
 // The track's thread: open, then decode (and for local files read) until the track is destroyed
 static int track_thread(void *arg) {
+    ff_thread_use_c_locale();
     TrackState *t = arg;
     if (open_track(t) < 0) {
         read_thread_fail(t);
@@ -1192,7 +1146,7 @@ static int apply_speed(TrackState *t, AVFrame *spd, AVFrame *tmp, const int seri
     const bool want = fabs(speed - 1.0) > 1e-6;
     if (want && t->speed_chain.graph && keep_pitch && t->speed_keep_pitch_cur) {
         char arg[32];
-        snprintf(arg, sizeof(arg), "%.9f", sqrt(speed));
+        ff_format_number(arg, sizeof(arg), sqrt(speed), 9, 'f');
         if (avfilter_graph_send_command(t->speed_chain.graph, SPEED_FILTER_1, "tempo", arg, NULL, 0, 0) >= 0 &&
             avfilter_graph_send_command(t->speed_chain.graph, SPEED_FILTER_2, "tempo", arg, NULL, 0, 0) >= 0) {
             // A new segment starts where the old one got to
@@ -1438,9 +1392,12 @@ StreamMeta *track_take_stream_meta(TrackState *t, const double position) {
     if (m && m->position <= position + 0.05) {
         t->stream_meta = m->next;
         m->next = NULL;
-        if (t->info) {
-            av_dict_set(&t->info->tags, "title", m->title, 0);
-            av_dict_set(&t->info->tags, "artist", m->artist, 0);   // NULL removes it
+        // A new block: readers may hold the old one
+        const AuMediaInfo *now = media_info_with_title(t->info, m->title, m->artist);
+        if (now) {
+            au_media_info_release(t->info);
+            t->info = now;
+            ff_publish_info(t->ap, t->handle, now);
         }
     }
     else {

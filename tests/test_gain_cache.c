@@ -10,11 +10,9 @@
 #include <unistd.h>
 #endif
 
-static AuReplayGainInfo track_gain(const double db) {
-    AuReplayGainInfo rg;
-    memset(&rg, 0, sizeof(rg));
-    rg.has_track_gain = true;
-    rg.track_gain_db = db;
+static AuReplayGain track_gain(const double db) {
+    AuReplayGain rg = AU_REPLAYGAIN_NONE;
+    rg.track_gain_db = (float)db;
     return rg;
 }
 
@@ -25,10 +23,10 @@ static void test_basics(void) {
     CHECK(au_gain_cache_count() == 0);
     CHECK(!au_gain_cache_get("/music/a.flac", NULL));
 
-    AuReplayGainInfo rg = track_gain(-6.5), out;
+    AuReplayGain rg = track_gain(-6.5), out;
     CHECK(au_gain_cache_set("/music/a.flac", &rg) == AU_OK);
     CHECK(au_gain_cache_count() == 1);
-    CHECK(au_gain_cache_get("/music/a.flac", &out) && out.has_track_gain && out.track_gain_db == -6.5);
+    CHECK(au_gain_cache_get("/music/a.flac", &out) && !isnan(out.track_gain_db) && out.track_gain_db == -6.5);
     CHECK(au_gain_cache_get("/music/a.flac", NULL));
     CHECK(!au_gain_cache_get("/music/A.flac", NULL));      // exact, case-sensitive match
     CHECK(!au_gain_cache_get("/music/a.flac ", NULL));
@@ -51,13 +49,13 @@ static void test_basics(void) {
 }
 
 static int visits = 0;
-static bool visit_remove_all(const char *path, const AuReplayGainInfo *rg, void *user) {
+static bool visit_remove_all(const char *path, const AuReplayGain *rg, void *user) {
     (void)rg; (void)user;
     visits++;
     au_gain_cache_remove(path); // using the cache from the visitor must not deadlock
     return true;
 }
-static bool visit_stop_after_3(const char *path, const AuReplayGainInfo *rg, void *user) {
+static bool visit_stop_after_3(const char *path, const AuReplayGain *rg, void *user) {
     (void)path; (void)rg;
     return ++*(int *)user < 3;
 }
@@ -67,7 +65,7 @@ static void test_foreach(void) {
     char key[64];
     for (int i = 0; i < 10; i++) {
         snprintf(key, sizeof(key), "/music/%02d.flac", i);
-        const AuReplayGainInfo rg = track_gain(-i);
+        const AuReplayGain rg = track_gain(-i);
         au_gain_cache_set(key, &rg);
     }
     int n = 0;
@@ -84,15 +82,15 @@ static void test_many_entries(void) {
     const int n = 20000;
     for (int i = 0; i < n; i++) {
         snprintf(key, sizeof(key), "/library/artist %d/track %d.flac", i % 97, i);
-        const AuReplayGainInfo rg = track_gain(i * 0.001);
+        const AuReplayGain rg = track_gain(i * 0.001);
         if (au_gain_cache_set(key, &rg) != AU_OK) { CHECK(false); break; }
     }
     CHECK(au_gain_cache_count() == n);
     int bad = 0;
     for (int i = 0; i < n; i += 7) {
         snprintf(key, sizeof(key), "/library/artist %d/track %d.flac", i % 97, i);
-        AuReplayGainInfo out;
-        if (!au_gain_cache_get(key, &out) || fabs(out.track_gain_db - i * 0.001) > 1e-12) bad++;
+        AuReplayGain out;
+        if (!au_gain_cache_get(key, &out) || fabs(out.track_gain_db - i * 0.001) > 1e-6) bad++;   // a float
     }
     CHECK(bad == 0);
     au_gain_cache_clear();
@@ -104,7 +102,7 @@ static int hammer(void *arg) {
     char key[64];
     for (int i = 0; i < 3000; i++) {
         snprintf(key, sizeof(key), "/shared/%d.flac", i % 50);
-        const AuReplayGainInfo rg = track_gain(id);
+        const AuReplayGain rg = track_gain(id);
         switch ((i + id) % 4) {
             case 0: case 1: au_gain_cache_set(key, &rg); break;
             case 2: au_gain_cache_get(key, NULL); break;
@@ -115,7 +113,7 @@ static int hammer(void *arg) {
     return 0;
 }
 
-static bool count_visitor(const char *path, const AuReplayGainInfo *rg, void *user) {
+static bool count_visitor(const char *path, const AuReplayGain *rg, void *user) {
     (void)path; (void)rg;
     (*(int *)user)++;
     return true;
@@ -139,16 +137,16 @@ static void test_threads(void) {
 
 static void test_scan(void) {
     au_gain_cache_clear();
-    AuReplayGainInfo rg;
+    AuReplayGain rg;
     CHECK(au_gain_cache_scan(fx("ld_m23_48k.flac"), NULL, &rg) == AU_OK);
-    CHECK(rg.has_track_gain && fabs(rg.track_gain_db - 5.0) < 0.1); // -23 LUFS -> +5 dB re -18 LUFS
-    CHECK(rg.has_track_peak && fabs(rg.track_peak - 0.0708) < 0.002);
-    CHECK(!rg.has_album_gain);
+    CHECK(!isnan(rg.track_gain_db) && fabs(rg.track_gain_db - 5.0) < 0.1); // -23 LUFS -> +5 dB re -18 LUFS
+    CHECK(!isnan(rg.track_peak) && fabs(rg.track_peak - 0.0708) < 0.002);
+    CHECK(isnan(rg.album_gain_db));
     CHECK(au_gain_cache_count() == 1);
     CHECK(au_gain_cache_get(fx("ld_m23_48k.flac"), NULL));
 
     // Cached: returned as stored, without measuring again
-    const AuReplayGainInfo mine = track_gain(-1.25);
+    const AuReplayGain mine = track_gain(-1.25);
     au_gain_cache_set(fx("ld_m23_48k.flac"), &mine);
     CHECK(au_gain_cache_scan(fx("ld_m23_48k.flac"), NULL, &rg) == AU_OK && rg.track_gain_db == -1.25);
 
@@ -164,7 +162,7 @@ static void test_scan(void) {
 static double applied_gain(const int32_t handle) {
     double db = -999;
     for (int i = 0; i < 100; i++) { // the file has to be open before the gain is known
-        if (au_get_track_gain_db(handle, &db) == AU_OK) break;
+        if (au_track_gain_db(handle, &db) == AU_OK) break;
         tc_sleep_ms(10);
     }
     return db;
@@ -182,24 +180,24 @@ static void test_player_priority(void) {
     start_player();
 
     // Untagged file: the cache supplies the gain
-    AuReplayGainInfo rg = track_gain(-10);
+    AuReplayGain rg = track_gain(-10);
     au_gain_cache_set(fx("rg_untagged.flac"), &rg);
-    int32_t h = au_play_audio(fx("rg_untagged.flac"), NULL);
+    int32_t h = au_play(fx("rg_untagged.flac"), NULL);
     CHECK(fabs(applied_gain(h) + 10) < 0.01);
 
     // Tagged file (-6 dB): the cache wins over the tags
     rg = track_gain(-7);
     au_gain_cache_set(fx("rg_tagged.flac"), &rg);
-    h = au_play_audio(fx("rg_tagged.flac"), NULL);
+    h = au_play(fx("rg_tagged.flac"), NULL);
     CHECK(fabs(applied_gain(h) + 7) < 0.01);
 
-    // PlayAudioConfig.replaygain wins over the cache
-    const AuReplayGainInfo explicit_rg = track_gain(-3);
-    const PlayAudioConfig cfg = { .replaygain = &explicit_rg };
-    h = au_play_audio(fx("rg_tagged.flac"), &cfg);
+    // AuPlayConfig.replaygain wins over the cache
+    const AuReplayGain explicit_rg = track_gain(-3);
+    const AuPlayConfig cfg = { .replaygain = &explicit_rg };
+    h = au_play(fx("rg_tagged.flac"), &cfg);
     CHECK(fabs(applied_gain(h) + 3) < 0.01);
 
-    au_stop_audio();
+    au_stop();
     tc_sleep_ms(200);
     au_shutdown();
 }
@@ -208,16 +206,16 @@ static void test_player_live_updates(void) {
     au_gain_cache_clear();
     start_player();
 
-    const int32_t h = au_play_audio(fx("rg_long.flac"), NULL);
+    const int32_t h = au_play(fx("rg_long.flac"), NULL);
     CHECK(fabs(applied_gain(h) + 6) < 0.01);       // from the tags
 
-    AuReplayGainInfo rg = track_gain(-9);
+    AuReplayGain rg = track_gain(-9);
     au_gain_cache_set(fx("rg_long.flac"), &rg);      // arrives while the track plays
     tc_sleep_ms(100);
     CHECK(fabs(applied_gain(h) + 9) < 0.01);
 
-    // A queued track picks up a value that arrives after au_set_next()
-    const int32_t next = au_set_next(fx("rg_untagged.flac"), NULL);
+    // A queued track picks up a value that arrives after au_queue()
+    const int32_t next = au_queue(fx("rg_untagged.flac"), NULL);
     tc_sleep_ms(100);
     CHECK(fabs(applied_gain(next)) < 0.01);         // no tags, no cache yet
     rg = track_gain(-4.5);
@@ -232,18 +230,18 @@ static void test_player_live_updates(void) {
     tc_sleep_ms(100);
     CHECK(fabs(applied_gain(next)) < 0.01);
 
-    au_stop_audio();
+    au_stop();
     tc_sleep_ms(200);
     au_shutdown();
 }
 
 static void test_survives_shutdown(void) {
     au_gain_cache_clear();
-    const AuReplayGainInfo rg = track_gain(-8);
+    const AuReplayGain rg = track_gain(-8);
     au_gain_cache_set(fx("rg_untagged.flac"), &rg);  // before any player exists
     for (int i = 0; i < 2; i++) {
         start_player();
-        const int32_t h = au_play_audio(fx("rg_untagged.flac"), NULL);
+        const int32_t h = au_play(fx("rg_untagged.flac"), NULL);
         CHECK(fabs(applied_gain(h) + 8) < 0.01);
         au_shutdown();
     }
@@ -256,7 +254,7 @@ static int set_loop(void *arg) {
     (void)arg;
     int i = 0;
     while (SDL_AtomicGet(&keep_setting)) {
-        const AuReplayGainInfo rg = track_gain(-(i++ % 10));
+        const AuReplayGain rg = track_gain(-(i++ % 10));
         au_gain_cache_set(fx("rg_untagged.flac"), &rg);
         if (i % 3 == 0) au_gain_cache_remove(fx("rg_untagged.flac"));
     }
@@ -270,7 +268,7 @@ static void test_updates_during_shutdown(void) {
     SDL_Thread *t = SDL_CreateThread(set_loop, "cache_setter", NULL);
     for (int i = 0; i < 5; i++) {
         start_player();
-        au_play_audio(fx("rg_untagged.flac"), NULL);
+        au_play(fx("rg_untagged.flac"), NULL);
         tc_sleep_ms(50);
         au_shutdown();
     }
@@ -307,10 +305,9 @@ static void use_fresh_file(void) {
 
 static void test_persistence(void) {
     use_fresh_file();
-    AuReplayGainInfo full = { .has_track_gain = true, .track_gain_db = -7.25, .has_track_peak = true,
-                              .track_peak = 0.987654, .has_album_gain = true, .album_gain_db = -6.5,
-                              .has_album_peak = true, .album_peak = 1.0123, .from_r128 = true };
-    AuReplayGainInfo b = track_gain(-1), c = track_gain(3.5);
+    AuReplayGain full = { .track_gain_db = -7.25f, .track_peak = 0.987654f, .album_gain_db = -6.5f,
+                          .album_peak = 1.0123f, .from_r128 = true };
+    AuReplayGain b = track_gain(-1), c = track_gain(3.5);
     CHECK(au_gain_cache_set("/m/a.flac", &full) == AU_OK);
     CHECK(au_gain_cache_set("/m/b.flac", &b) == AU_OK);
     CHECK(au_gain_cache_set("/m/c.flac", &c) == AU_OK);
@@ -326,15 +323,15 @@ static void test_persistence(void) {
     // "Next run": load the file again
     CHECK(au_gain_cache_reload() == AU_OK);
     CHECK(au_gain_cache_count() == 2);
-    AuReplayGainInfo out;
+    AuReplayGain out;
     CHECK(au_gain_cache_get("/m/a.flac", &out));
-    CHECK(out.has_track_gain && out.track_gain_db == -7.25);
-    CHECK(out.has_track_peak && fabs(out.track_peak - 0.987654) < 1e-9);
-    CHECK(out.has_album_gain && out.album_gain_db == -6.5);
-    CHECK(out.has_album_peak && fabs(out.album_peak - 1.0123) < 1e-9);
+    CHECK(!isnan(out.track_gain_db) && out.track_gain_db == -7.25);
+    CHECK(!isnan(out.track_peak) && fabs(out.track_peak - 0.987654) < 1e-6);
+    CHECK(!isnan(out.album_gain_db) && out.album_gain_db == -6.5);
+    CHECK(!isnan(out.album_peak) && fabs(out.album_peak - 1.0123) < 1e-6);
     CHECK(out.from_r128);
     CHECK(!au_gain_cache_get("/m/b.flac", NULL));
-    CHECK(au_gain_cache_get("/m/c.flac", &out) && out.track_gain_db == 4.0 && !out.has_track_peak);
+    CHECK(au_gain_cache_get("/m/c.flac", &out) && out.track_gain_db == 4.0 && isnan(out.track_peak));
 
     // Clearing is persistent too
     au_gain_cache_clear();
@@ -350,13 +347,13 @@ static void test_tricky_paths(void) {
     };
     const int n = (int)(sizeof(paths) / sizeof(paths[0]));
     for (int i = 0; i < n; i++) {
-        const AuReplayGainInfo rg = track_gain(-i);
+        const AuReplayGain rg = track_gain(-i);
         CHECK(au_gain_cache_set(paths[i], &rg) == AU_OK);
     }
     CHECK(au_gain_cache_reload() == AU_OK);
     CHECK(au_gain_cache_count() == n);
     for (int i = 0; i < n; i++) {
-        AuReplayGainInfo out;
+        AuReplayGain out;
         if (!au_gain_cache_get(paths[i], &out) || out.track_gain_db != -i) {
             fprintf(stderr, "path %d did not survive the round trip\n", i);
             CHECK(false);
@@ -367,28 +364,28 @@ static void test_tricky_paths(void) {
 static void test_compaction(void) {
     use_fresh_file();
     for (int i = 0; i < 1000; i++) {
-        const AuReplayGainInfo rg = track_gain(-i * 0.01);
+        const AuReplayGain rg = track_gain(-i * 0.01);
         au_gain_cache_set("/m/again.flac", &rg);
     }
     CHECK(count_lines(cache_file) == 1001);
     CHECK(au_gain_cache_reload() == AU_OK);         // loading notices the superseded lines and compacts
     CHECK(count_lines(cache_file) == 2);            // header + one entry
-    AuReplayGainInfo out;
-    CHECK(au_gain_cache_get("/m/again.flac", &out) && fabs(out.track_gain_db + 9.99) < 1e-9);
+    AuReplayGain out;
+    CHECK(au_gain_cache_get("/m/again.flac", &out) && fabs(out.track_gain_db + 9.99) < 1e-6);
 }
 
 static void test_damaged_and_foreign_lines(void) {
     use_fresh_file();
-    const AuReplayGainInfo rg = track_gain(-2);
+    const AuReplayGain rg = track_gain(-2);
     CHECK(au_gain_cache_set("/m/ok.flac", &rg) == AU_OK);
     append_text(cache_file, "garbage line\nS\tnot-a-number\t-\t-\t-\t0\t/m/bad.flac\nS\t-1\nR\n\n");
     // Another process appended an entry
     append_text(cache_file, "S\t-3.500000\t0.900000\t-\t-\t0\t/m/other process.flac\n");
     CHECK(au_gain_cache_reload() == AU_OK);
     CHECK(au_gain_cache_count() == 2);
-    AuReplayGainInfo out;
+    AuReplayGain out;
     CHECK(au_gain_cache_get("/m/ok.flac", &out) && out.track_gain_db == -2);
-    CHECK(au_gain_cache_get("/m/other process.flac", &out) && out.track_gain_db == -3.5 && out.track_peak == 0.9);
+    CHECK(au_gain_cache_get("/m/other process.flac", &out) && out.track_gain_db == -3.5f && out.track_peak == 0.9f);
     CHECK(!au_gain_cache_get("/m/bad.flac", NULL));
 
     // A file that is not a cache file is not used, and not written to either
@@ -418,7 +415,7 @@ static void test_two_processes(void) {
     printf("   (needs fork(), skipped on Windows)\n");
 #else
     use_fresh_file();
-    const AuReplayGainInfo old = track_gain(-1);
+    const AuReplayGain old = track_gain(-1);
     for (int i = 0; i < 2000; i++) au_gain_cache_set("/m/superseded.flac", &old);
     fflush(NULL);
     const pid_t pid = fork();
@@ -428,7 +425,7 @@ static void test_two_processes(void) {
         for (int i = 0; i < 500; i++) {
             char path[64];
             snprintf(path, sizeof(path), "/child/%d.flac", i);
-            const AuReplayGainInfo rg = track_gain(-i * 0.01);
+            const AuReplayGain rg = track_gain(-i * 0.01);
             if (au_gain_cache_set(path, &rg) != AU_OK) _exit(1);
             usleep(400); // spread over the parent's compactions
         }
@@ -436,7 +433,7 @@ static void test_two_processes(void) {
     }
     int status = 0, rounds = 0;
     while (waitpid(pid, &status, WNOHANG) == 0) {
-        const AuReplayGainInfo rg = track_gain(-2);
+        const AuReplayGain rg = track_gain(-2);
         for (int i = 0; i < 300; i++) au_gain_cache_set("/m/superseded.flac", &rg);
         au_gain_cache_reload(); // loading compacts once superseded lines pile up
         rounds++;
@@ -463,10 +460,10 @@ static void test_locale(void) {
         set = setlocale(LC_NUMERIC, locales[i]);
     if (!set) { printf("   (no comma-decimal locale installed, skipped)\n"); return; }
     use_fresh_file();
-    const AuReplayGainInfo rg = track_gain(-6.5);
+    const AuReplayGain rg = track_gain(-6.5);
     CHECK(au_gain_cache_set("/m/locale.flac", &rg) == AU_OK);
     CHECK(au_gain_cache_reload() == AU_OK);
-    AuReplayGainInfo out;
+    AuReplayGain out;
     CHECK(au_gain_cache_get("/m/locale.flac", &out) && out.track_gain_db == -6.5);
     setlocale(LC_NUMERIC, "C");
 }
@@ -475,7 +472,7 @@ static void test_memory_only_and_default_location(void) {
     CHECK(au_gain_cache_set_file("") == AU_OK);
     char path[1100] = "x";
     CHECK(au_gain_cache_get_file(path, sizeof(path)) == 0 && path[0] == '\0');
-    const AuReplayGainInfo rg = track_gain(-1);
+    const AuReplayGain rg = track_gain(-1);
     CHECK(au_gain_cache_set("/m/memory.flac", &rg) == AU_OK);
     CHECK(au_gain_cache_reload() == AU_OK);
     CHECK(au_gain_cache_count() == 0);              // nothing was written anywhere

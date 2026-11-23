@@ -39,6 +39,7 @@
 #define MIXER_EVENT_CAPACITY 64
 
 #include <stdbool.h>
+#include <string.h>
 #include <stdint.h>
 
 #include "libavutil/avstring.h"
@@ -118,12 +119,6 @@ typedef struct Decoder {
 //| Tracks                                              |
 //+-----------------------------------------------------+
 
-typedef enum TrackRole {
-    ROLE_NONE = 0,      // not audible and not queued (retired, waiting for destruction)
-    ROLE_CURRENT,
-    ROLE_NEXT,
-    ROLE_OUTGOING,      // fading out (crossfade or fade-out on stop)
-} TrackRole;
 
 typedef enum TrackEndReason {
     END_NONE = 0,
@@ -177,9 +172,9 @@ typedef struct TrackState {
     AuFade fade_in_override;            // only used when has_fade_in_override
     FadeCurve fade_in_curve;            // its curve, sampled when the track is created
     bool has_fade_in_override;
-    AuReplayGainInfo replaygain_override;   // only used when has_replaygain_override
+    AuReplayGain replaygain_override;   // only used when has_replaygain_override
     bool has_replaygain_override;
-    AuMediaInfo *info;                  // written by the read thread under seek_mutex before `opened` is set
+    const AuMediaInfo *info;            // a reference; replaced (never changed) under seek_mutex
 
     // ReplayGain: target gain (any thread, see gain_pack()), ramped in the mixer
     SDL_atomic_t gain_mb;
@@ -231,7 +226,6 @@ typedef struct TrackState {
     bool speed_seg_open;                // audio thread only: speed_seg_in is known
     int32_t convert_rate;               // output rate the graphs were built for
     int32_t convert_channels;           // and its channel count
-    AVDictionary *format_opts_n;
     char *http_headers;                 // PlayAudioConfig.http_headers (owned), network streams only
     // Network tracks (set at creation): the read thread fills buffer_target_s before the mixer takes anything,
     // again after the mixer ran dry while playing, and reads ahead up to max_buffer_s
@@ -280,9 +274,8 @@ typedef struct TrackState {
     int32_t loops_heard;                // loops reported so far (compared with loops_started)
     int32_t last_frame_serial;          // serial of last_frame_pts
 
-    // ---- slot bookkeeping, changed under the device lock ----
-    TrackRole role;
-    TrackEndReason fade_reason;         // why it is fading out (ROLE_OUTGOING)
+    // ---- under the device lock ----
+    TrackEndReason fade_reason;         // why it is fading out (while it is the mixer's outgoing track)
 
     // ---- control thread only ----
     bool ended;                         // removed from the mixer and reported, waiting for destruction
@@ -359,6 +352,11 @@ typedef struct Mixer {
     uint32_t dither_state;
 } Mixer;
 
+// Whether a track is in one of the mixer's slots (current, queued or fading out). Device lock held, or no device.
+static inline bool mixer_has_track(const Mixer *m, const struct TrackState *t) {
+    return t && (m->current == t || m->next == t || m->outgoing == t);
+}
+
 //+-----------------------------------------------------+
 //| Control-thread messages                             |
 //+-----------------------------------------------------+
@@ -378,8 +376,6 @@ typedef enum MsgType {
     CMD_SET_GLOBAL_FILTERS,
     CMD_SET_DOWNMIX,
     CMD_SET_REPLAYGAIN,
-    CMD_GET_TRACK_INFO,
-    CMD_GET_TRACK_GAIN,
     CMD_GAIN_CACHE_CHANGED,
     CMD_UPDATE_TRACK_FILTERS,
     CMD_FILTER_COMMAND,
@@ -398,26 +394,21 @@ typedef struct Msg {
     char *str;                      // owned
     char *str2;                     // owned
     char *str3;                     // owned
-    PlayAudioConfig play_config;    // av_filtergraph points at str2, http_headers at str3
+    AuPlayConfig play_config;       // filters points at str2, http_headers at str3
     bool has_play_config;
     AuFade fade_in_override;
     bool has_fade_in_override;
-    CrossfadeConfig crossfade;
-    AudioDeviceConfig device;       // audio_device points at str
-    bool has_device;
+    AuCrossfade crossfade;
     AuReplayGainConfig replaygain;
-    AuReplayGainInfo replaygain_override;
+    AuReplayGain replaygain_override;
     bool has_replaygain_override;
-    void **out_ptr;                 // synchronous queries
-    double *out_double;
     int64_t i64;
     double d;
     bool b;
     int32_t level;
+    int32_t pause_state;            // AudioPlayer.pause_state when the command was posted
     int64_t request;
-    // Synchronous commands
-    SDL_sem *done;
-    int32_t *result;
+    SDL_sem *done;                  // CMD_SHUTDOWN: posted when it is done
     struct Msg *next;
 } Msg;
 
@@ -433,40 +424,62 @@ typedef struct StatusSnapshot {
     bool advancing;                 // false while paused / underrun / idle
     double speed;                   // playback speed of the audible audio
     double period;                  // seconds of audio per callback (SDL's buffer), 0 = no callback yet
+    bool buffering;                 // the track waits for network data
 } StatusSnapshot;
+
+// A float kept in an SDL_atomic_t (its bits)
+static inline void atomic_set_float(SDL_atomic_t *a, const float v) {
+    int32_t i;
+    memcpy(&i, &v, sizeof(i));
+    SDL_AtomicSet(a, i);
+}
+
+static inline float atomic_get_float(SDL_atomic_t *a) {
+    const int32_t i = SDL_AtomicGet(a);
+    float v;
+    memcpy(&v, &i, sizeof(v));
+    return v;
+}
+
+// What any thread may read about a track without waiting for the control thread (au_track_info(),
+// au_track_gain_db()), kept in AudioPlayer.pubs under pub_mutex. The mutex is never held while taking another lock.
+typedef struct TrackPub {
+    int32_t handle;
+    bool gain_known;                // the gain below is the one in use
+    double gain_db;
+    const AuMediaInfo *info;        // a reference, NULL until the track is open
+} TrackPub;
 
 typedef struct AudioPlayer {
     // ---- configuration ----
-    SDL_atomic_t volume;                // 0..100
+    SDL_atomic_t volume;                // linear gain 0..1, a float (atomic_get_float())
     SDL_atomic_t muted;
-    SDL_atomic_t paused;
+    SDL_atomic_t paused;                // applied (control thread)
+    // For au_get_status(): bit 0 = paused as last set (au_pause(), au_play() unpausing); the other bits count the
+    // calls that set it, so the control thread's own unpause (au_queue() starting a track) can not undo a newer call
+    SDL_atomic_t pause_state;
     SDL_atomic_t loop_count;            // default for new tracks, -1 infinite
     double prepare_next_seconds;
     int32_t output_channels;            // 0 = device preference
     int32_t output_sample_rate;         // 0 = device preference
-    CrossfadeConfig crossfade;          // control thread only
+    AuCrossfade crossfade;              // control thread only
     FadeCurve play_curve, skip_curve, stop_curve, pause_curve; // control thread: its curves, sampled when set
     bool use_soxr;
     int32_t filter_nbthreads;
-    int32_t find_stream_info;
 
-    // ---- callbacks ----
+    // ---- published track state (TrackPub) ----
+    SDL_mutex *pub_mutex;
+    TrackPub *pubs;
+    int32_t n_pubs, cap_pubs;
+
+    // ---- events ----
+    AuEventFn on_event;                 // NULL = queued for au_poll_event() (lib/events.c)
     void *user_data;
-    NotifyOfLog notify_of_log_callback;
-    NotifyOfEndOfFile notify_of_eof_callback;
-    NotifyOfRestart notify_of_restart_callback;
-    NotifyOfDurationUpdate notify_of_duration_update_callback;
-    NotifyOfPrepareNext notify_of_prepare_next_callback;
-    NotifyOfTrackStarted notify_of_track_started_callback;
-    NotifyOfAudioDeviceUpdate notify_of_audio_device_update_callback;
-    NotifyOfAudioDevicesChanged notify_of_audio_devices_changed_callback;
-    NotifyOfBuffering notify_of_buffering_callback;
-    NotifyOfStreamMetadata notify_of_stream_metadata_callback;
 
     // ---- control thread ----
     SDL_Thread *control_thread;
-    SDL_threadID control_thread_id;     // set by the control thread itself before au_initialize() returns
-    SDL_sem *started_sem;               // au_initialize() waits on it for control_thread_id
+    SDL_threadID control_thread_id;     // set by the control thread itself before au_init() returns
+    SDL_sem *started_sem;               // au_init() waits on it for control_thread_id
     SDL_atomic_t shutting_down;
     SDL_mutex *msg_mutex;
     SDL_sem *wake_sem;                  // posted for every message and by the mixer when it raises an event
@@ -525,5 +538,8 @@ typedef struct AudioPlayer {
 // Shared helpers implemented in ffaudio.c
 void ff_log(enum AU_LOG_LEVEL level, const char *fmt, ...);
 void ff_post_track_msg(MsgType type, int32_t handle, double d);
+// Publish a track's info (copied) or gain for au_track_info() / au_track_gain_db(); any thread
+void ff_publish_info(struct AudioPlayer *ap, int32_t handle, const AuMediaInfo *info);
+void ff_publish_gain(struct AudioPlayer *ap, int32_t handle, double gain_db);
 
 #endif //FFAUDIO_GLOBALS_H

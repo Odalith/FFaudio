@@ -20,7 +20,9 @@
 #include <ctype.h>
 #include "metadata.h"
 #include "probe.h"
+#include "numbers.h"
 #include "network.h"
+#include "libavutil/avstring.h"
 
 // R128 gains are relative to -23 LUFS, ReplayGain 2.0 to -18 LUFS
 #define R128_TO_REPLAYGAIN_DB 5.0
@@ -29,26 +31,11 @@
 //| Parsing helpers (locale independent)                |
 //+-----------------------------------------------------+
 
-// Parse a decimal number such as "-6.20 dB", "+3", "0.988". Returns false if there is no number.
+// A decimal number such as "-6.20 dB", "-6,20 dB" (some taggers write the locale's comma), "+3", "0.988"
 static bool parse_decimal(const char *s, double *out) {
     if (!s) return false;
     while (*s && isspace((unsigned char)*s)) s++;
-    double sign = 1.0;
-    if (*s == '+' || *s == '-') {
-        if (*s == '-') sign = -1.0;
-        s++;
-    }
-    double v = 0.0;
-    bool digits = false;
-    while (*s >= '0' && *s <= '9') { v = v * 10.0 + (*s - '0'); s++; digits = true; }
-    if (*s == '.' || *s == ',') {
-        s++;
-        double scale = 0.1;
-        while (*s >= '0' && *s <= '9') { v += (*s - '0') * scale; scale *= 0.1; s++; digits = true; }
-    }
-    if (!digits || !isfinite(v)) return false;
-    *out = sign * v;
-    return true;
+    return ff_parse_number(s, NULL, out, true);
 }
 
 // Parse "3", "3/12" into number and total (0 when missing)
@@ -71,61 +58,44 @@ static const char *dict_get(const AVDictionary *d, const char *key) {
 //| ReplayGain                                          |
 //+-----------------------------------------------------+
 
-AuReplayGainInfo replaygain_from_tags(const AVDictionary *tags) {
-    AuReplayGainInfo rg;
-    memset(&rg, 0, sizeof(rg));
+AuReplayGain replaygain_from_tags(const AVDictionary *tags) {
+    AuReplayGain rg = AU_REPLAYGAIN_NONE;
     double v;
 
-    if (parse_decimal(dict_get(tags, "REPLAYGAIN_TRACK_GAIN"), &v) && fabs(v) < 100) {
-        rg.has_track_gain = true;
-        rg.track_gain_db = v;
-    }
-    if (parse_decimal(dict_get(tags, "REPLAYGAIN_ALBUM_GAIN"), &v) && fabs(v) < 100) {
-        rg.has_album_gain = true;
-        rg.album_gain_db = v;
-    }
-    if (parse_decimal(dict_get(tags, "REPLAYGAIN_TRACK_PEAK"), &v) && v > 0 && v < 100) {
-        rg.has_track_peak = true;
-        rg.track_peak = v;
-    }
-    if (parse_decimal(dict_get(tags, "REPLAYGAIN_ALBUM_PEAK"), &v) && v > 0 && v < 100) {
-        rg.has_album_peak = true;
-        rg.album_peak = v;
-    }
+    if (parse_decimal(dict_get(tags, "REPLAYGAIN_TRACK_GAIN"), &v) && fabs(v) < 100) rg.track_gain_db = (float)v;
+    if (parse_decimal(dict_get(tags, "REPLAYGAIN_ALBUM_GAIN"), &v) && fabs(v) < 100) rg.album_gain_db = (float)v;
+    if (parse_decimal(dict_get(tags, "REPLAYGAIN_TRACK_PEAK"), &v) && v > 0 && v < 100) rg.track_peak = (float)v;
+    if (parse_decimal(dict_get(tags, "REPLAYGAIN_ALBUM_PEAK"), &v) && v > 0 && v < 100) rg.album_peak = (float)v;
 
     // R128 tags (standard in Opus, RFC 7845; accepted in any format): Q7.8 fixed point dB relative to -23 LUFS.
     // Only used where ReplayGain tags are missing; both measure BS.1770 loudness, so the references differ by 5 dB.
-    if (!rg.has_track_gain && parse_decimal(dict_get(tags, "R128_TRACK_GAIN"), &v)) {
-        rg.has_track_gain = true;
-        rg.track_gain_db = v / 256.0 + R128_TO_REPLAYGAIN_DB;
+    if (isnan(rg.track_gain_db) && parse_decimal(dict_get(tags, "R128_TRACK_GAIN"), &v)) {
+        rg.track_gain_db = (float)(v / 256.0 + R128_TO_REPLAYGAIN_DB);
         rg.from_r128 = true;
     }
-    if (!rg.has_album_gain && parse_decimal(dict_get(tags, "R128_ALBUM_GAIN"), &v)) {
-        rg.has_album_gain = true;
-        rg.album_gain_db = v / 256.0 + R128_TO_REPLAYGAIN_DB;
+    if (isnan(rg.album_gain_db) && parse_decimal(dict_get(tags, "R128_ALBUM_GAIN"), &v)) {
+        rg.album_gain_db = (float)(v / 256.0 + R128_TO_REPLAYGAIN_DB);
         rg.from_r128 = true;
     }
     return rg;
 }
 
-double replaygain_gain_db(const AuReplayGainConfig *cfg, const AuReplayGainInfo *rg) {
+double replaygain_gain_db(const AuReplayGainConfig *cfg, const AuReplayGain *rg) {
     if (!cfg || cfg->mode == AU_REPLAYGAIN_OFF) return 0.0;
 
     const bool album = cfg->mode == AU_REPLAYGAIN_ALBUM;
-    bool has_gain = false, has_peak = false;
-    double gain = 0, peak = 0;
-
     // Preferred gain first, the other one as a fallback; the peak that belongs to the chosen gain first
-    if (album && rg->has_album_gain) { gain = rg->album_gain_db; has_gain = true; }
-    else if (rg->has_track_gain)     { gain = rg->track_gain_db; has_gain = true; }
-    else if (rg->has_album_gain)     { gain = rg->album_gain_db; has_gain = true; }
+    double gain = NAN, peak = NAN;
+    if (album && !isnan(rg->album_gain_db))  gain = rg->album_gain_db;
+    else if (!isnan(rg->track_gain_db))      gain = rg->track_gain_db;
+    else if (!isnan(rg->album_gain_db))      gain = rg->album_gain_db;
 
-    if (album && rg->has_album_peak) { peak = rg->album_peak; has_peak = true; }
-    else if (rg->has_track_peak)     { peak = rg->track_peak; has_peak = true; }
-    else if (rg->has_album_peak)     { peak = rg->album_peak; has_peak = true; }
+    if (album && !isnan(rg->album_peak))     peak = rg->album_peak;
+    else if (!isnan(rg->track_peak))         peak = rg->track_peak;
+    else if (!isnan(rg->album_peak))         peak = rg->album_peak;
 
-    double db = has_gain ? gain + cfg->preamp_db : cfg->fallback_gain_db;
-    if (cfg->prevent_clipping && has_peak && peak > 0) {
+    double db = !isnan(gain) ? gain + cfg->preamp_db : cfg->fallback_gain_db;
+    if (cfg->prevent_clipping && !isnan(peak) && peak > 0) {
         const double max_db = -20.0 * log10(peak);
         if (db > max_db) db = max_db;
     }
@@ -162,97 +132,162 @@ char *text_to_utf8(const char *s) {
     return out;
 }
 
-AuMediaInfo *media_info_from_context(const AVFormatContext *ic, const int stream_index, const char *filename) {
-    AuMediaInfo *info = av_mallocz(sizeof(AuMediaInfo));
-    if (!info) return NULL;
+void media_draft_free(MediaDraft *d) {
+    av_freep(&d->path);
+    av_freep(&d->container);
+    av_freep(&d->codec);
+    av_freep(&d->channel_layout);
+    av_dict_free(&d->tags);
+}
 
-    info->filename = av_strdup(filename ? filename : "");
-    info->container = av_strdup(ic->iformat && ic->iformat->name ? ic->iformat->name : "");
-    info->duration = ic->duration != AV_NOPTS_VALUE ? ic->duration / AV_TIME_BASE_DOUBLE : -1;
-    info->bit_rate = ic->bit_rate > 0 ? ic->bit_rate : 0;
+int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int stream_index, const char *path) {
+    memset(d, 0, sizeof(*d));
+    d->path = av_strdup(path ? path : "");
+    d->container = av_strdup(ic->iformat && ic->iformat->name ? ic->iformat->name : "");
+    d->duration = ic->duration != AV_NOPTS_VALUE ? ic->duration / AV_TIME_BASE_DOUBLE : -1;
+    d->bit_rate = ic->bit_rate > 0 ? ic->bit_rate : 0;
 
     // Container tags first, stream tags (Ogg, Opus, some MP4) only where the container has none
-    av_dict_copy(&info->tags, ic->metadata, 0);
+    av_dict_copy(&d->tags, ic->metadata, 0);
 
     if (stream_index >= 0 && stream_index < (int)ic->nb_streams) {
         const AVStream *st = ic->streams[stream_index];
         const AVCodecParameters *par = st->codecpar;
-        av_dict_copy(&info->tags, st->metadata, AV_DICT_DONT_OVERWRITE);
+        av_dict_copy(&d->tags, st->metadata, AV_DICT_DONT_OVERWRITE);
 
-        info->codec = av_strdup(avcodec_get_name(par->codec_id));
-        info->sample_rate = par->sample_rate;
-        info->channels = par->ch_layout.nb_channels;
-        info->bits_per_sample = par->bits_per_raw_sample > 0 ? par->bits_per_raw_sample
-                                                             : av_get_bits_per_sample(par->codec_id);
-        if (par->bit_rate > 0 && !info->bit_rate) info->bit_rate = par->bit_rate;
-        if (info->duration < 0 && st->duration != AV_NOPTS_VALUE)
-            info->duration = st->duration * av_q2d(st->time_base);
+        d->codec = av_strdup(avcodec_get_name(par->codec_id));
+        d->sample_rate = par->sample_rate;
+        d->channels = par->ch_layout.nb_channels;
+        d->bits_per_sample = par->bits_per_raw_sample > 0 ? par->bits_per_raw_sample
+                                                          : av_get_bits_per_sample(par->codec_id);
+        if (par->bit_rate > 0 && !d->bit_rate) d->bit_rate = par->bit_rate;
+        if (d->duration < 0 && st->duration != AV_NOPTS_VALUE)
+            d->duration = st->duration * av_q2d(st->time_base);
 
         char layout[128];
         if (av_channel_layout_describe(&par->ch_layout, layout, sizeof(layout)) >= 0)
-            info->channel_layout = av_strdup(layout);
+            d->channel_layout = av_strdup(layout);
     }
     // After the stream's duration has filled in a missing one. Live = a network stream without an end, as the player
     // treats it; a local file of unknown length still ends. HLS seeks through its playlist, everything else needs a
     // seekable byte stream.
-    info->live = info->duration <= 0 && au_is_network_url(info->filename);
-    info->seekable = !info->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
-                                     (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
-    if (!info->codec) info->codec = av_strdup("");
-    if (!info->channel_layout) info->channel_layout = av_strdup("");
+    d->live = d->duration <= 0 && au_is_network_url(d->path);
+    d->seekable = !d->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
+                               (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
+    if (!d->codec) d->codec = av_strdup("");
+    if (!d->channel_layout) d->channel_layout = av_strdup("");
 
-    info->replaygain = replaygain_from_tags(info->tags);
-
-    if (!info->filename || !info->container || !info->codec || !info->channel_layout) {
-        au_media_info_free(info);
-        return NULL;
+    if (!d->path || !d->container || !d->codec || !d->channel_layout) {
+        media_draft_free(d);
+        return AVERROR(ENOMEM);
     }
+    return 0;
+}
+
+// The block behind an AuMediaInfo: the reference count, the struct, the tag array, then every string
+typedef struct MediaBlock {
+    SDL_atomic_t refs;
+    AuMediaInfo info;
+} MediaBlock;
+
+static MediaBlock *block_of(const AuMediaInfo *info) {
+    return (MediaBlock *)((char *)info - offsetof(MediaBlock, info));
+}
+
+static char *put_string(char **arena, const char *s) {
+    const size_t n = strlen(s) + 1;
+    char *at = *arena;
+    memcpy(at, s, n);
+    *arena += n;
+    return at;
+}
+
+static void number_and_total(const AuMediaInfo *info, const char *key, const char *const totals[],
+                             int *number, int *total);
+
+const AuMediaInfo *media_info_freeze(const MediaDraft *d) {
+    const int n_tags = av_dict_count(d->tags);
+    size_t chars = strlen(d->path) + strlen(d->container) + strlen(d->codec) + strlen(d->channel_layout) + 4;
+    const AVDictionaryEntry *e = NULL;
+    while ((e = av_dict_iterate(d->tags, e))) chars += strlen(e->key) + strlen(e->value) + 2;
+
+    const size_t head = sizeof(MediaBlock) + (size_t)n_tags * sizeof(AuTag);
+    MediaBlock *b = av_malloc(head + chars);
+    if (!b) return NULL;
+    SDL_AtomicSet(&b->refs, 1);
+    AuMediaInfo *info = &b->info;
+    AuTag *tags = (AuTag *)(b + 1);
+    char *arena = (char *)b + head;
+
+    info->path = put_string(&arena, d->path);
+    info->container = put_string(&arena, d->container);
+    info->codec = put_string(&arena, d->codec);
+    info->channel_layout = put_string(&arena, d->channel_layout);
+    info->duration = d->duration;
+    info->bit_rate = d->bit_rate;
+    info->sample_rate = d->sample_rate;
+    info->channels = d->channels;
+    info->bits_per_sample = d->bits_per_sample;
+    info->live = d->live;
+    info->seekable = d->seekable;
+    int i = 0;
+    for (e = NULL; (e = av_dict_iterate(d->tags, e)); i++) {
+        tags[i].key = put_string(&arena, e->key);
+        tags[i].value = put_string(&arena, e->value);
+    }
+    info->tag_count = n_tags;
+    info->tags = tags;
+    info->replaygain = replaygain_from_tags(d->tags);
+
+    static const char *const track_totals[] = { "tracktotal", "totaltracks", NULL };
+    static const char *const disc_totals[] = { "disctotal", "totaldiscs", NULL };
+    number_and_total(info, "track", track_totals, &info->track_number, &info->track_total);
+    number_and_total(info, "disc", disc_totals, &info->disc_number, &info->disc_total);
     return info;
 }
 
-AuMediaInfo *media_info_copy(const AuMediaInfo *src) {
-    if (!src) return NULL;
-    AuMediaInfo *info = av_mallocz(sizeof(AuMediaInfo));
-    if (!info) return NULL;
-    *info = *src;
-    info->tags = NULL;
-    info->filename = av_strdup(src->filename);
-    info->container = av_strdup(src->container);
-    info->codec = av_strdup(src->codec);
-    info->channel_layout = av_strdup(src->channel_layout);
-    if (av_dict_copy(&info->tags, src->tags, 0) < 0 ||
-        !info->filename || !info->container || !info->codec || !info->channel_layout) {
-        au_media_info_free(info);
-        return NULL;
-    }
+const AuMediaInfo *media_info_retain(const AuMediaInfo *info) {
+    if (info) SDL_AtomicIncRef(&block_of(info)->refs);
     return info;
+}
+
+const AuMediaInfo *media_info_with_title(const AuMediaInfo *info, const char *title, const char *artist) {
+    if (!info) return NULL;
+    MediaDraft d = {
+        .path = av_strdup(info->path), .container = av_strdup(info->container), .codec = av_strdup(info->codec),
+        .channel_layout = av_strdup(info->channel_layout), .duration = info->duration, .bit_rate = info->bit_rate,
+        .sample_rate = info->sample_rate, .channels = info->channels, .bits_per_sample = info->bits_per_sample,
+        .live = info->live, .seekable = info->seekable,
+    };
+    for (int i = 0; i < info->tag_count; i++) av_dict_set(&d.tags, info->tags[i].key, info->tags[i].value, 0);
+    av_dict_set(&d.tags, "title", title, 0);
+    av_dict_set(&d.tags, "artist", artist, 0);   // NULL removes it
+    const AuMediaInfo *out = d.path && d.container && d.codec && d.channel_layout ? media_info_freeze(&d) : NULL;
+    media_draft_free(&d);
+    return out;
 }
 
 //+-----------------------------------------------------+
 //| Public API                                          |
 //+-----------------------------------------------------+
 
-AuMediaInfo *au_probe(const char *filename, int *out_error) {
+const AuMediaInfo *au_probe(const char *filename, int *out_error) {
     AVFormatContext *ic = NULL;
-    AuMediaInfo *info = NULL;
+    const AuMediaInfo *info = NULL;
     int ret;
 
     if (!filename || !filename[0]) {
         if (out_error) *out_error = AU_ERR_INVALID_ARGUMENT;
         return NULL;
     }
-    AVDictionary *opts = NULL;
-    network_input_options(&opts, filename, NULL);
-    ret = avformat_open_input(&ic, filename, NULL, &opts);
-    av_dict_free(&opts);
-    if (ret < 0) goto end;
-    if (ff_input_lacks_audio(ic)) { ret = AVERROR_STREAM_NOT_FOUND; goto end; }
-    if ((ret = avformat_find_stream_info(ic, NULL)) < 0) goto end;
+    int st = -1;
+    FfOpenStep failed;
+    if ((ret = ff_open_audio_input(filename, NULL, NULL, &ic, &st, &failed)) < 0) goto end;
 
-    const int st = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
-    if (st < 0) { ret = st; goto end; }
-
-    info = media_info_from_context(ic, st, filename);
+    MediaDraft d;
+    if ((ret = media_draft_from_context(&d, ic, st, filename)) < 0) goto end;
+    info = media_info_freeze(&d);
+    media_draft_free(&d);
     ret = info ? 0 : AVERROR(ENOMEM);
 
 end:
@@ -261,31 +296,22 @@ end:
     return info;
 }
 
-void au_media_info_free(AuMediaInfo *info) {
+void au_media_info_release(const AuMediaInfo *info) {
     if (!info) return;
-    av_free(info->filename);
-    av_free(info->container);
-    av_free(info->codec);
-    av_free(info->channel_layout);
-    av_dict_free(&info->tags);
-    av_free(info);
+    MediaBlock *b = block_of(info);
+    if (SDL_AtomicDecRef(&b->refs)) av_free(b);
 }
 
-const char *au_media_filename(const AuMediaInfo *info) { return info ? info->filename : NULL; }
-const char *au_media_container(const AuMediaInfo *info) { return info ? info->container : NULL; }
-const char *au_media_codec(const AuMediaInfo *info) { return info ? info->codec : NULL; }
-const char *au_media_channel_layout(const AuMediaInfo *info) { return info ? info->channel_layout : NULL; }
-double au_media_duration(const AuMediaInfo *info) { return info ? info->duration : -1; }
-int64_t au_media_bit_rate(const AuMediaInfo *info) { return info ? info->bit_rate : 0; }
-int au_media_sample_rate(const AuMediaInfo *info) { return info ? info->sample_rate : 0; }
-int au_media_channels(const AuMediaInfo *info) { return info ? info->channels : 0; }
-int au_media_bits_per_sample(const AuMediaInfo *info) { return info ? info->bits_per_sample : 0; }
-bool au_media_is_live(const AuMediaInfo *info) { return info && info->live; }
-bool au_media_is_seekable(const AuMediaInfo *info) { return info && info->seekable; }
+// Case-insensitive, like AVDictionary
+static const char *tag_get(const AuMediaInfo *info, const char *key) {
+    for (int i = 0; i < info->tag_count; i++)
+        if (!av_strcasecmp(info->tags[i].key, key)) return info->tags[i].value;
+    return NULL;
+}
 
 const char *au_media_tag(const AuMediaInfo *info, const char *key) {
     if (!info || !key || !key[0]) return NULL;
-    const char *v = dict_get(info->tags, key);
+    const char *v = tag_get(info, key);
     if (v) return v;
 
     // Spellings that differ between formats
@@ -302,26 +328,9 @@ const char *au_media_tag(const AuMediaInfo *info, const char *key) {
             match = av_strcasecmp(aliases[i][j], key) == 0;
         if (!match) continue;
         for (int j = 0; aliases[i][j]; j++)
-            if ((v = dict_get(info->tags, aliases[i][j]))) return v;
+            if ((v = tag_get(info, aliases[i][j]))) return v;
     }
     return NULL;
-}
-
-int au_media_tag_count(const AuMediaInfo *info) {
-    return info ? av_dict_count(info->tags) : 0;
-}
-
-bool au_media_tag_at(const AuMediaInfo *info, const int index, const char **key, const char **value) {
-    if (!info || index < 0) return false;
-    const AVDictionaryEntry *e = NULL;
-    for (int i = 0; (e = av_dict_iterate(info->tags, e)); i++) {
-        if (i == index) {
-            if (key) *key = e->key;
-            if (value) *value = e->value;
-            return true;
-        }
-    }
-    return false;
 }
 
 static void number_and_total(const AuMediaInfo *info, const char *key, const char *const totals[],
@@ -334,19 +343,3 @@ static void number_and_total(const AuMediaInfo *info, const char *key, const cha
     if (total) *total = t;
 }
 
-void au_media_track_number(const AuMediaInfo *info, int *number, int *total) {
-    static const char *const totals[] = { "tracktotal", "totaltracks", NULL };
-    number_and_total(info, "track", totals, number, total);
-}
-
-void au_media_disc_number(const AuMediaInfo *info, int *number, int *total) {
-    static const char *const totals[] = { "disctotal", "totaldiscs", NULL };
-    number_and_total(info, "disc", totals, number, total);
-}
-
-AuReplayGainInfo au_media_replaygain(const AuMediaInfo *info) {
-    if (info) return info->replaygain;
-    AuReplayGainInfo none;
-    memset(&none, 0, sizeof(none));
-    return none;
-}

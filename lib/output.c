@@ -108,7 +108,6 @@ bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *i
     if (outgoing) {
         if (m->outgoing && m->outgoing != outgoing) {
             // Only one track can fade out at a time: the older one is cut
-            m->outgoing->role = ROLE_NONE;
             push_event(m, MIX_EV_FADE_DONE, m->outgoing, m->outgoing->position);
         }
         // If it was still fading in, continue from its current loudness instead of jumping to full
@@ -118,7 +117,6 @@ bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *i
             start = (int64_t)((1.0f - p) * (float)len);
         }
         m->outgoing = outgoing;
-        outgoing->role = ROLE_OUTGOING;
         m->out_fade.active = true;
         m->out_fade.pos = start;
         m->out_fade.len = len;
@@ -131,7 +129,6 @@ bool mixer_start_transition(AudioPlayer *ap, TrackState *outgoing, TrackState *i
     m->current = incoming;
     m->in_fade.active = false;
     if (incoming) {
-        incoming->role = ROLE_CURRENT;
         m->in_fade.active = true;
         m->in_fade.pos = 0;
         m->in_fade.len = len;
@@ -315,7 +312,6 @@ static void render_outgoing(AudioPlayer *ap, const int frames) {
     if (eos || m->out_fade.pos >= m->out_fade.len) {
         m->out_fade.active = false;
         m->outgoing = NULL;
-        t->role = ROLE_NONE;
         push_event(m, MIX_EV_FADE_DONE, t, t->position);
     }
 }
@@ -349,13 +345,11 @@ static int render_current(AudioPlayer *ap, const int frames) {
 
         if (eos) {
             // Gapless handover: the queued track continues in the same buffer
-            t->role = ROLE_NONE;
             m->current = NULL;
             m->in_fade.active = false;
             push_event(m, MIX_EV_TRACK_ENDED, t, t->position);
             if (m->next) {
                 m->current = m->next;
-                m->current->role = ROLE_CURRENT;
                 m->next = NULL;
             }
             continue;
@@ -439,7 +433,7 @@ static inline float pause_gain_at(const Mixer *m, const int64_t k) {
 // Volume (with its 10 ms ramp), the pause fade, clamping and the device format, in one pass over the mix
 static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
     Mixer *m = &ap->mixer;
-    const float target = SDL_AtomicGet(&ap->muted) ? 0.0f : (float)SDL_AtomicGet(&ap->volume) / 100.0f;
+    const float target = SDL_AtomicGet(&ap->muted) ? 0.0f : atomic_get_float(&ap->volume);
     const float step = 1.0f / (float)FFMAX(1, m->vol_ramp_frames);
     const int frame_bytes = m->channels * m->bytes_per_sample;
     uint32_t dither = m->dither_state;
@@ -486,6 +480,7 @@ static void publish_status(AudioPlayer *ap, const bool advancing, const int fram
     s.advancing = advancing;
     s.speed = t ? t->play_speed : 1.0;
     s.period = m->rate > 0 ? (double)frames / m->rate : 0;
+    s.buffering = t && SDL_AtomicGet(&t->buffering) != 0;
     // Never waits: while a getter holds the lock (a copy of a few bytes), this period's status is skipped and the
     // next one, a period later, is published instead
     if (SDL_TryLockMutex(ap->status_mutex) == 0) {
@@ -622,7 +617,7 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
         }
     }
 
-    // A forced channel count / rate (InitializeConfig) wins over the device's preference; SDL converts
+    // A forced channel count / rate (AuConfig) wins over the device's preference; SDL converts
     const bool force_channels = ap->output_channels > 0;
     const bool force_rate = ap->output_sample_rate > 0;
     wanted.freq = force_rate ? ap->output_sample_rate : (preferred.freq > 0 ? preferred.freq : 48000);

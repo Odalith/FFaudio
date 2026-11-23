@@ -51,6 +51,12 @@
 
 #include "http_server.h"
 #include "../lib/ffaudio.h"
+
+static AuStatus status(void) {
+    AuStatus s;
+    au_get_status(&s);
+    return s;
+}
 #include "../lib/ffaudio_filters.h"
 #include "../lib/ffaudio_loudness.h"
 
@@ -226,11 +232,11 @@ static void on_started(int32_t handle, void *ud) {
     atomic_fetch_add(&n_started, 1);
     atomic_store(&last_started_at, elapsed_s());
     // An application looks at the track's details when it starts
-    AuMediaInfo *info = au_get_track_info(handle);
+    const AuMediaInfo *info = au_track_info(handle);
     if (info) {
         const char *k, *v;
-        for (int i = 0; au_media_tag_at(info, i, &k, &v); i++) {}
-        au_media_info_free(info);
+        for (int i = 0; i < info->tag_count; i++) { k = info->tags[i].key; v = info->tags[i].value; }
+        au_media_info_release(info);
     }
 }
 
@@ -242,7 +248,7 @@ static void on_restart(int32_t handle, double pos, bool looped, int32_t left, vo
 static void on_prepare_next(int32_t current, void *ud) {
     (void)current; (void)ud;
     atomic_fetch_add(&n_prepare_next, 1);
-    if (chance(0.9)) au_set_next(pick_file(), NULL);   // sometimes nothing is queued and playback just ends
+    if (chance(0.9)) au_queue(pick_file(), NULL);   // sometimes nothing is queued and playback just ends
 }
 
 static void on_buffering(int32_t handle, bool buffering, double seconds, void *ud) {
@@ -257,7 +263,7 @@ static void on_stream_metadata(int32_t handle, const char *title, const char *ar
     atomic_fetch_add(&n_titles, 1);
 }
 
-static void on_cached(const char *path, int result, const AuReplayGainInfo *rg, void *user) {
+static void on_cached(const char *path, int result, const AuReplayGain *rg, void *user) {
     (void)path; (void)rg; (void)user;
     if (result == AU_OK) atomic_fetch_add(&n_cached, 1);
 }
@@ -266,7 +272,7 @@ static void on_devices_changed(void *ud) {
     (void)ud;
     int n = 0;
     char **devs = NULL;
-    if (au_get_audio_devices(&n, &devs) == AU_OK) au_free_audio_devices(devs, n);
+    if ((devs = au_list_devices(&n))) au_free_devices(devs, n);
 }
 
 //+-----------------------------------------------------+
@@ -281,7 +287,7 @@ static AuFade random_fade(const double max_seconds) {
 }
 
 static void random_crossfade(void) {
-    const CrossfadeConfig xf = { .on_track_end = random_fade(8), .on_skip = random_fade(3), .on_play = random_fade(3),
+    const AuCrossfade xf = { .on_track_end = random_fade(8), .on_skip = random_fade(3), .on_play = random_fade(3),
                                  .on_stop = random_fade(1), .on_pause = random_fade(0.5),
                                  .min_track_seconds = chance(0.5) ? 0 : rnd_real(1, 20) };
     au_set_crossfade(&xf);
@@ -294,19 +300,21 @@ static void random_replaygain(void) {
         .fallback_gain_db = chance(0.5) ? 0 : -6,
         .prevent_clipping = chance(0.5),
         .measure_missing = chance(0.5),
-        .measure_wait_ms = chance(0.5) ? 0 : rnd_int(1500),
+        .measure_wait_seconds = chance(0.5) ? 0 : rnd_int(1500) / 1000.0,
     };
     au_set_replaygain(&rg);
 }
 
 static int output_channels(void) {
     int rate = 0, ch = 0;
-    return au_get_output_spec(&rate, &ch) == AU_OK && ch > 0 ? ch : 2;
+    (void)rate;
+    ch = status().channels;
+    return ch > 0 ? ch : 2;
 }
 
 static void random_filters(void) {
     if (chance(0.2)) {
-        au_set_global_filtergraph(NULL);
+        au_set_filters(NULL);
         return;
     }
     const int ch = output_channels();
@@ -316,36 +324,33 @@ static void random_filters(void) {
         AuEqualizer eq = au_equalizer_defaults();
         for (int i = 0; i < AU_EQ_BANDS; i++) eq.gain_db[i] = chance(0.5) ? 0 : rnd_real(-8, 8);
         eq.preamp_db = -6;
-        if (chance(0.5)) au_fb_set_name(fb, "geq");
-        au_fb_add_equalizer(fb, ch, &eq);
+        au_fb_add_equalizer(fb, chance(0.5) ? "geq" : NULL, &eq);
     }
     if (chance(0.3)) {
         AuParametricEq peq = { .preamp_db = -4, .band_count = 1 + rnd_int(10) };
         for (int i = 0; i < peq.band_count; i++)
             peq.bands[i] = (AuPeqBand){ (AU_PEQ_TYPE)rnd_int(5), rnd_real(30, 15000), rnd_real(0.3, 5), rnd_real(-8, 8) };
-        if (chance(0.5)) au_fb_set_name(fb, "peq");
-        au_fb_add_parametric_eq(fb, &peq);
+        au_fb_add_parametric_eq(fb, chance(0.5) ? "peq" : NULL, &peq);
     }
-    if (chance(0.3)) au_fb_add_tone(fb, rnd_real(-6, 6), rnd_real(-6, 6));
+    if (chance(0.3)) au_fb_add_tone(fb, NULL, rnd_real(-6, 6), rnd_real(-6, 6));
     if (ch == 2) {
         if (chance(0.4)) {
             AuStereo st = au_stereo_defaults();
             st.balance = chance(0.5) ? 0 : rnd_real(-1, 1);
             st.width = chance(0.2) ? 0 : rnd_real(0.5, 2);
             st.swap = chance(0.2);
-            au_fb_set_name(fb, "st");
-            au_fb_add_stereo(fb, &st);
+            au_fb_add_stereo(fb, "st", &st);
         }
-        if (chance(0.3)) au_fb_add_crossfeed(fb, NULL);
-        if (chance(0.2) && au_filter_available("bs2b")) au_fb_add_bs2b_profile(fb, (AU_BS2B_PROFILE)rnd_int(3));
+        if (chance(0.3)) au_fb_add_crossfeed(fb, NULL, NULL);
+        if (chance(0.2) && au_filter_available("bs2b")) au_fb_add_bs2b_profile(fb, NULL, (AU_BS2B_PROFILE)rnd_int(3));
     }
     if (chance(0.25)) {
         const AuCompressor c = chance(0.5) ? au_compressor_defaults() : au_compressor_night();
-        au_fb_add_compressor(fb, &c);
+        au_fb_add_compressor(fb, NULL, &c);
     }
-    if (chance(0.4)) au_fb_add_limiter(fb, NULL);
+    if (chance(0.4)) au_fb_add_limiter(fb, NULL, NULL);
     const char *s = au_fb_peek(fb);
-    au_set_global_filtergraph(s[0] ? s : NULL);
+    au_set_filters(s[0] ? s : NULL);
     au_fb_free(fb);
 }
 
@@ -361,8 +366,10 @@ static void random_command(void) {
             au_send_filter_command(0, "equalizer@peq_0", "g", arg);
             break;
         default:
-            snprintf(arg, sizeof(arg), "%d|f=1000|w=500|g=%d", rnd_int(10), rnd_int(13) - 6);
-            au_send_filter_command(0, "anequalizer@geq", "change", arg);
+            char target[32];
+            snprintf(target, sizeof(target), "equalizer@geq_%d", rnd_int(AU_EQ_BANDS));
+            snprintf(arg, sizeof(arg), "%d", rnd_int(13) - 6);
+            au_send_filter_command(0, target, "g", arg);
             break;
     }
 }
@@ -370,17 +377,18 @@ static void random_command(void) {
 static void play_random(const bool queue) {
     static const char *track_filters[] = { "volume=0.8", "atempo=1.05", "highpass=f=40", "aecho=0.8:0.5:40:0.2" };
     const AuFade fade = random_fade(2);
-    const AuReplayGainInfo rg = { .has_track_gain = true, .track_gain_db = rnd_real(-12, 3) };
-    const PlayAudioConfig cfg = {
-        .skip_seconds = chance(0.2) ? rnd_real(0, 400) : 0,  // sometimes past the end
-        .play_duration = chance(0.15) ? rnd_real(1, 60) : 0,
-        .av_filtergraph = chance(0.15) ? track_filters[rnd_int(4)] : NULL,
+    AuReplayGain rg = AU_REPLAYGAIN_NONE;
+    rg.track_gain_db = (float)rnd_real(-12, 3);
+    const AuPlayConfig cfg = {
+        .start_seconds = chance(0.2) ? rnd_real(0, 400) : 0,  // sometimes past the end
+        .length_seconds = chance(0.15) ? rnd_real(1, 60) : 0,
+        .filters = chance(0.15) ? track_filters[rnd_int(4)] : NULL,
         .fade_in = chance(0.15) ? &fade : NULL,
         .replaygain = chance(0.1) ? &rg : NULL,
     };
-    const PlayAudioConfig *c = chance(0.5) ? &cfg : NULL;
-    if (queue) au_set_next(pick_file(), c);
-    else au_play_audio(pick_file(), c);
+    const AuPlayConfig *c = chance(0.5) ? &cfg : NULL;
+    if (queue) au_queue(pick_file(), c);
+    else au_play(pick_file(), c);
 }
 
 //+-----------------------------------------------------+
@@ -389,21 +397,37 @@ static void play_random(const bool queue) {
 
 static const char *cache_file = "soak-replaygain.cache";
 
+static void on_event(const AuEvent *e, void *ud) {
+    switch (e->type) {
+        case AU_EVENT_LOG: on_log(e->data.log.message, e->data.log.request, e->data.log.level, ud); break;
+        case AU_EVENT_TRACK_ENDED:
+            on_eof(e->data.ended.reason == AU_END_SKIPPED, e->data.ended.reason == AU_END_ERROR, e->handle, ud);
+            break;
+        case AU_EVENT_RESTARTED:
+            on_restart(e->handle, e->data.restarted.position, e->data.restarted.from_loop,
+                       e->data.restarted.loops_remaining, ud);
+            break;
+        case AU_EVENT_PREPARE_NEXT: on_prepare_next(e->handle, ud); break;
+        case AU_EVENT_TRACK_STARTED: on_started(e->handle, ud); break;
+        case AU_EVENT_DEVICES_CHANGED: on_devices_changed(ud); break;
+        case AU_EVENT_BUFFERING:
+            on_buffering(e->handle, e->data.buffering.active, e->data.buffering.buffered_seconds, ud);
+            break;
+        case AU_EVENT_STREAM_METADATA:
+            on_stream_metadata(e->handle, e->data.metadata.title, e->data.metadata.artist, ud);
+            break;
+        default: break;
+    }
+}
+
 static void init_player(void) {
-    const InitializeConfig config = {
+    const AuConfig config = {
         .app_name = "ffaudio soak",
-        .initial_volume = 30,
+        .volume = 0.3f,
         .prepare_next_seconds = rnd_real(2, 15),
-        .on_log = on_log,
-        .on_eof = on_eof,
-        .on_restart = on_restart,
-        .on_prepare_next = on_prepare_next,
-        .on_track_started = on_started,
-        .on_audio_devices_changed = on_devices_changed,
-        .on_buffering = on_buffering,
-        .on_stream_metadata = on_stream_metadata,
+        .on_event = on_event,
     };
-    if (au_initialize(&config) != AU_OK || au_configure_audio_device(NULL) != AU_OK) {
+    if (au_init(&config) != AU_OK) {
         fprintf(stderr, "could not start the player\n");
         exit(1);
     }
@@ -423,8 +447,8 @@ static void *analysis_thread(void *arg) {
         const char *f = pick_file();
         if (chance(0.5)) {
             int err;
-            AuMediaInfo *info = au_probe(f, &err);
-            au_media_info_free(info);
+            const AuMediaInfo *info = au_probe(f, &err);
+            au_media_info_release(info);
             atomic_fetch_add(&n_probes, 1);
         }
         else {
@@ -438,7 +462,7 @@ static void *analysis_thread(void *arg) {
     return NULL;
 }
 
-// The main loop calls blocking API functions (e.g. au_get_track_info): if one of them stops returning, that is a
+// The main loop calls API functions all the time (none of them should ever wait): if one stops returning, that is a
 // deadlock, and the watchdog says where it was before it aborts
 static void *watchdog_thread(void *arg) {
     (void)arg;
@@ -587,17 +611,17 @@ static void one_action(void) {
     atomic_fetch_add(&n_actions, 1);
     if (r < 120)      { ACTION("play");          play_random(false); }
     else if (r < 200) { ACTION("set_next");      play_random(true); }
-    else if (r < 300) { ACTION("skip");          au_skip_to_next(); }
-    else if (r < 380) { ACTION("seek");          chance(0.5) ? au_seek_percent(rnd_real(0, 1.1)) : au_seek_time(rnd_int(400000)); }
-    else if (r < 420) { ACTION("pause");         au_pause_audio(true); usleep((useconds_t)rnd_int(1500) * 1000); au_pause_audio(false); }
-    else if (r < 440) { ACTION("stop");          au_stop_audio(); if (chance(0.8)) play_random(false); }
-    else if (r < 460) { ACTION("clear_next");    au_clear_next(); }
-    else if (r < 500) { ACTION("volume");        au_set_audio_volume(rnd_int(101)); }
-    else if (r < 510) { ACTION("mute");          au_mute_audio(true); usleep(200000); au_mute_audio(false); }
-    else if (r < 560) { ACTION("speed");         au_set_playback_speed(chance(0.4) ? 1.0 : rnd_real(0.25, 4), chance(0.7)); }
+    else if (r < 300) { ACTION("skip");          au_skip(); }
+    else if (r < 380) { ACTION("seek");          chance(0.5) ? au_seek_fraction(rnd_real(0, 1.1)) : au_seek(rnd_int(400000) / 1000.0); }
+    else if (r < 420) { ACTION("pause");         au_pause(true); usleep((useconds_t)rnd_int(1500) * 1000); au_pause(false); }
+    else if (r < 440) { ACTION("stop");          au_stop(); if (chance(0.8)) play_random(false); }
+    else if (r < 460) { ACTION("clear_next");    au_clear_queue(); }
+    else if (r < 500) { ACTION("volume");        au_set_volume(rnd_int(101) / 100.0f); }
+    else if (r < 510) { ACTION("mute");          au_set_muted(true); usleep(200000); au_set_muted(false); }
+    else if (r < 560) { ACTION("speed");         au_set_speed(chance(0.4) ? 1.0 : rnd_real(0.25, 4), chance(0.7)); }
     else if (r < 620) { ACTION("filters");       random_filters(); }
     else if (r < 680) { ACTION("command");       random_command(); }
-    else if (r < 700) { ACTION("track_filter");  au_update_filtergraph(0, chance(0.5) ? NULL : "volume=0.7"); }
+    else if (r < 700) { ACTION("track_filter");  au_set_track_filters(0, chance(0.5) ? NULL : "volume=0.7"); }
     else if (r < 720) { ACTION("crossfade");     random_crossfade(); }
     else if (r < 740) { ACTION("replaygain");    random_replaygain(); }
     else if (r < 750) { ACTION("downmix");       au_set_downmix(chance(0.5) ? AU_DOWNMIX_FULL_LEVEL : AU_DOWNMIX_NORMALIZED, NULL); }
@@ -616,18 +640,17 @@ static void one_action(void) {
     }
     else if (r < 860) {
         ACTION("track_info");
-        AuMediaInfo *info = au_get_track_info(0);
-        au_media_info_free(info);
+        const AuMediaInfo *info = au_track_info(0);
+        au_media_info_release(info);
         double g;
-        au_get_track_gain_db(0, &g);
-        au_get_audio_play_time();
-        au_get_audio_duration();
+        au_track_gain_db(0, &g);
+        (void)status();
     }
     else if (r < 870) {
         ACTION("devices");
         on_devices_changed(NULL);
         char name[256];
-        au_get_audio_device_name(name, sizeof(name));
+        au_get_device_name(name, sizeof(name));
     }
     else if (r < 880) {
         ACTION("burst");  // many changes at once, faster than any track can start
@@ -635,8 +658,8 @@ static void one_action(void) {
             switch (rnd_int(4)) {
                 case 0: play_random(false); break;
                 case 1: play_random(true); break;
-                case 2: au_skip_to_next(); break;
-                default: au_seek_percent(rnd_real(0, 1)); break;
+                case 2: au_skip(); break;
+                default: au_seek_fraction(rnd_real(0, 1)); break;
             }
         }
     }
@@ -721,7 +744,7 @@ int main(int argc, char **argv) {
         atomic_store(&heartbeat, elapsed_s());
         one_action();
         // Keep something playing: an application would start the next track when playback stopped
-        if (au_get_current_handle() == 0 && chance(0.5)) play_random(false);
+        if (status().handle == 0 && chance(0.5)) play_random(false);
         usleep((useconds_t)(50 + rnd_int(1500)) * 1000);
 
         const double t = now_s() - t0;

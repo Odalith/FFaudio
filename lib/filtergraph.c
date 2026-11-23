@@ -19,6 +19,7 @@
  */
 
 #include "filtergraph.h"
+#include "numbers.h"
 
 // Parse `filtergraph` and link it between source_ctx and sink_ctx (a plain link when empty)
 static int link_filters(AVFilterGraph *graph, const char *filtergraph,
@@ -162,7 +163,8 @@ int build_speed_graph(FilterChain *out, const int rate, const AVChannelLayout *l
     if (keep_pitch) {
         // Two atempo stages at sqrt(speed) each keep both in their best range (0.5..2) for 0.25..4x;
         // their instance names let speed changes be sent as commands without rebuilding
-        snprintf(args, sizeof(args), "tempo=%.9f", sqrt(speed));
+        char tempo[32];
+        snprintf(args, sizeof(args), "tempo=%s", ff_format_number(tempo, sizeof(tempo), sqrt(speed), 9, 'f'));
         if ((ret = avfilter_graph_create_filter(&a, avfilter_get_by_name("atempo"), SPEED_FILTER_1, args, NULL, out->graph)) < 0 ||
             (ret = avfilter_graph_create_filter(&b, avfilter_get_by_name("atempo"), SPEED_FILTER_2, args, NULL, out->graph)) < 0)
             goto fail;
@@ -230,8 +232,10 @@ end:
 int validate_downmix_filters(const char *filters) {
     if (!filters || !filters[0]) return AVERROR(EINVAL);
     FilterChain c = {0};
+    const FfLocale saved = ff_c_locale_begin(); // parsed on the caller's thread
     const int ret = build_convert_graph(&c, "sample_rate=48000:sample_fmt=flt:time_base=1/48000:channel_layout=7.1",
                                         filters, "1000", false, 48000, "stereo", 0);
+    ff_c_locale_end(saved);
     free_filter_chain(&c);
     return ret;
 }

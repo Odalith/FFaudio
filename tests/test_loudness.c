@@ -86,22 +86,22 @@ static void test_silence(void) {
     AuLoudness l = analyze("ld_silence.flac");
     CHECK(l.silent);
     CHECK(l.replaygain_gain_db == 0 && l.r128_gain_q78 == 0);
-    const AuReplayGainInfo rg = au_loudness_to_replaygain(&l, NULL);
-    CHECK(!rg.has_track_gain);
+    const AuReplayGain rg = au_loudness_to_replaygain(&l, NULL);
+    CHECK(isnan(rg.track_gain_db));
 }
 
 static void test_album(void) {
-    AuLoudnessScanner *s = au_loudness_scanner_create(NULL);
-    REQUIRE(s);
-    AuLoudness album;
-    CHECK(au_loudness_album(s, &album) == AU_ERR_NOTHING_TO_DO);
-
-    AuLoudness a, b;
-    CHECK(au_loudness_scan_file(s, fx("ld_m23_48k.flac"), &a) == AU_OK);
-    CHECK(au_loudness_scan_file(s, fx("ld_m33_48k.flac"), &b) == AU_OK);
-    CHECK(au_loudness_scan_file(s, fx("text.mp3"), NULL) == AU_ERR_FILE);   // not added
-    CHECK(au_loudness_track_count(s) == 2);
-    CHECK(au_loudness_album(s, &album) == AU_OK);
+    AuLoudnessMeter *ma = NULL, *mb = NULL, *bad = NULL;
+    CHECK(au_loudness_measure(fx("ld_m23_48k.flac"), NULL, &ma) == AU_OK);
+    CHECK(au_loudness_measure(fx("ld_m33_48k.flac"), NULL, &mb) == AU_OK);
+    CHECK(au_loudness_measure(fx("text.mp3"), NULL, &bad) == AU_ERR_FILE && bad == NULL);
+    REQUIRE(ma && mb);
+    AuLoudness a, b, album;
+    CHECK(au_loudness_result(ma, &a) == AU_OK && au_loudness_result(mb, &b) == AU_OK);
+    CHECK(au_loudness_file_count(ma) == 1);
+    CHECK(au_loudness_merge(ma, mb) == AU_OK);   // ma is the album now; mb is unchanged
+    CHECK(au_loudness_file_count(ma) == 2 && au_loudness_file_count(mb) == 1);
+    CHECK(au_loudness_result(ma, &album) == AU_OK);
     printf("   album: I %.2f LUFS, TP %.2f dBTP, %.1f s\n", album.integrated_lufs, db(album.true_peak), album.duration);
 
     // Gated over both tracks together: 10*log10((10^-2.3 + 10^-3.3) / 2) = -25.60, not the -28 average
@@ -109,16 +109,54 @@ static void test_album(void) {
     CHECK_NEAR(album.duration, 20.0, 0.02);
     CHECK(album.true_peak == fmax(a.true_peak, b.true_peak));
 
-    const AuReplayGainInfo rg = au_loudness_to_replaygain(&b, &album);
-    CHECK(rg.has_track_gain && rg.has_album_gain && rg.has_track_peak && rg.has_album_peak);
-    CHECK_NEAR(rg.track_gain_db, b.replaygain_gain_db, 1e-9);
-    CHECK_NEAR(rg.album_gain_db, -18.0 - album.integrated_lufs, 1e-9);
-    CHECK_NEAR(rg.track_peak, b.true_peak, 1e-12);
+    const AuReplayGain rg = au_loudness_to_replaygain(&b, &album);
+    CHECK(!isnan(rg.track_gain_db) && !isnan(rg.album_gain_db) && !isnan(rg.track_peak) && !isnan(rg.album_peak));
+    CHECK_NEAR(rg.track_gain_db, b.replaygain_gain_db, 1e-5);   // floats
+    CHECK_NEAR(rg.album_gain_db, -18.0 - album.integrated_lufs, 1e-5);
+    CHECK_NEAR(rg.track_peak, b.true_peak, 1e-6);
 
-    au_loudness_scanner_reset(s);
-    CHECK(au_loudness_track_count(s) == 0);
-    CHECK(au_loudness_album(s, &album) == AU_ERR_NOTHING_TO_DO);
-    au_loudness_scanner_free(s);
+    CHECK(au_loudness_merge(ma, ma) == AU_ERR_INVALID_ARGUMENT);
+    au_loudness_meter_free(ma);
+    au_loudness_meter_free(mb);
+}
+
+// Tracks measured on threads of their own and merged afterwards, in either order: the album is exactly the one a
+// single measurement of all of them gives
+typedef struct Measured { const char *file; AuLoudnessMeter *m; int ret; } Measured;
+
+static int measure_thread(void *arg) {
+    Measured *job = arg;
+    job->ret = au_loudness_measure(job->file, NULL, &job->m);
+    return 0;
+}
+
+static void test_album_in_parallel(void) {
+    const char *files[] = { "ld_m23_48k.flac", "ld_m33_48k.flac", "ld_gate.flac" };
+    Measured jobs[3];
+    SDL_Thread *th[3];
+    for (int i = 0; i < 3; i++) {
+        jobs[i] = (Measured){ .file = fx(files[i]) };
+        th[i] = SDL_CreateThread(measure_thread, "tc_measure", &jobs[i]);
+        REQUIRE(th[i]);
+    }
+    for (int i = 0; i < 3; i++) SDL_WaitThread(th[i], NULL);
+    for (int i = 0; i < 3; i++) REQUIRE(jobs[i].ret == AU_OK && jobs[i].m);
+
+    // Album 1: 0 + 1 + 2; album 2: 2 + 1 + 0
+    AuLoudnessMeter *one = NULL, *two = NULL;
+    REQUIRE(au_loudness_measure(fx(files[0]), NULL, &one) == AU_OK);
+    REQUIRE(au_loudness_measure(fx(files[2]), NULL, &two) == AU_OK);
+    CHECK(au_loudness_merge(one, jobs[1].m) == AU_OK && au_loudness_merge(one, jobs[2].m) == AU_OK);
+    CHECK(au_loudness_merge(two, jobs[1].m) == AU_OK && au_loudness_merge(two, jobs[0].m) == AU_OK);
+    AuLoudness x, y;
+    CHECK(au_loudness_result(one, &x) == AU_OK && au_loudness_result(two, &y) == AU_OK);
+    printf("   album of 3: I %.4f / %.4f LUFS, LRA %.4f / %.4f LU\n", x.integrated_lufs, y.integrated_lufs,
+           x.loudness_range_lu, y.loudness_range_lu);
+    CHECK(x.integrated_lufs == y.integrated_lufs && x.loudness_range_lu == y.loudness_range_lu);
+    CHECK(x.true_peak == y.true_peak && fabs(x.duration - y.duration) < 1e-9);
+    au_loudness_meter_free(one);
+    au_loudness_meter_free(two);
+    for (int i = 0; i < 3; i++) au_loudness_meter_free(jobs[i].m);
 }
 
 static int progress_calls = 0;
@@ -135,22 +173,21 @@ static bool on_progress(double fraction, void *user) {
 
 static void test_progress_and_cancel(void) {
     const AuLoudnessConfig cfg = { .progress = on_progress };
-    AuLoudnessScanner *s = au_loudness_scanner_create(&cfg);
-    REQUIRE(s);
-    CHECK(au_loudness_scan_file(s, fx("ld_gate.flac"), NULL) == AU_OK);
+    AuLoudnessMeter *m = NULL;
+    CHECK(au_loudness_measure(fx("ld_gate.flac"), &cfg, &m) == AU_OK);
+    au_loudness_meter_free(m);
     printf("   progress: %d calls, last %.2f\n", progress_calls, last_fraction);
     CHECK(progress_calls >= 10);
     CHECK(fractions_increase);
     CHECK(last_fraction == 1.0);
 
-    // Cancelling leaves the album untouched
+    // Cancelled: no meter
     progress_calls = 0;
     last_fraction = -1;
     cancel_after = 3;
-    CHECK(au_loudness_scan_file(s, fx("ld_gate.flac"), NULL) == AU_ERR_CANCELLED);
-    CHECK(au_loudness_track_count(s) == 1);
+    m = (AuLoudnessMeter *)1;
+    CHECK(au_loudness_measure(fx("ld_gate.flac"), &cfg, &m) == AU_ERR_CANCELLED && m == NULL);
     cancel_after = -1;
-    au_loudness_scanner_free(s);
 }
 
 static void test_errors(void) {
@@ -160,15 +197,20 @@ static void test_errors(void) {
     CHECK(au_loudness_analyze(fx("empty.flac"), NULL, &l) == AU_ERR_FILE);
     CHECK(au_loudness_analyze(NULL, NULL, &l) == AU_ERR_INVALID_ARGUMENT);
     CHECK(au_loudness_analyze(fx("ld_m23_48k.flac"), NULL, NULL) == AU_ERR_INVALID_ARGUMENT);
-    CHECK(au_loudness_scan_file(NULL, fx("ld_m23_48k.flac"), &l) == AU_ERR_INVALID_ARGUMENT);
-    au_loudness_scanner_free(NULL);
+    AuLoudnessMeter *m = NULL;
+    CHECK(au_loudness_measure(NULL, NULL, &m) == AU_ERR_INVALID_ARGUMENT && m == NULL);
+    CHECK(au_loudness_measure(fx("ld_m23_48k.flac"), NULL, NULL) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_loudness_merge(NULL, NULL) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_loudness_result(NULL, &l) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_loudness_file_count(NULL) == 0);
+    au_loudness_meter_free(NULL);
 }
 
 static void test_scan_while_playing(void) {
     // Analysis is independent of the player: results are identical while music plays
     const AuLoudness before = analyze("ld_gate.flac");
     REQUIRE(tc_init_player(0) == 0);
-    au_play_audio(fx("long_6s.flac"), NULL);
+    au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(300);
     const AuLoudness during = analyze("ld_gate.flac");
     CHECK(during.integrated_lufs == before.integrated_lufs);
@@ -186,6 +228,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_surround_weights);
     RUN_TEST(test_silence);
     RUN_TEST(test_album);
+    RUN_TEST(test_album_in_parallel);
     RUN_TEST(test_progress_and_cancel);
     RUN_TEST(test_errors);
     RUN_TEST(test_scan_while_playing);

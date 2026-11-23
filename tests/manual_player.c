@@ -56,6 +56,12 @@
 #include <math.h>
 
 #include "../lib/ffaudio.h"
+
+static AuStatus status(void) {
+    AuStatus s;
+    au_get_status(&s);
+    return s;
+}
 #include "../lib/ffaudio_loudness.h"
 #include "../lib/ffaudio_filters.h"
 
@@ -65,7 +71,7 @@ static size_t next_index = 0;
 static size_t max_tracks = (size_t)-1;
 static const char *filter = NULL;
 
-// Handle of the track queued with au_set_next() that has not started yet (0 = none).
+// Handle of the track queued with au_queue() that has not started yet (0 = none).
 // Written from callbacks (control thread) and read by the key loop.
 static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
 static int32_t queued_handle = 0;
@@ -152,8 +158,8 @@ static const char *take_next(void) {
 
 static void prefetch_upcoming(void);
 
-static PlayAudioConfig play_config(void) {
-    return (PlayAudioConfig){ .av_filtergraph = filter };
+static AuPlayConfig play_config(void) {
+    return (AuPlayConfig){ .filters = filter };
 }
 
 static void on_log(const char *msg, int64_t req, enum AU_LOG_LEVEL level, void *ud) {
@@ -171,18 +177,18 @@ static void on_eof(bool skip, bool error, int32_t handle, void *ud) {
 static void on_started(int32_t handle, void *ud) {
     (void)ud;
     clear_queued_if(handle);
-    AuMediaInfo *info = au_get_track_info(handle);
+    const AuMediaInfo *info = au_track_info(handle);
     double gain = 0;
-    const bool has_gain = au_get_track_gain_db(handle, &gain) == AU_OK && gain != 0;
+    const bool has_gain = au_track_gain_db(handle, &gain) == AU_OK && gain != 0;
     bool cached = false;
     if (info) {
         const char *artist = au_media_tag(info, "artist"), *title = au_media_tag(info, "title");
         if (!artist) artist = au_media_tag(info, "icy-name");   // a stream: its station
-        cached = au_gain_cache_get(au_media_filename(info), NULL);
+        cached = au_gain_cache_get(info->path, NULL);
         printf("> now playing #%d: %s - %s  [%s %d Hz %d ch%s]", handle, artist ? artist : "?",
-               title ? title : au_media_filename(info), au_media_codec(info), au_media_sample_rate(info),
-               au_media_channels(info), au_media_replaygain(info).has_track_gain ? ", tagged" : "");
-        au_media_info_free(info);
+               title ? title : info->path, info->codec, info->sample_rate,
+               info->channels, !isnan(info->replaygain.track_gain_db) ? ", tagged" : "");
+        au_media_info_release(info);
     }
     else {
         printf("> now playing #%d", handle);
@@ -204,7 +210,7 @@ static void on_duration(int32_t handle, double duration, void *ud) {
 #define PREFETCH_COUNT 10
 
 // ffaudio measures on its own worker threads; this only reports the results
-static void on_cached(const char *path, int result, const AuReplayGainInfo *rg, void *user) {
+static void on_cached(const char *path, int result, const AuReplayGain *rg, void *user) {
     (void)user;
     if (result == AU_OK) printf("  measured %s: %+.2f dB\n", path, rg->track_gain_db);
     else if (result != AU_ERR_CANCELLED) printf("  could not measure %s (%d)\n", path, result);
@@ -227,8 +233,8 @@ static void prefetch_upcoming(void) {
 static void queue_next_file(void) {
     const char *f = take_next();
     if (!f) { printf("  (no more files)\n"); return; }
-    const PlayAudioConfig cfg = play_config();
-    const int32_t h = au_set_next(f, &cfg);
+    const AuPlayConfig cfg = play_config();
+    const int32_t h = au_queue(f, &cfg);
     set_queued(h);
     printf("  queued #%d %s\n", h, f);
 }
@@ -248,9 +254,9 @@ static void on_devices_changed(void *ud) {
     int n = 0;
     char **devs = NULL;
     printf("  output devices changed:\n");
-    if (au_get_audio_devices(&n, &devs) == AU_OK) {
+    if ((devs = au_list_devices(&n))) {
         for (int i = 0; i < n; i++) printf("    %d: %s\n", i, devs[i]);
-        au_free_audio_devices(devs, n);
+        au_free_devices(devs, n);
     }
 }
 
@@ -298,14 +304,16 @@ static char last_filters[8192] = "";
 static void apply_effects(void) {
     pthread_mutex_lock(&fx_lock);
     int rate = 0, channels = 0;
-    if (au_get_output_spec(&rate, &channels) != AU_OK || channels <= 0) channels = 2;
+    rate = status().sample_rate;
+    channels = status().channels;
+    if (channels <= 0) channels = 2;
     const bool stereo = channels == 2;
 
     AuFilterBuilder *fb = au_fb_create();
     if (!fb) { pthread_mutex_unlock(&fx_lock); return; }
     char desc[512] = "";
     if (peq_on) {
-        if (au_fb_add_parametric_eq(fb, &peq) != AU_OK) printf("  parametric eq: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_parametric_eq(fb, NULL, &peq) != AU_OK) printf("  parametric eq: %s\n", au_fb_last_error(fb));
         ADD_DESC(" peq(%d bands)", peq.band_count);
     }
     if (eq_index > 0) {
@@ -316,12 +324,12 @@ static void apply_effects(void) {
             if (eq.gain_db[i] > max_gain) max_gain = eq.gain_db[i];
         }
         eq.preamp_db = -max_gain; // headroom for the boosts
-        if (au_fb_add_equalizer(fb, channels, &eq) != AU_OK)
+        if (au_fb_add_equalizer(fb, NULL, &eq) != AU_OK)
             printf("  equalizer: %s\n", au_fb_last_error(fb));
         ADD_DESC(" eq=%s", eq_presets[eq_index].name);
     }
     if (bass_db != 0 || treble_db != 0) {
-        if (au_fb_add_tone(fb, bass_db, treble_db) != AU_OK) printf("  tone: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_tone(fb, NULL, bass_db, treble_db) != AU_OK) printf("  tone: %s\n", au_fb_last_error(fb));
         ADD_DESC(" bass=%+.0fdB treble=%+.0fdB", bass_db, treble_db);
     }
 
@@ -333,34 +341,33 @@ static void apply_effects(void) {
     else {
         // Always there and named, so the balance keys can change it instantly with a command
         const AuStereo st = { .balance = balance, .width = mono ? 0 : width, .swap = swap_lr };
-        au_fb_set_name(fb, "st");
-        if (au_fb_add_stereo(fb, &st) != AU_OK) printf("  stereo: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_stereo(fb, "st", &st) != AU_OK) printf("  stereo: %s\n", au_fb_last_error(fb));
         if (balance != 0) ADD_DESC(" balance=%+.1f", balance);
         if (mono) ADD_DESC(" mono");
         else if (width != 1) ADD_DESC(" width=%.2g", width);
         if (swap_lr && !mono) ADD_DESC(" swapped");
         if (crossfeed_on) {
-            if (au_fb_add_crossfeed(fb, NULL) != AU_OK) printf("  crossfeed: %s\n", au_fb_last_error(fb));
+            if (au_fb_add_crossfeed(fb, NULL, NULL) != AU_OK) printf("  crossfeed: %s\n", au_fb_last_error(fb));
             ADD_DESC(" crossfeed");
         }
         if (bs2b_mode >= 0) {
-            if (au_fb_add_bs2b_profile(fb, (AU_BS2B_PROFILE)bs2b_mode) != AU_OK)
+            if (au_fb_add_bs2b_profile(fb, NULL, (AU_BS2B_PROFILE)bs2b_mode) != AU_OK)
                 printf("  bs2b: %s\n", au_fb_last_error(fb));
             ADD_DESC(" bs2b=%s", bs2b_names[bs2b_mode]);
         }
     }
     if (compressor_mode) {
         const AuCompressor c = compressor_mode == 2 ? au_compressor_night() : au_compressor_defaults();
-        if (au_fb_add_compressor(fb, &c) != AU_OK) printf("  compressor: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_compressor(fb, NULL, &c) != AU_OK) printf("  compressor: %s\n", au_fb_last_error(fb));
         ADD_DESC(" compressor=%s", compressor_names[compressor_mode]);
     }
     if (limiter_on) {
-        if (au_fb_add_limiter(fb, NULL) != AU_OK) printf("  limiter: %s\n", au_fb_last_error(fb));
+        if (au_fb_add_limiter(fb, NULL, NULL) != AU_OK) printf("  limiter: %s\n", au_fb_last_error(fb));
         ADD_DESC(" limiter(-1 dB)");
     }
 
     const char *filters = au_fb_peek(fb);
-    if (au_set_global_filtergraph(filters[0] ? filters : NULL) != AU_OK) {
+    if (au_set_filters(filters[0] ? filters : NULL) != AU_OK) {
         printf("  effects rejected by FFmpeg: \"%s\"\n", filters);
     }
     else {
@@ -461,6 +468,40 @@ static void on_stream_metadata(int32_t handle, const char *title, const char *ar
     printf("> #%d now playing: %s%s%s\n", handle, artist ? artist : "", artist ? " - " : "", title ? title : "");
 }
 
+static void on_device(int32_t channels, int32_t rate, void *ud);
+
+static void on_event(const AuEvent *e, void *ud) {
+    switch (e->type) {
+        case AU_EVENT_LOG: on_log(e->data.log.message, e->data.log.request, e->data.log.level, ud); break;
+        case AU_EVENT_TRACK_ENDED:
+            on_eof(e->data.ended.reason == AU_END_SKIPPED, e->data.ended.reason == AU_END_ERROR, e->handle, ud);
+            break;
+        case AU_EVENT_RESTARTED:
+            on_restart(e->handle, e->data.restarted.position, e->data.restarted.from_loop,
+                       e->data.restarted.loops_remaining, ud);
+            break;
+        case AU_EVENT_PREPARE_NEXT: on_prepare_next(e->handle, ud); break;
+        case AU_EVENT_TRACK_STARTED: on_started(e->handle, ud); break;
+        case AU_EVENT_DURATION: on_duration(e->handle, e->data.duration.seconds, ud); break;
+        case AU_EVENT_DEVICE:
+            if (e->data.device.ok) {
+                printf("  device: %s%s\n", e->data.device.name ? e->data.device.name : "?",
+                       e->data.device.fell_back ? " (the chosen one failed: system default)" : "");
+                on_device(e->data.device.channels, e->data.device.sample_rate, ud);
+            }
+            else printf("  no output device could be opened\n");
+            break;
+        case AU_EVENT_DEVICES_CHANGED: on_devices_changed(ud); break;
+        case AU_EVENT_BUFFERING:
+            on_buffering(e->handle, e->data.buffering.active, e->data.buffering.buffered_seconds, ud);
+            break;
+        case AU_EVENT_STREAM_METADATA:
+            on_stream_metadata(e->handle, e->data.metadata.title, e->data.metadata.artist, ud);
+            break;
+        default: break;
+    }
+}
+
 static void on_device(int32_t channels, int32_t rate, void *ud) {
     (void)ud;
     printf("  output: %d Hz, %d channels\n", rate, channels);
@@ -527,30 +568,18 @@ int main(int argc, char **argv) {
         }
     }
 
-    const InitializeConfig config = {
+    const AuConfig config = {
         .app_name = "ffaudio manual player",
-        .initial_volume = 60,
+        .volume = 0.6f,
         .output_channels = channels,
-        .on_log = on_log,
-        .on_eof = on_eof,
-        .on_restart = on_restart,
-        .on_prepare_next = on_prepare_next,
-        .on_track_started = on_started,
-        .on_duration_update = on_duration,
-        .on_audio_device_update = on_device,
-        .on_audio_devices_changed = on_devices_changed,
-        .on_buffering = on_buffering,
-        .on_stream_metadata = on_stream_metadata,
+        .on_event = on_event,
     };
-    if (au_initialize(&config) != AU_OK) return 1;
+    if (au_init(&config) != AU_OK) return 1;
 
     int n = 0;
-    char **devs = NULL;
-    if (au_get_audio_devices(&n, &devs) == AU_OK) {
-        for (int i = 0; i < n; i++) printf("device %d: %s\n", i, devs[i]);
-        au_free_audio_devices(devs, n);
-    }
-    au_configure_audio_device(NULL);
+    char **devs = au_list_devices(&n);
+    for (int i = 0; i < n; i++) printf("device %d: %s\n", i, devs[i]);
+    au_free_devices(devs, n);
 
     if (replaygain) {
         const AuReplayGainConfig rg = {
@@ -586,15 +615,15 @@ int main(int argc, char **argv) {
     if (crossfade > 0) {
         const AuFade fade = { .seconds = crossfade, .curve = AU_FADE_EQUAL_POWER };
         const AuFade quick = { .seconds = 0.4, .curve = AU_FADE_S_CURVE };
-        const CrossfadeConfig xf = { .on_track_end = fade, .on_skip = quick, .on_play = quick,
+        const AuCrossfade xf = { .on_track_end = fade, .on_skip = quick, .on_play = quick,
                                      .on_stop = quick, .on_pause = { .seconds = 0.2, .curve = AU_FADE_S_CURVE } };
         au_set_crossfade(&xf);
         printf("crossfade: %.1f s\n", crossfade);
     }
 
-    const PlayAudioConfig cfg = play_config();
+    const AuPlayConfig cfg = play_config();
     const char *first_file = take_next();
-    au_play_audio(first_file, &cfg);
+    au_play(first_file, &cfg);
 
     setvbuf(stdout, NULL, _IOLBF, 0);
     enable_key_mode();
@@ -608,72 +637,72 @@ int main(int argc, char **argv) {
                 // Use the queued track if there is one, otherwise start the next file right away
                 if (get_queued()) {
                     printf("  next (queued track)\n");
-                    au_skip_to_next();
+                    au_skip();
                 }
                 else {
                     const char *f = take_next();
                     if (!f) { printf("  (no more files)\n"); break; }
-                    const PlayAudioConfig next_cfg = play_config();
-                    printf("  next: #%d %s\n", au_play_audio(f, &next_cfg), f);
+                    const AuPlayConfig next_cfg = play_config();
+                    printf("  next: #%d %s\n", au_play(f, &next_cfg), f);
                 }
                 if (paused) {
-                    au_pause_audio(false); // au_skip_to_next() does not resume on its own
+                    au_pause(false); // au_skip() does not resume on its own
                     paused = false;
                 }
                 break;
             }
             case 'p':
                 paused = !paused;
-                au_pause_audio(paused);
+                au_pause(paused);
                 printf("  %s\n", paused ? "paused" : "resumed");
                 break;
             case 's':
-                au_stop_audio();
+                au_stop();
                 paused = false;
                 printf("  stopped (n plays the next file)\n");
                 break;
             case 'm':
                 muted = !muted;
-                au_mute_audio(muted);
+                au_set_muted(muted);
                 printf("  %s\n", muted ? "muted" : "unmuted");
                 break;
             case '+':
             case '=': {
-                const int v = au_get_audio_volume() + 5 > 100 ? 100 : au_get_audio_volume() + 5;
-                au_set_audio_volume(v);
-                printf("  volume %d\n", v);
+                const float v = fminf(1.0f, status().volume + 0.05f);
+                au_set_volume(v);
+                printf("  volume %.0f%%\n", v * 100);
                 break;
             }
             case '-': {
-                const int v = au_get_audio_volume() - 5 < 0 ? 0 : au_get_audio_volume() - 5;
-                au_set_audio_volume(v);
-                printf("  volume %d\n", v);
+                const float v = fmaxf(0.0f, status().volume - 0.05f);
+                au_set_volume(v);
+                printf("  volume %.0f%%\n", v * 100);
                 break;
             }
             case '>':
             case '<': {
-                const double t = au_get_audio_play_time();
+                const double t = status().position;
                 if (t < 0) { printf("  (nothing playing)\n"); break; }
                 const double target = c == '>' ? t + 10 : (t > 10 ? t - 10 : 0);
-                au_seek_time((int64_t)(target * 1000));
+                au_seek(target);
                 printf("  seek to %.1f s\n", target);
                 break;
             }
             case ' ':
             case '\n':
-                printf("  #%d  %.2f / %.2f s\n", au_get_current_handle(), au_get_audio_play_time(), au_get_audio_duration());
+                printf("  #%d  %.2f / %.2f s\n", status().handle, status().position, status().duration);
                 break;
             case '[':
             case ']': {
-                double sp = au_get_playback_speed() + (c == ']' ? 0.25 : -0.25);
+                double sp = status().speed + (c == ']' ? 0.25 : -0.25);
                 sp = sp < 0.25 ? 0.25 : (sp > 4.0 ? 4.0 : sp);
-                au_set_playback_speed(sp, keep_pitch);
+                au_set_speed(sp, keep_pitch);
                 printf("  speed %.2fx%s\n", sp, keep_pitch ? "" : " (tape)");
                 break;
             }
             case '\\':
                 keep_pitch = !keep_pitch;
-                au_set_playback_speed(au_get_playback_speed(), keep_pitch);
+                au_set_speed(status().speed, keep_pitch);
                 printf("  %s\n", keep_pitch ? "speed keeps the pitch" : "speed changes the pitch (tape)");
                 break;
             case 'e':
