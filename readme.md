@@ -93,12 +93,16 @@ static void on_event(const AuEvent *e, void *user) {
 
 const AuConfig config = {
     .app_name = "My Player",
-    .volume = 0.8f,          // linear gain 0..1
     .on_event = on_event,    // or NULL, and take events with au_poll_event() on a thread of your choice
-    // .device = a name from au_list_devices() (NULL = the system default, followed when it changes)
 };
 au_init(&config);            // also opens the output device; AU_EVENT_DEVICE says how it went
+
+// Every setting has a setter, usable any time after au_init()
+au_set_volume(0.8f);         // linear gain 0..1
+au_set_device(NULL);         // or a name from au_list_devices(); NULL = the system default, followed when it changes
 ```
+`AuConfig` only needs what is fixed for the player's lifetime (`app_name`, `on_event`, `user_data`). Its other fields
+are initial values for settings that have setters, kept for 3.0 programs.
 Everything the player reports is an `AuEvent`: a type, the track's handle and per-type data (`data.ended`,
 `data.restarted`, `data.device`, ...). Without `on_event`, events wait in a queue for `au_poll_event()` (or
 `au_wait_event()` on a thread of its own), which suits UI loops and languages that want them on their own thread.
@@ -432,8 +436,9 @@ compared as exact strings (pass them the same way every time, e.g. always absolu
 By default the output uses the device's own channel count and sample rate. Files with more channels than the
 output are mixed down; files with fewer are spread onto the matching speakers.
 ```c
-// Force stereo (or 6 for 5.1, ...) and/or a sample rate; 0 keeps the device's preference
-const AuConfig config = { /* ... */ .output_channels = 2, .output_sample_rate = 48000 };
+// Force stereo (or 6 for 5.1, ...) and/or a sample rate; 0 keeps the device's preference. The device is opened
+// again in the new format; AU_EVENT_DEVICE reports it
+au_set_output_format(2, 48000);
 
 au_set_downmix(AU_DOWNMIX_FULL_LEVEL, NULL);   // default: standard matrix at full level, like mpv
 au_set_downmix(AU_DOWNMIX_NORMALIZED, NULL);   // scaled so it can never clip (~7.7 dB quieter for 5.1)

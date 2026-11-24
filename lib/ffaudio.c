@@ -746,6 +746,20 @@ static int cmd_configure_device(AudioPlayer *ap, const Msg *msg) {
     return reopen_output(ap, use_default, ap->audio_device_name, ap->audio_device_index);
 }
 
+static bool valid_output_format(const int channels, const int rate) {
+    return channels >= 0 && channels <= 8 && (rate == 0 || (rate >= 8000 && rate <= 384000));
+}
+
+// A new requested output format: open the device again in it (the same device, or the default)
+static int cmd_set_output_format(AudioPlayer *ap, const Msg *msg) {
+    const int channels = (int)msg->i64, rate = (int)msg->d;
+    if (ap->device_id && channels == ap->output_channels && rate == ap->output_sample_rate)
+        return AU_ERR_NOTHING_TO_DO;
+    ap->output_channels = channels;
+    ap->output_sample_rate = rate;
+    return reopen_output(ap, ap->use_default_device, ap->audio_device_name, ap->audio_device_index);
+}
+
 //+-----------------------------------------------------+
 //| Track messages and mixer events                     |
 //+-----------------------------------------------------+
@@ -1014,6 +1028,8 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_UPDATE_TRACK_FILTERS:
         case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
         case CMD_CONFIGURE_DEVICE: cmd_configure_device(ap, msg); break;
+        case CMD_SET_OUTPUT_FORMAT: cmd_set_output_format(ap, msg); break;
+        case CMD_SET_PREPARE_NEXT: ap->prepare_next_seconds = msg->d; break;
         case CMD_GAIN_CACHE_CHANGED:
             for (int i = 0; i < ap->n_tracks; i++) {
                 TrackState *t = ap->tracks[i];
@@ -1143,8 +1159,7 @@ int au_init(const AuConfig *config) {
     atomic_set_float(&ap->volume, volume);
     SDL_AtomicSet(&ap->loop_count, config->loop_count);
     ap->prepare_next_seconds = config->prepare_next_seconds > 0 ? config->prepare_next_seconds : DEFAULT_PREPARE_NEXT_SECONDS;
-    if (config->output_channels < 0 || config->output_channels > 8 ||
-        (config->output_sample_rate != 0 && (config->output_sample_rate < 8000 || config->output_sample_rate > 384000))) {
+    if (!valid_output_format(config->output_channels, config->output_sample_rate)) {
         av_free(ap);
         return AU_ERR_INVALID_ARGUMENT;
     }
@@ -1686,6 +1701,21 @@ void au_set_muted(const bool muted) {
     if (!ap) return;
     SDL_AtomicIncRef(&ap->request_count);
     SDL_AtomicSet(&ap->muted, muted);
+}
+
+int au_set_output_format(const int channels, const int sample_rate) {
+    AudioPlayer *ap = audio_player;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
+    if (!valid_output_format(channels, sample_rate)) return AU_ERR_INVALID_ARGUMENT;
+    post_simple(CMD_SET_OUTPUT_FORMAT, channels, sample_rate, false);   // the rate travels in d
+    return AU_OK;
+}
+
+int au_set_prepare_next(const double seconds) {
+    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+    if (!(seconds > 0) || !isfinite(seconds)) return AU_ERR_INVALID_ARGUMENT;
+    post_simple(CMD_SET_PREPARE_NEXT, 0, seconds, false);
+    return AU_OK;
 }
 
 void au_set_loop_count(const int count) {

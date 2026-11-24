@@ -218,18 +218,17 @@ extern "C" {
     //| Configuration structs                               |
     //+-----------------------------------------------------+
 
+    // What au_init() needs. Only app_name, on_event and user_data are fixed for the player's lifetime. Every other
+    // field is the initial value of a setting that has its own setter, the same as calling that setter right after
+    // au_init(); zero (or NULL) keeps the default. New settings only get a setter.
     typedef struct AuConfig {
         const char *app_name;                // shown by the system's sound settings
-        float volume;                        // linear gain 0..1; < 0 means 1
-        int loop_count;                      // -1 for infinite, 0 for none
-        // Seconds before the end of the current track at which AU_EVENT_PREPARE_NEXT comes. 0 = 10 seconds.
-        double prepare_next_seconds;
-        // Output format overrides; 0 = use what the device prefers. SDL converts when the device differs.
-        int output_channels;                 // 1..8, e.g. 2 to always mix down to stereo
-        int output_sample_rate;              // 8000..384000 Hz
-        // The output device to open (a name from au_list_devices()); NULL = the system default, followed when it
-        // changes. au_set_device() switches later.
-        const char *device;
+        float volume;                        // au_set_volume(): linear gain 0..1; < 0 means 1
+        int loop_count;                      // au_set_loop_count(): -1 for infinite, 0 for none
+        double prepare_next_seconds;         // au_set_prepare_next(); 0 = 10 seconds
+        int output_channels;                 // au_set_output_format(): 1..8, 0 = what the device prefers
+        int output_sample_rate;              // au_set_output_format(): 8000..384000 Hz, 0 = what the device prefers
+        const char *device;                  // au_set_device(): a name from au_list_devices(), NULL = system default
         AuEventFn on_event;                  // NULL = queue events for au_poll_event()
         void *user_data;                     // passed to on_event
     } AuConfig;
@@ -266,6 +265,12 @@ extern "C" {
     // changes). Returns at once; AU_EVENT_DEVICE reports the result. A chosen device that can not be opened, or that
     // disappears later, falls back to the system default (fell_back). Choosing the device in use does nothing.
     FFAUDIO_API int au_set_device(const char *name);
+
+    // Ask for an output format: channels 1..8 (e.g. 2 to always mix down to stereo) and/or a sample rate
+    // 8000..384000 Hz; 0 = what the device prefers. SDL converts when the device differs. The device is opened again
+    // in the new format and playback continues; AU_EVENT_DEVICE reports the result. Asking for the format already
+    // asked for does nothing. Returns AU_ERR_INVALID_ARGUMENT for values out of range. Since 3.1.
+    FFAUDIO_API int au_set_output_format(int channels, int sample_rate);
 
     // The names of the output devices, *count of them; NULL when there are none. Free with au_free_devices().
     FFAUDIO_API char **au_list_devices(int *count);
@@ -329,6 +334,11 @@ extern "C" {
 
     // Applies to the current, the queued and future tracks. -1 = infinite, 0 = none.
     FFAUDIO_API void au_set_loop_count(int count);
+
+    // How long before the end of the current track AU_EVENT_PREPARE_NEXT comes, in seconds as heard (the crossfade
+    // into the next track is added). Default 10. Also applies to the current track when its event has not come yet.
+    // Returns AU_ERR_INVALID_ARGUMENT unless seconds is finite and > 0. Since 3.1.
+    FFAUDIO_API int au_set_prepare_next(double seconds);
 
     //+-----------------------------------------------------+
     //| Network streams                                     |

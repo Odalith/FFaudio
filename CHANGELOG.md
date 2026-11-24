@@ -23,6 +23,15 @@
   `au_fb_add_declip()` (`adeclip`, rebuilds clipped peaks), with `AuDeclick` / `AuDeclip` settings. Declip belongs in
   `au_set_source_filters()`: after resampling to the device rate it finds nothing to repair.
 
+- `au_set_output_format(channels, rate)` and `au_set_prepare_next(seconds)`: setters for the last two settings that
+  could only be given to `au_init()`. Every setting now has a setter; the `AuConfig` fields other than `app_name`,
+  `on_event` and `user_data` are initial values for them.
+
+### Changed
+- The soname is `libffaudio.so.3` (the major version only), so later 3.x releases load in place of each other. 3.0.0
+  used `libffaudio.so.3.0`: a link by that name is installed alongside on Linux, so programs built against 3.0 keep
+  working without relinking. The CMake package accepts any 3.x for `find_package(ffaudio 3.0)`.
+
 ### Fixed
 - Chained Ogg files (parts one after another, e.g. a recorded Ogg radio stream or concatenated Vorbis/Opus/FLAC
   files) reported only their last part's duration, as FFmpeg does. ffaudio now adds the parts up, for `au_probe()`,

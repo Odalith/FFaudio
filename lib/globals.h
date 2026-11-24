@@ -378,6 +378,8 @@ typedef enum MsgType {
     CMD_SET_DOWNMIX,
     CMD_SET_UPMIX,
     CMD_SET_SOURCE_FILTERS,
+    CMD_SET_PREPARE_NEXT,
+    CMD_SET_OUTPUT_FORMAT,
     CMD_SET_REPLAYGAIN,
     CMD_GAIN_CACHE_CHANGED,
     CMD_UPDATE_TRACK_FILTERS,
@@ -462,9 +464,9 @@ typedef struct AudioPlayer {
     // calls that set it, so the control thread's own unpause (au_queue() starting a track) can not undo a newer call
     SDL_atomic_t pause_state;
     SDL_atomic_t loop_count;            // default for new tracks, -1 infinite
-    double prepare_next_seconds;
-    int32_t output_channels;            // 0 = device preference
-    int32_t output_sample_rate;         // 0 = device preference
+    double prepare_next_seconds;        // control thread (after au_init())
+    int32_t output_channels;            // control thread (after au_init()); 0 = device preference
+    int32_t output_sample_rate;         // control thread (after au_init()); 0 = device preference
     AuCrossfade crossfade;              // control thread only
     FadeCurve play_curve, skip_curve, stop_curve, pause_curve; // control thread: its curves, sampled when set
     bool use_soxr;
