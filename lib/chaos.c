@@ -28,9 +28,12 @@
 #include "once.h"
 #ifdef _WIN32
 #include <windows.h>
-#define CHAOS_TLS __declspec(thread)
 #else
 #include <time.h>
+#endif
+#ifdef _MSC_VER
+#define CHAOS_TLS __declspec(thread)
+#else
 #define CHAOS_TLS _Thread_local
 #endif
 
