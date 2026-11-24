@@ -373,6 +373,14 @@ extern "C" {
     // Replace the filters of one track (handle from au_play()/au_queue(), 0 = the current track).
     FFAUDIO_API int au_set_track_filters(int32_t handle, const char *filters);
 
+    // Filters applied to every track's decoded audio before the conversion to the output format: at the file's own
+    // sample rate, channel layout and sample format. For repairs that need the samples as they are stored, above
+    // all au_fb_add_declip() (resampling smooths away the flat clipped tops it looks for). They should keep the
+    // channel layout, and take no au_send_filter_command(). Applies to playing tracks right away, like the downmix.
+    // NULL or "" removes them. Returns AU_ERR_INVALID_ARGUMENT (and changes nothing) if the string does not parse.
+    // Since 3.1.
+    FFAUDIO_API int au_set_source_filters(const char *filters);
+
     // Send a runtime command to a filter, see avfilter_graph_send_command() and each filter's
     // "Commands" section, e.g. ("volume", "volume", "0.5") or ("equalizer@eq_3", "g", "-6").
     // `target` is a filter name or instance name ("all" for every filter). handle 0 = every live track.
@@ -402,6 +410,24 @@ extern "C" {
     // custom_filters is only used with AU_DOWNMIX_CUSTOM. Applies to playing tracks right away.
     // Returns AU_ERR_INVALID_ARGUMENT if the custom filters do not accept a 7.1 input.
     FFAUDIO_API int au_set_downmix(AU_DOWNMIX mode, const char *custom_filters);
+
+    // How files with fewer channels than a surround output (more than 2 channels, e.g. stereo on 5.1 speakers) are
+    // spread out. Outputs with 1 or 2 channels are not affected. Since 3.1.
+    typedef enum AU_UPMIX {
+        // Each channel goes to its own speaker; the others stay silent (a stereo file plays on front left and right)
+        AU_UPMIX_NONE = 0,
+        // FFmpeg's surround filter: mono and stereo files are spread over every speaker by where each sound comes
+        // from (centre dialogue and vocals to the centre, ambience to the surrounds, bass to the LFE). Other layouts
+        // keep AU_UPMIX_NONE.
+        AU_UPMIX_SURROUND,
+        // Your own filters on the original channels before the conversion to the output layout, e.g.
+        // "surround=chl_out=5.1:lfe=0" with options of your choice, or a "pan" matrix
+        AU_UPMIX_CUSTOM,
+    } AU_UPMIX;
+
+    // custom_filters is only used with AU_UPMIX_CUSTOM. Applies to playing tracks right away. Returns
+    // AU_ERR_INVALID_ARGUMENT if the custom filters do not accept a stereo input.
+    FFAUDIO_API int au_set_upmix(AU_UPMIX mode, const char *custom_filters);
 
     //+-----------------------------------------------------+
     //| ReplayGain                                          |

@@ -376,6 +376,8 @@ typedef enum MsgType {
     CMD_SET_CROSSFADE,
     CMD_SET_GLOBAL_FILTERS,
     CMD_SET_DOWNMIX,
+    CMD_SET_UPMIX,
+    CMD_SET_SOURCE_FILTERS,
     CMD_SET_REPLAYGAIN,
     CMD_GAIN_CACHE_CHANGED,
     CMD_UPDATE_TRACK_FILTERS,
@@ -506,6 +508,9 @@ typedef struct AudioPlayer {
     bool keep_pitch;                    // guarded by format_mutex
     int32_t speed_gen;                  // guarded by format_mutex, bumped on every change
     char *downmix_filters;              // guarded by format_mutex, AU_DOWNMIX_CUSTOM only
+    AU_UPMIX upmix;                     // guarded by format_mutex
+    char *upmix_filters;                // guarded by format_mutex, AU_UPMIX_CUSTOM only
+    char *source_filters;               // guarded by format_mutex: before the conversion, NULL = none
     AudioParams audio_target;           // float32 interleaved at the device rate/layout, guarded by format_mutex
     SDL_AudioDeviceID device_id;
     bool device_running;

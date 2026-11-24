@@ -223,6 +223,38 @@ extern "C" {
     FFAUDIO_API int au_fb_add_compressor(AuFilterBuilder *fb, const char *name, const AuCompressor *config);
 
     //+-----------------------------------------------------+
+    //| Restoration                                         |
+    //+-----------------------------------------------------+
+    // For damaged sources: clicks and crackle (vinyl and shellac transfers) and clipped masters. Both work on short
+    // windows with an autoregressive model of the signal and add about the window's length as delay. On music each
+    // costs about 5 % of one core per track. adeclip's cost grows steeply with the share of clipped samples: at tens
+    // of percent (far beyond any release) it falls behind real time. Since 3.1.
+
+    typedef struct AuDeclick {
+        double window_ms;            // 10..100, default 55
+        double overlap_percent;      // 50..95, default 75
+        // 1..100, default 2: how far from the model a sample has to be to count as a click; lower finds more
+        double threshold;
+        double burst;                // 0..10, default 2: clicks closer than this are repaired as one
+    } AuDeclick;
+    FFAUDIO_API AuDeclick au_declick_defaults(void);
+    // Remove clicks (FFmpeg adeclick). config NULL = defaults. Filter: adeclick@<name> (no commands).
+    FFAUDIO_API int au_fb_add_declick(AuFilterBuilder *fb, const char *name, const AuDeclick *config);
+
+    typedef struct AuDeclip {
+        double window_ms;            // 10..100, default 55
+        double overlap_percent;      // 50..95, default 75
+        // 1..100, default 10: how close to the peak level a sample has to be to count as clipped
+        double threshold;
+    } AuDeclip;
+    FFAUDIO_API AuDeclip au_declip_defaults(void);
+    // Rebuild clipped peaks (FFmpeg adeclip). Use it with au_set_source_filters(): it finds clipping by the flat
+    // tops at the stored sample values, which resampling to the device rate smooths away (then it does nothing).
+    // Its output can exceed full scale, so put a limiter after it (au_set_filters()). config NULL = defaults.
+    // Filter: adeclip@<name>.
+    FFAUDIO_API int au_fb_add_declip(AuFilterBuilder *fb, const char *name, const AuDeclip *config);
+
+    //+-----------------------------------------------------+
     //| Headphones                                          |
     //+-----------------------------------------------------+
 

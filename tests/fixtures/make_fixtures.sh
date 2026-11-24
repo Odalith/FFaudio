@@ -92,6 +92,14 @@ sine chain_c.opus      440 2 48000 2 -c:a libopus
 sine chain_d.opus      660 1 48000 2 -c:a libopus
 cat chain_c.opus chain_d.opus > chained.opus
 
+# Restoration: a 440 Hz sine (1/8) with a 0.6 click every 8000 samples, and a 1/8 sine with a 20 ms burst at 0.3
+# every 0.25 s, hard-clipped at 0.25 (like a loud master: a few percent of the samples clipped; adeclip's cost grows
+# steeply with that share)
+click="0.125*sin(2*PI*440*t)+if(eq(mod(n\,8000)\,4000)\,0.6\,0)"
+clip="clip((0.125+0.175*lt(mod(t\,0.25)\,0.02))*sin(2*PI*440*t)\,-0.25\,0.25)"
+ff -f lavfi -i "aevalsrc=${click}|${click}:s=44100:d=1" -c:a pcm_f32le clicks.wav
+ff -f lavfi -i "aevalsrc=${clip}|${clip}:s=44100:d=1" -c:a pcm_f32le clipped.wav
+
 # Embedded pictures: a 64x48 PNG front cover and a 40x30 JPEG back cover in FLAC (PICTURE blocks), the front cover in
 # MP3 (ID3v2 APIC) and M4A (covr)
 ff -f lavfi -i "color=c=red:s=64x48" -frames:v 1 cover.png

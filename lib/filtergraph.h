@@ -53,6 +53,10 @@ int build_speed_graph(FilterChain *out, int rate, const AVChannelLayout *layout,
 
 // Checks that custom downmix filters accept a 7.1 input and link to a stereo output (>= 0 on success)
 int validate_downmix_filters(const char *filters);
+// Checks that custom upmix filters accept a stereo input and link to a 5.1 output (>= 0 on success)
+int validate_upmix_filters(const char *filters);
+// Checks that source filters link a 44.1 kHz stereo input to the conversion (>= 0 on success; NULL or "" is fine)
+int validate_source_filters(const char *filters);
 
 // Whether aresample can use the higher quality soxr resampler
 bool filtergraph_soxr_available(void);

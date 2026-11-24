@@ -627,6 +627,28 @@ static void cmd_filters(AudioPlayer *ap, const Msg *msg) {
                     SDL_AtomicSet(&ap->tracks[i]->filter_reconfigure, 1);
             break;
         }
+        case CMD_SET_SOURCE_FILTERS:
+        case CMD_SET_UPMIX: {
+            SDL_LockMutex(ap->format_mutex);
+            if (msg->type == CMD_SET_SOURCE_FILTERS) {
+                av_freep(&ap->source_filters);
+                if (msg->str && msg->str[0]) ap->source_filters = av_strdup(msg->str);
+                SDL_UnlockMutex(ap->format_mutex);
+                for (int i = 0; i < ap->n_tracks; i++)
+                    if (!ap->tracks[i]->ended)
+                        SDL_AtomicSet(&ap->tracks[i]->filter_reconfigure, 1);
+                break;
+            }
+            ap->upmix = (AU_UPMIX)msg->i64;
+            av_freep(&ap->upmix_filters);
+            if (msg->str && msg->str[0]) ap->upmix_filters = av_strdup(msg->str);
+            SDL_UnlockMutex(ap->format_mutex);
+            // Like the downmix, it lives in the convert graph
+            for (int i = 0; i < ap->n_tracks; i++)
+                if (!ap->tracks[i]->ended)
+                    SDL_AtomicSet(&ap->tracks[i]->filter_reconfigure, 1);
+            break;
+        }
         case CMD_UPDATE_TRACK_FILTERS: {
             TrackState *t = track_for_handle(ap, msg->handle);
             if (t && !t->ended) track_set_filters(t, msg->str);
@@ -987,6 +1009,8 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_SET_CROSSFADE:    apply_crossfade_config(ap, &msg->crossfade); break;
         case CMD_SET_GLOBAL_FILTERS:
         case CMD_SET_DOWNMIX:
+        case CMD_SET_UPMIX:
+        case CMD_SET_SOURCE_FILTERS:
         case CMD_UPDATE_TRACK_FILTERS:
         case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
         case CMD_CONFIGURE_DEVICE: cmd_configure_device(ap, msg); break;
@@ -1266,6 +1290,8 @@ void au_shutdown(void) {
     free_device_list(ap->known_devices, ap->n_known_devices);
     av_free(ap->global_filters);
     av_free(ap->downmix_filters);
+    av_free(ap->upmix_filters);
+    av_free(ap->source_filters);
     av_channel_layout_uninit(&ap->audio_target.ch_layout);
     SDL_DestroyMutex(ap->msg_mutex);
     SDL_DestroySemaphore(ap->wake_sem);
@@ -1588,6 +1614,50 @@ int au_set_downmix(const AU_DOWNMIX mode, const char *custom_filters) {
     if (!m) return AU_ERR_NO_MEMORY;
     m->i64 = mode;
     if (mode == AU_DOWNMIX_CUSTOM && !(m->str = av_strdup(custom_filters))) {
+        msg_free(m);
+        return AU_ERR_NO_MEMORY;
+    }
+    msg_post(ap, m);
+    return AU_OK;
+}
+
+int au_set_source_filters(const char *filters) {
+    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+    const int ret = validate_source_filters(filters);
+    if (ret < 0) {
+        ff_log(AU_LOG_ERROR, "au_set_source_filters: invalid filters \"%s\": %s", filters, av_err2str(ret));
+        return AU_ERR_INVALID_ARGUMENT;
+    }
+    AudioPlayer *ap = audio_player;
+    SDL_AtomicIncRef(&ap->request_count);
+    Msg *m = msg_new(CMD_SET_SOURCE_FILTERS);
+    if (!m) return AU_ERR_NO_MEMORY;
+    if (filters && filters[0] && !(m->str = av_strdup(filters))) {
+        msg_free(m);
+        return AU_ERR_NO_MEMORY;
+    }
+    msg_post(ap, m);
+    return AU_OK;
+}
+
+int au_set_upmix(const AU_UPMIX mode, const char *custom_filters) {
+    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+    if (mode != AU_UPMIX_NONE && mode != AU_UPMIX_SURROUND && mode != AU_UPMIX_CUSTOM) return AU_ERR_INVALID_ARGUMENT;
+    if (mode == AU_UPMIX_SURROUND && !avfilter_get_by_name("surround")) return AU_ERR_UNSUPPORTED;
+    if (mode == AU_UPMIX_CUSTOM) {
+        const int ret = validate_upmix_filters(custom_filters);
+        if (ret < 0) {
+            ff_log(AU_LOG_ERROR, "au_set_upmix: invalid custom upmix \"%s\": %s",
+                   custom_filters ? custom_filters : "", av_err2str(ret));
+            return AU_ERR_INVALID_ARGUMENT;
+        }
+    }
+    AudioPlayer *ap = audio_player;
+    SDL_AtomicIncRef(&ap->request_count);
+    Msg *m = msg_new(CMD_SET_UPMIX);
+    if (!m) return AU_ERR_NO_MEMORY;
+    m->i64 = mode;
+    if (mode == AU_UPMIX_CUSTOM && !(m->str = av_strdup(custom_filters))) {
         msg_free(m);
         return AU_ERR_NO_MEMORY;
     }

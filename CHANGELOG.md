@@ -3,6 +3,15 @@
 ## 3.1.0 (unreleased)
 
 ### Added
+- Upmixing: `au_set_upmix(mode, custom)` decides how files with fewer channels than a surround output play.
+  `AU_UPMIX_NONE` (the default, as before) keeps each channel on its own speaker; `AU_UPMIX_SURROUND` spreads mono
+  and stereo over every speaker with FFmpeg's `surround` filter; `AU_UPMIX_CUSTOM` takes your own filters (a `pan`
+  matrix, `surround` with other options). Stereo and mono outputs are not affected.
+- Source filters: `au_set_source_filters()` runs filters on every track's decoded audio before the conversion to the
+  output format, at the file's own rate and layout, for repairs that need the samples as stored.
+- Restoration helpers: `au_fb_add_declick()` (FFmpeg `adeclick`, for vinyl and shellac transfers) and
+  `au_fb_add_declip()` (`adeclip`, rebuilds clipped peaks), with `AuDeclick` / `AuDeclip` settings. Declip belongs in
+  `au_set_source_filters()`: after resampling to the device rate it finds nothing to repair.
 - Embedded pictures (cover art): `au_media_picture(path, type, &err)` returns an `AuPicture` (the image as stored,
   its MIME type, picture type, size and description) from FLAC, ID3v2 (MP3, AIFF, WAV), MP4/M4A, APE and Ogg/Opus
   files, the front cover or a given `AU_PICTURE_TYPE`; `au_picture_release()` frees it. Nothing is decoded, and
