@@ -32,6 +32,9 @@
   UTF-8 paths and arguments.
 
 ### Fixed
+- A crossfade on play or skip (`AuCrossfade.on_play` / `.on_skip`) into a track slower to open than the fade (a network
+  stream, a slow disk, a busy machine) faded the old track out before the new one started, leaving silence. The old
+  track now holds at the gain its fade has reached until the new one can play. Found with the chaos build on Windows.
 - A data race: the control thread decided whether the output device should run from the mixer slots read without the
   device lock, while the audio callback changed them in a gapless handover. Found with the new chaos build under
   ThreadSanitizer.

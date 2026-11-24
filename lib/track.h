@@ -57,6 +57,10 @@ int track_queue_filter_command(TrackState *t, const char *target, const char *cm
 // at the start of that part, so the track ends at this position.
 double track_duration(TrackState *t);
 
+// SDL callback: the track has started, or can start now (enough decoded, or all of it). track_pull() gives nothing
+// before this is true.
+bool track_ready(TrackState *t, int rate, int channels);
+
 // SDL callback: copy up to `frames` interleaved float frames into dst without blocking.
 // *eos is set when the track has delivered all of its audio. *looped is set when playback wrapped around.
 int track_pull(TrackState *t, float *dst, int frames, int rate, int channels, bool *eos, bool *looped);

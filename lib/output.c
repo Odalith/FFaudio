@@ -225,6 +225,8 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 // Frames per gain step: gains are exact at the edges of a block and linear in between (a 0.5 s equal-power fade is
 // then within 3e-6 of its curve), so the inner loops are a multiply-add per sample
 #define GAIN_BLOCK 64
+// How much slower a held fade runs (render_outgoing()): its gain then stays put for a block
+#define FADE_HOLD_SCALE ((int64_t)1 << 20)
 
 // The track's ReplayGain gain: taken as it is with the first samples, then a linear ramp for every change (10 ms, or
 // 2 s when the value arrived after the track started, e.g. a measurement that missed measure_wait_ms)
@@ -307,6 +309,24 @@ static void render_outgoing(AudioPlayer *ap, const int frames) {
     if (!t) return;
 
     bool eos = false, looped = false;
+    // The track it crossfades into can not play yet (its file may still be opening, a stream still buffering): the
+    // old one goes on at the gain its fade has reached, instead of fading out into silence first. A queued track that
+    // is ready (an end crossfade) does not hold it.
+    // The fade copy runs a million times slower, so its gain stays put within the block without a step.
+    const bool hold = m->current && !track_ready(m->current, m->rate, m->channels);
+    if (hold) {
+        FadeState held = m->out_fade;
+        held.pos *= FADE_HOLD_SCALE;
+        held.len *= FADE_HOLD_SCALE;
+        const int got = track_pull(t, m->voice_buf, frames, m->rate, m->channels, &eos, &looped);
+        add_voice(m, t, m->mix_buf, m->voice_buf, got, m->channels, &held, true);
+        if (eos) {
+            m->out_fade.active = false;
+            m->outgoing = NULL;
+            push_event(m, MIX_EV_FADE_DONE, t, t->position);
+        }
+        return;
+    }
     const int64_t left = m->out_fade.len - m->out_fade.pos;
     const int want = (int)FFMIN((int64_t)frames, FFMAX(0, left));
     const int got = want > 0 ? track_pull(t, m->voice_buf, want, m->rate, m->channels, &eos, &looped) : 0;

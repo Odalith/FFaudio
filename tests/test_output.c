@@ -1144,6 +1144,36 @@ static void test_gain_change_after_unchanged_late_value(void) {
     free(c.samples);
 }
 
+// A crossfade into a track that takes longer to open than the fade (a network stream, a slow disk; here a FIFO fed
+// 300 ms late): the old track must keep playing until the new one starts, not fade out into silence first. Found
+// with the chaos build on Windows.
+static void test_crossfade_into_slow_open(void) {
+#ifdef _WIN32
+    printf("   (needs a FIFO, skipped on Windows)\n");
+#else
+    snprintf(fifo_path, sizeof(fifo_path), "%s/xf_fifo.flac", tc_fixture_dir);
+    remove(fifo_path);
+    REQUIRE(mkfifo(fifo_path, 0600) == 0);
+    char src[1100];
+    snprintf(src, sizeof(src), "%s", fx("join_b.flac"));
+    start_capture("xf_slow_open");
+    const AuCrossfade xf = { .on_play = { .seconds = 0.3, .curve = AU_FADE_S_CURVE } };
+    au_set_crossfade(&xf);
+    au_play(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(800);
+    SDL_Thread *writer = SDL_CreateThread(feed_fifo, "fifo", src);
+    au_play(fifo_path, NULL);
+    wait_until_idle(2, 8000);
+    SDL_WaitThread(writer, NULL);
+    remove(fifo_path);
+    size_t silence;
+    float jump;
+    transition_seconds("crossfade into a late track", &silence, &jump);
+    CHECK(silence < 4);
+    CHECK(jump < 1.0f);
+#endif
+}
+
 static void test_replaygain_from_first_sample(void) {
     // The mixer runs for a track before its file is open (here: a FIFO nobody writes to for 300 ms). The gain
     // it starts with must still be the track's real one: it used to be taken as 0 dB at that point and then
@@ -1388,6 +1418,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_user_filter_comma_locale);
     RUN_TEST(test_crossfade_on_skip);
     RUN_TEST(test_crossfade_on_play);
+    RUN_TEST(test_crossfade_into_slow_open);
     RUN_TEST(test_pause_fade);
     RUN_TEST(test_pause_fade_curve);
     RUN_TEST(test_per_track_fade_override);

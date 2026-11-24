@@ -1734,6 +1734,19 @@ bool track_has_audio(TrackState *t, const int rate, const int channels) {
     return ring_peek(&t->ring) != NULL;
 }
 
+bool track_ready(TrackState *t, const int rate, const int channels) {
+    CHAOS_RT("track_ready");
+    if (t->started) return true;
+    // A track starts with some audio in hand (or all of it, if it is shorter), not with the first bit decoded:
+    // filters that hold audio back (adeclip's window) would otherwise run it dry right after its first frames
+    // when the device asks for a lot at once (SDL3 does at the start), and leave a gap
+    const int serial = packet_queue_serial(&t->audio_queue);
+    const bool ended = ffa_load_acquire(&t->eos_serial) == serial;
+    drop_stale(t, serial, rate, channels);
+    // (The ring always holds more: DECODED_BUFFER_SECONDS)
+    return ended || ring_has_frames(&t->ring, (uint32_t)(rate / START_PREFILL_DIVISOR));
+}
+
 int track_pull(TrackState *t, float *dst, const int frames, const int rate, const int channels, bool *eos, bool *looped) {
     CHAOS_RT("track_pull");
     int written = 0;
@@ -1745,15 +1758,7 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
         if (t->started) t->stalled = true;
         return 0;
     }
-    if (!t->started) {
-        // A track starts with some audio in hand (or all of it, if it is shorter), not with the first bit decoded:
-        // filters that hold audio back (adeclip's window) would otherwise run it dry right after its first frames
-        // when the device asks for a lot at once (SDL3 does at the start), and leave a gap
-        const bool ended = ffa_load_acquire(&t->eos_serial) == serial;
-        drop_stale(t, serial, rate, channels);
-        // (The ring always holds more: DECODED_BUFFER_SECONDS)
-        if (!ended && !ring_has_frames(&t->ring, (uint32_t)(rate / START_PREFILL_DIVISOR))) return 0;
-    }
+    if (!track_ready(t, rate, channels)) return 0;
 
     while (written < frames) {
         // The end marker is read before the ring: the decoder sets it after writing its last frames, so an empty

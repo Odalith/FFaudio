@@ -295,7 +295,8 @@ failure, opening, seek, callback end) and at the entry of the functions of the o
 | A track that fails | `read_thread_fail()` / `fail_track()` store `eos_serial`, then post `MSG_TRACK_FAILED`. The control thread may see the mixer's end event first, or the failure first while the callback has already let the track go. **Whichever comes first asks for the next track** (`ask_for_next_if_idle()`): nothing current or queued, and no prepare-next sent for this track. | In either order the other path found the track dealt with and asked for nothing: playback stopped after a broken file (found on Windows, 3.2). |
 | Opening | `open_range()` and the decoder are set up, then `ffa_store_release(opened)`, then `MSG_TRACK_OPENED`. `ff_publish_info()` comes before `MSG_TRACK_OPENED`. | `AU_EVENT_TRACK_OPENED` promises `au_track_info()` has the details; the callback reads `duration_s` after `opened`. |
 | Seek target | the handoff is stored after `packet_queue_flush()` and before the first packet of the new serial. | The trimmer must cut to the target for that serial, not the range start. |
-| Starting a track | The callback starts a track only once 1/10 s is decoded, the track has ended (all of it is there), or half the ring's markers are in use. | With a filter that holds audio back (adeclip) and SDL3, which asks for a lot when the device starts, the first frames played and a gap followed (3.2). |
+| Starting a track | The callback starts a track only once 1/10 s is decoded, the track has ended (all of it is there), or half the ring's markers are in use (`track_ready()`). | With a filter that holds audio back (adeclip) and SDL3, which asks for a lot when the device starts, the first frames played and a gap followed (3.2). |
+| Crossfading into a track that is not ready | While the incoming (current) track is not `track_ready()`, `render_outgoing()` keeps the outgoing one playing at the gain its fade has reached, without advancing the fade. A queued track that is ready (an end crossfade) does not hold it, so those crossfades are unchanged. | The fade-out ran from the moment of `au_play()`: a track slower to open than the fade (a stream, a slow disk) left silence (found by the chaos build on Windows, 3.2). |
 | Device change | `reopen_output()` closes and opens the device on the control thread, then (format changed) cancels fades, sets `filter_reconfigure` and seeks the current track to its heard position. `tap_install()` makes a new tap buffer under `tap_mutex` then the device lock. | Readers may be copying the old tap; the callback only writes a tap made for the current format. |
 | Meter tap | see the atomics table: `written` before the data before `published`. | A reader that sees new data also sees that its window was overwritten. |
 | Pause from the API | `au_pause()` updates `pause_state` (bit and counter) at once; the control thread applies `paused`. An unpause by `au_queue()` starting a track is a CAS against the state its message carried. | Otherwise the control thread could undo a newer `au_pause()` (3.0). |
@@ -303,7 +304,7 @@ failure, opening, seek, callback end) and at the entry of the functions of the o
 ## Real-time rules
 
 The audio callback (`sdl_audio_callback()` and everything it calls in `output.c` and `track_pull()` /
-`track_drop_stale()` / `track_has_audio()` in `track.c`):
+`track_ready()` / `track_drop_stale()` / `track_has_audio()` in `track.c`):
 
 - never blocks: its only lock is `SDL_TryLockMutex(status_mutex)`; it only uses atomics otherwise;
 - never allocates or frees;
@@ -352,4 +353,5 @@ race; everything else it showed was of the expected kinds above, and sample-exac
 | 3.2 | A track started with its first frames; filters that hold audio back ran it dry on SDL3. | 1/10 s prefill (`ring_has_frames()`). |
 | 3.2 | The prefill check read `ring_capacity()` from the callback while the worker replaced the storage (found by TSan). | The check uses only consumer-side state. |
 | 3.2 | `handle_demux_end()` (network: the reader) wrote the worker's trim state. | Only for local files. |
+| 3.2 | A play/skip crossfade faded the old track out on a clock of its own, so a new track slower to open than the fade left a gap (chaos build on Windows; `test_crossfade_into_slow_open` reproduces it with a FIFO). | The fade-out holds until the incoming track is ready. |
 | 3.2 | `update_device_running()` read the mixer slots without the device lock while the callback did a gapless handover (found by the chaos build with TSan; it had shown up once as an unexplained `test_lifecycle` failure). | The slots are read under the device lock. |
