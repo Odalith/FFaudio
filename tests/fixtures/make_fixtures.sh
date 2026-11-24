@@ -92,6 +92,18 @@ sine chain_c.opus      440 2 48000 2 -c:a libopus
 sine chain_d.opus      660 1 48000 2 -c:a libopus
 cat chain_c.opus chain_d.opus > chained.opus
 
+# Embedded pictures: a 64x48 PNG front cover and a 40x30 JPEG back cover in FLAC (PICTURE blocks), the front cover in
+# MP3 (ID3v2 APIC) and M4A (covr)
+ff -f lavfi -i "color=c=red:s=64x48" -frames:v 1 cover.png
+ff -f lavfi -i "color=c=blue:s=40x30" -frames:v 1 back.jpg
+ff -f lavfi -i "sine=frequency=440:duration=1:sample_rate=44100" -i cover.png -i back.jpg -map 0:a -map 1 -map 2 \
+   -c:a flac -c:v copy -disposition:v attached_pic -metadata:s:v:0 comment="Cover (front)" \
+   -metadata:s:v:0 title="Front" -metadata:s:v:1 comment="Cover (back)" art.flac
+ff -f lavfi -i "sine=frequency=440:duration=1:sample_rate=44100" -i cover.png -map 0:a -map 1 -c:a libmp3lame \
+   -c:v copy -disposition:v attached_pic -id3v2_version 3 -metadata:s:v comment="Cover (front)" art.mp3
+ff -f lavfi -i "sine=frequency=440:duration=1:sample_rate=44100" -i cover.png -map 0:a -map 1 -c:a aac \
+   -c:v copy -disposition:v attached_pic art.m4a
+
 # Broken / non-audio inputs
 : > empty.flac
 echo "this is not audio" > text.mp3

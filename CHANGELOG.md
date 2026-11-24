@@ -3,6 +3,10 @@
 ## 3.1.0 (unreleased)
 
 ### Added
+- Embedded pictures (cover art): `au_media_picture(path, type, &err)` returns an `AuPicture` (the image as stored,
+  its MIME type, picture type, size and description) from FLAC, ID3v2 (MP3, AIFF, WAV), MP4/M4A, APE and Ogg/Opus
+  files, the front cover or a given `AU_PICTURE_TYPE`; `au_picture_release()` frees it. Nothing is decoded, and
+  pictures are only read when asked for. `AuMediaInfo.picture_count` (a new last field) says how many there are.
 - Playlist files (`ffaudio_playlist.h`): `au_playlist_read()` reads an `.m3u`, `.m3u8` or `.pls` file or URL (an
   internet radio station's `.pls`, say) and `au_playlist_parse()` text already in memory; both return an
   `AuPlaylistFile` of entries (path, title, duration) for `au_play()` / `au_queue()`, and play nothing themselves.

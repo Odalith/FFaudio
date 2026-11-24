@@ -70,6 +70,7 @@ add_library(ffaudio
         lib/input.c
         lib/ogg_chain.c
         lib/playlist.c
+        lib/picture.c
         lib/numbers.c
         lib/events.c
         lib/events.h

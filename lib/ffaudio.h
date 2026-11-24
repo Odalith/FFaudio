@@ -504,6 +504,8 @@ extern "C" {
         AuReplayGain replaygain;     // from the ReplayGain / R128 tags
         int tag_count;               // every tag, for display or export: container tags, then the stream's for keys
         const AuTag *tags;           // the container lacks
+        // Embedded pictures (cover art): how many there are; au_media_picture() reads one. Since 3.1.
+        int picture_count;
     } AuMediaInfo;
 
     // Read the tags and format of a file without playing it. Works without au_init() and from any thread; it blocks
@@ -523,6 +525,37 @@ extern "C" {
     // "title", "artist", "album", "album_artist", "date", "genre", "track", "disc", "composer", "comment".
     // Format-specific spellings of album_artist and date ("ALBUMARTIST", "year", ...) are also found.
     FFAUDIO_API const char *au_media_tag(const AuMediaInfo *info, const char *key);
+
+    // Picture types, as ID3v2 APIC and FLAC PICTURE number them (0..20)
+    typedef enum AU_PICTURE_TYPE {
+        AU_PICTURE_ANY = -1,         // au_media_picture(): the front cover, or else the first picture
+        AU_PICTURE_OTHER = 0,
+        AU_PICTURE_FRONT_COVER = 3,
+        AU_PICTURE_BACK_COVER = 4,
+        AU_PICTURE_LEAFLET = 5,
+        AU_PICTURE_MEDIA = 6,        // e.g. the label side of a CD
+        AU_PICTURE_ARTIST = 8,
+        AU_PICTURE_BAND_LOGO = 19,
+    } AU_PICTURE_TYPE;
+
+    // An embedded picture: one immutable block, valid until au_picture_release()
+    typedef struct AuPicture {
+        const uint8_t *data;         // the image file as stored (JPEG, PNG, ...): ready to save or decode
+        size_t size;
+        const char *mime;            // "image/jpeg", "image/png", ...; "application/octet-stream" when unknown
+        int type;                    // AU_PICTURE_TYPE (0..20); MP4 covers count as the front cover
+        int width, height;           // 0 when unknown
+        const char *description;     // "" when there is none
+    } AuPicture;
+
+    // Read an embedded picture (FLAC, ID3v2 in MP3/AIFF/WAV, MP4/M4A, Ogg/Opus METADATA_BLOCK_PICTURE, APE): the one
+    // of this type, or with AU_PICTURE_ANY the front cover or else the first. Pictures are only read when asked for,
+    // so probing stays fast. Works without au_init() and from any thread; URLs work too. NULL with *out_error (may be
+    // NULL) AU_ERR_NOTHING_TO_DO when there is no such picture, AU_ERR_FILE when the file can not be opened.
+    FFAUDIO_API const AuPicture *au_media_picture(const char *path, int type, int *out_error);
+
+    // Done with it (NULL is fine)
+    FFAUDIO_API void au_picture_release(const AuPicture *picture);
 
     //+-----------------------------------------------------+
     //| Status                                              |
