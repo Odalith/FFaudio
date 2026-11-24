@@ -592,6 +592,9 @@ All of these change the whole process, which is why ffaudio leaves the choice to
 macOS allocators return memory to the system more readily.
 
 ## Architecture
+The threads, every lock, condition, semaphore and lock-free channel, the lock order and the hand-offs that must
+happen in order are in [docs/threading.md](docs/threading.md), the reference for any change that touches more than
+one thread.
 ```
  app ──au_*()──▶ control thread ──creates/destroys──▶ tracks (one thread each; streams also a reader)
                   │  ▲ events                            │ demux → decode → convert graph → user graph
