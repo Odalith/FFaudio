@@ -74,13 +74,41 @@ static void test_queue_next(void) {
 }
 
 // au_set_prepare_next(): the event comes that long before the end
-static double prepare_position = -1;            // guarded by tc_mutex: written on the control thread
+// The position heard when AU_EVENT_PREPARE_NEXT came, recorded by a hook on the control thread (guarded by tc_mutex).
+// The event counter is bumped before the hook runs, so a test waits for the hook's own value (wait_prepare_position()),
+// not just for the counter: under chaos delays it read the value before the hook wrote it.
+static double prepare_position = -1;
+static bool prepare_recorded = false;
 static void record_prepare_position(void) {
     AuStatus s;
     au_get_status(&s);
     SDL_LockMutex(tc_mutex);
-    prepare_position = s.position;
+    if (!prepare_recorded) {
+        prepare_position = s.position;
+        prepare_recorded = true;
+    }
     SDL_UnlockMutex(tc_mutex);
+}
+
+static void watch_prepare_position(void) {
+    SDL_LockMutex(tc_mutex);
+    prepare_position = -1;
+    prepare_recorded = false;
+    tc_on_prepare_next_hook = record_prepare_position;
+    SDL_UnlockMutex(tc_mutex);
+}
+
+// The recorded position, -1 when no prepare-next came within ms
+static double wait_prepare_position(const int ms) {
+    for (int t = 0; t <= ms; t += 5) {
+        SDL_LockMutex(tc_mutex);
+        const bool got = prepare_recorded;
+        const double at = prepare_position;
+        SDL_UnlockMutex(tc_mutex);
+        if (got) return at;
+        tc_sleep_ms(5);
+    }
+    return -1;
 }
 
 static void test_prepare_next_setter(void) {
@@ -89,17 +117,13 @@ static void test_prepare_next_setter(void) {
     CHECK(au_set_prepare_next(NAN) == AU_ERR_INVALID_ARGUMENT);
     CHECK(au_set_prepare_next(INFINITY) == AU_ERR_INVALID_ARGUMENT);
     CHECK(au_set_prepare_next(1.5) == AU_OK);
-    SDL_LockMutex(tc_mutex);
-    tc_on_prepare_next_hook = record_prepare_position;
-    SDL_UnlockMutex(tc_mutex);
+    watch_prepare_position();
 
     au_play(fx("long_6s.flac"), NULL);           // the default 10 s would send it at the start
     tc_sleep_ms(2500);
     CHECK(tc_snapshot().prepare_next == 0);
     CHECK(TC_WAIT_FIELD(prepare_next, 1, 6000));
-    SDL_LockMutex(tc_mutex);
-    const double at = prepare_position;
-    SDL_UnlockMutex(tc_mutex);
+    const double at = wait_prepare_position(1000);
     printf("   prepare-next at %.2f s of 6\n", at);
     CHECK(at > 4.2 && at < 4.8);
     CHECK(TC_WAIT_FIELD(eof, 1, 4000));
@@ -140,9 +164,7 @@ static void test_output_format_setter(void) {
 // A range plays like its own track: positions, seeks, events and prepare-next count from its start
 static void test_range_time(void) {
     CHECK(au_set_prepare_next(1.0) == AU_OK);
-    SDL_LockMutex(tc_mutex);
-    tc_on_prepare_next_hook = record_prepare_position;
-    SDL_UnlockMutex(tc_mutex);
+    watch_prepare_position();
     const AuPlayConfig pc = { .start_seconds = 2.0, .length_seconds = 3.0 };
     const int32_t h = au_play(fx("long_6s.flac"), &pc);
     CHECK(TC_WAIT_FIELD(opened, 1, 3000));
@@ -169,9 +191,7 @@ static void test_range_time(void) {
     CHECK(s.position >= 1.45 && s.position < 2.1);
 
     CHECK(TC_WAIT_FIELD(prepare_next, 1, 3000));
-    SDL_LockMutex(tc_mutex);
-    const double at = prepare_position;
-    SDL_UnlockMutex(tc_mutex);
+    const double at = wait_prepare_position(1000);
     printf("   prepare-next at %.2f (1 s before the end of 3)\n", at);
     CHECK(at > 1.8 && at < 2.2);
     au_seek(5.0);                               // past the end: clamped, the track ends
