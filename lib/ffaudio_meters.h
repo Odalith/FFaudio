@@ -59,6 +59,25 @@ extern "C" {
     // or while paused; AU_ERR_NOT_INITIALIZED without a player, AU_ERR_INVALID_ARGUMENT otherwise.
     FFAUDIO_API int au_get_levels(double window_seconds, AuLevels *out);
 
+    // A spectrum analyzer: an FFT of fft_size samples (a power of two, 256..16384) with a Hann window, over the last
+    // fft_size samples heard. Each one is used by one thread at a time; any number may exist. NULL for another size or
+    // without memory. Works before au_init() too (au_spectrum_read() then fails).
+    typedef struct AuSpectrum AuSpectrum;
+    FFAUDIO_API AuSpectrum *au_spectrum_create(int fft_size);
+
+    // fft_size / 2 + 1 magnitudes into `magnitudes`, bin k at k * sample_rate / fft_size Hz; linear, scaled so a
+    // full-scale sine reads 1.0. channel -1 = all channels (their power averaged, so nothing cancels out), else one
+    // (0 = front left). *sample_rate (may be NULL) is the output rate. Zeros when nothing plays or while paused.
+    // AU_ERR_NOT_INITIALIZED without a player, AU_ERR_INVALID_ARGUMENT for a channel the output does not have.
+    FFAUDIO_API int au_spectrum_read(AuSpectrum *spectrum, int channel, float *magnitudes, int *sample_rate);
+
+    // Group magnitudes into n_bands log-spaced bands from f_min to f_max Hz (f_max is capped at sample_rate / 2): each
+    // band is the largest magnitude in it; a band narrower than a bin takes the nearest bin. For bar visualizers.
+    FFAUDIO_API int au_spectrum_bands(const float *magnitudes, int fft_size, int sample_rate, double f_min,
+                                      double f_max, float *bands, int n_bands);
+
+    FFAUDIO_API void au_spectrum_free(AuSpectrum *spectrum);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

@@ -978,6 +978,56 @@ static void test_levels(void) {
     free(c.samples);
 }
 
+static void test_spectrum(void) {
+    CHECK(au_spectrum_create(100) == NULL && au_spectrum_create(128) == NULL && au_spectrum_create(32768) == NULL);
+    au_spectrum_free(NULL);
+    AuSpectrum *sp = au_spectrum_create(2048);
+    REQUIRE(sp);
+    static float mags[2048 / 2 + 1], one[2048 / 2 + 1], bands[32];
+    int rate = 0;
+    CHECK(au_spectrum_read(sp, 0, mags, &rate) == AU_ERR_NOT_INITIALIZED);   // no player
+
+    start_capture_48k("spectrum");
+    CHECK(au_spectrum_read(sp, 9, mags, &rate) == AU_ERR_INVALID_ARGUMENT);
+    au_set_volume(0.2f);
+    au_play(fx("sine_1k_half.wav"), NULL);
+    CHECK(TC_WAIT_FIELD(started, 1, 3000));
+    tc_sleep_ms(400);
+    CHECK(au_spectrum_read(sp, -1, mags, &rate) == AU_OK);
+    CHECK(au_spectrum_read(sp, 0, one, NULL) == AU_OK);
+    int peak = 0;
+    for (int k = 1; k <= 1024; k++)
+        if (mags[k] > mags[peak]) peak = k;
+    const double peak_hz = peak * (double)rate / 2048;
+    printf("   1 kHz at 0.5: peak bin %d (%.1f Hz) = %.4f (channel 0: %.4f), 10 kHz bin %.6f\n", peak, peak_hz,
+           mags[peak], one[peak], mags[427]);
+    CHECK(rate == 48000 && abs(peak - 43) <= 1);
+    CHECK(mags[peak] > 0.4f && mags[peak] < 0.52f);          // Hann: up to 1.4 dB less between two bins
+    CHECK(fabsf(one[peak] - mags[peak]) < 0.01f);             // both channels are the same
+    CHECK(mags[427] < 1e-3f);                                 // far from the tone: nothing
+    CHECK(au_spectrum_bands(mags, 2048, rate, 30, 16000, bands, 32) == AU_OK);
+    int top = 0;
+    for (int b = 1; b < 32; b++)
+        if (bands[b] > bands[top]) top = b;
+    const double lo = 30 * pow(16000.0 / 30, top / 32.0), hi = 30 * pow(16000.0 / 30, (top + 1) / 32.0);
+    printf("   loudest of 32 bands: %d (%.0f..%.0f Hz) = %.4f\n", top, lo, hi, bands[top]);
+    CHECK(lo <= 1000 && hi > 1000 && bands[top] == mags[peak]);
+    CHECK(au_spectrum_bands(mags, 2048, rate, 0, 16000, bands, 32) == AU_ERR_INVALID_ARGUMENT);
+
+    au_pause(true);
+    tc_sleep_ms(400);
+    CHECK(au_spectrum_read(sp, -1, mags, &rate) == AU_OK);
+    float most = 0;
+    for (int k = 0; k <= 1024; k++) most = fmaxf(most, mags[k]);
+    printf("   paused: largest bin %.6f\n", most);
+    CHECK(most < 1e-6f);
+    au_stop();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    Capture c = stop_capture();
+    free(c.samples);
+    au_spectrum_free(sp);
+}
+
 /* ---------- ReplayGain ---------- */
 
 // Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
@@ -1339,6 +1389,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_resampled_ranges);
     RUN_TEST(test_cue_playback);
     RUN_TEST(test_levels);
+    RUN_TEST(test_spectrum);
     RUN_TEST(test_restoration_filters);
     RUN_TEST(test_replaygain_levels);
     RUN_TEST(test_replaygain_from_first_sample);

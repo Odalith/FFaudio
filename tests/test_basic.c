@@ -195,12 +195,17 @@ static void test_range_time(void) {
 static SDL_atomic_t meter_stop;
 static int meter_reader(void *arg) {
     int *reads = arg;
+    AuSpectrum *sp = au_spectrum_create(1024);
+    static float mags[513];
     while (!SDL_AtomicGet(&meter_stop)) {
         AuLevels lv;
         if (au_get_levels(0.02, &lv) == AU_OK) (*reads)++;
         if (lv.channels > 8 || lv.peak[0] > 2.0f) (*reads) = -1000000;   // garbage
+        int rate;
+        if (sp && au_spectrum_read(sp, -1, mags, &rate) == AU_OK && mags[20] > 2.0f) (*reads) = -1000000;
         SDL_Delay(1);
     }
+    au_spectrum_free(sp);
     return 0;
 }
 

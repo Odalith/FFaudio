@@ -7,6 +7,10 @@
   being heard (the device's latency taken off): the mix after ReplayGain, fades and crossfades, before the master
   volume and mute, silent while paused or idle. The audio callback copies the mix into a history buffer it never
   waits on; readers on any thread copy from it and check it was not overwritten. The first call turns this on.
+- Spectrum: `au_spectrum_create(fft_size)` makes an analyzer (FFmpeg's `av_tx` real FFT, a Hann window, 256 to 16384
+  points) that `au_spectrum_read()` runs over the same heard signal, per channel or all channels at once (their power
+  averaged), as magnitudes scaled so a full-scale sine reads 1.0; `au_spectrum_bands()` groups them into log-spaced
+  bands for bar visualizers. The FFT runs on the caller's thread.
 - Cue sheets and chapters (`ffaudio_playlist.h`): `au_cue_read()` reads the tracks of a `.cue` file, of an audio file
   with an embedded cue sheet (the `CUESHEET` tag, or a FLAC `CUESHEET` block, read for its exact `INDEX 01`), or of an
   audio file's chapters (M4B/M4A, Matroska, MP3 `CHAP`), as an `AuCueSheet` of `AuCueTrack`s: path, start and length
