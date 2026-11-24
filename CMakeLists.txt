@@ -54,7 +54,8 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 set(FFAUDIO_PUBLIC_HEADERS
         lib/ffaudio.h
         lib/ffaudio_filters.h
-        lib/ffaudio_loudness.h)
+        lib/ffaudio_loudness.h
+        lib/ffaudio_playlist.h)
 
 add_library(ffaudio
         ${FFAUDIO_PUBLIC_HEADERS}
@@ -68,6 +69,7 @@ add_library(ffaudio
         lib/network.c
         lib/input.c
         lib/ogg_chain.c
+        lib/playlist.c
         lib/numbers.c
         lib/events.c
         lib/events.h
@@ -220,7 +222,7 @@ if(FFAUDIO_BUILD_TESTS)
         if(WIN32)
             string(APPEND FFAUDIO_TEST_DATA_ENV ";LOCALAPPDATA=${CMAKE_BINARY_DIR}/localappdata")
         endif()
-        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network)
+        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network test_playlist)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})

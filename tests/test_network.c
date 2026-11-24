@@ -7,6 +7,7 @@
 #include "test_common.h"
 #include "http_server.h"
 #include "../lib/ffaudio_loudness.h"
+#include "../lib/ffaudio_playlist.h"
 
 
 static TsServer srv;
@@ -405,6 +406,29 @@ static void test_no_analysis_of_live_streams(void) {
     au_media_info_release(info);
 }
 
+// An internet radio station's .pls from a server: entries relative to its URL, then played like any URL
+static void test_playlist_over_http(void) {
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/station.pls", tc_fixture_dir);
+    FILE *f = fopen(path, "wb");
+    REQUIRE(f);
+    fputs("[playlist]\nFile1=s44_stereo.flac\nTitle1=Test Station\nLength1=-1\nFile2=file:///etc/passwd\n"
+          "NumberOfEntries=2\n", f);
+    fclose(f);
+    int err = 1;
+    const AuPlaylistFile *pl = au_playlist_read(url("/files/station.pls"), &err);
+    REQUIRE(pl);
+    CHECK(err == AU_OK && pl->count == 1);                       // the local file:// entry is left out
+    CHECK(!strcmp(pl->entries[0].path, url("/files/s44_stereo.flac")));
+    CHECK(!strcmp(pl->entries[0].title, "Test Station"));
+    CHECK(au_play(pl->entries[0].path, NULL) > 0);
+    CHECK(TC_WAIT_FIELD(eof, 1, 10000));
+    CHECK(tc_snapshot().eof_error == 0);
+    au_playlist_file_release(pl);
+    remove(path);
+    CHECK(au_playlist_read(url("/files/no_such.pls"), &err) == NULL && err == AU_ERR_FILE);
+}
+
 static void test_ogg_now_playing(void) {
     // A chained Ogg stream changes its tags when the next part starts (2 s in). Its timestamps start again at 0 there;
     // the position must go on (it went back to 0, and the change was reported at whatever position was read first)
@@ -447,6 +471,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_reconnect);
     RUN_TEST(test_icy_now_playing);
     RUN_TEST(test_ogg_now_playing);
+    RUN_TEST(test_playlist_over_http);
     RUN_TEST(test_icy_with_file_tags);
     RUN_TEST(test_no_analysis_of_live_streams);
     RUN_TEST(test_no_analysis_of_broken_transfer);

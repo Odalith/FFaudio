@@ -2,6 +2,14 @@
 
 ## 3.1.0 (unreleased)
 
+### Added
+- Playlist files (`ffaudio_playlist.h`): `au_playlist_read()` reads an `.m3u`, `.m3u8` or `.pls` file or URL (an
+  internet radio station's `.pls`, say) and `au_playlist_parse()` text already in memory; both return an
+  `AuPlaylistFile` of entries (path, title, duration) for `au_play()` / `au_queue()`, and play nothing themselves.
+  Relative entries are resolved against the playlist's folder or URL, `file://` URIs become paths, and text that is
+  not UTF-8 is read as Latin-1. An HLS playlist is a stream, so it gives one entry: itself. A playlist from a URL may
+  only list URLs (local paths in it are left out), like the protocol rules for streams. Works without `au_init()`.
+
 ### Fixed
 - Chained Ogg files (parts one after another, e.g. a recorded Ogg radio stream or concatenated Vorbis/Opus/FLAC
   files) reported only their last part's duration, as FFmpeg does. ffaudio now adds the parts up, for `au_probe()`,
