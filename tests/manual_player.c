@@ -19,7 +19,8 @@
 /*
  * Interactive player for listening tests on real hardware.
  *
- *   manual_player <music-dir | URL> [-u URL]... [-x crossfade-seconds] [-f "filter string"] [-n count] [-s] [-c channels]
+ *   manual_player <music-dir | sheet.cue | audio file | URL> [-u URL]... [-x crossfade-seconds] [-f "filter string"]
+ *                 [-n count] [-s] [-c channels]
  *                 [-d full|norm|"filters"] [-r track|album] [-g] [-G cache-file]
  *                 [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]
  *
@@ -30,7 +31,8 @@
  *   -P  parametric EQ from an EqualizerAPO / AutoEq ParametricEQ.txt file (headphone correction)
  *   -L  limiter at -1 dBFS;  -C  compressor: gentle (levelling) or night (low-volume listening)
  *
- * Plays the files under <music-dir> (shuffled with -s), queueing the next one from on_prepare_next.
+ * Plays the files under <music-dir> (shuffled with -s), queueing the next one from on_prepare_next. A .cue sheet, or
+ * an audio file with an embedded cue sheet or chapters, plays its tracks in order instead (ranges of the file).
  * Keys (no Enter needed in a terminal): n = next, p = pause/resume, s = stop, m = mute, + / - = volume,
  * > / < = seek +/-10 s, [ / ] = slower / faster, backslash = speed keeps / changes the pitch,
  * e = next equalizer preset, a = parametric EQ (-P) on/off, 1 / 2 = bass -/+, 3 / 4 = treble -/+,
@@ -64,6 +66,7 @@ static AuStatus status(void) {
 }
 #include "../lib/ffaudio_loudness.h"
 #include "../lib/ffaudio_filters.h"
+#include "../lib/ffaudio_playlist.h"
 
 static char **files = NULL;
 static size_t file_count = 0, file_cap = 0;
@@ -149,17 +152,92 @@ static int collect(const char *path, const struct stat *sb, int type, struct FTW
 static pthread_mutex_t files_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool use_cache = false;
 
-static const char *take_next(void) {
+// A cue sheet's tracks (or a file's chapters) instead of a folder: each entry of `files` is then a range of a file,
+// described by the entry of the same index here (NULL when playing a folder)
+typedef struct CueEntry {
+    int number;
+    double start, length;            // AuPlayConfig.start_seconds / .length_seconds (0 = to the end)
+    char *title, *performer;
+    AuReplayGain replaygain;         // the sheet's REM REPLAYGAIN_* values
+} CueEntry;
+static CueEntry *cue_entries = NULL;
+
+// Which entry each handle plays (files_lock), for the "now playing" line
+#define HANDLE_MAP 64
+static struct { int32_t handle; size_t index; } handle_map[HANDLE_MAP];
+static int handle_map_next = 0;
+
+static bool take_next(size_t *index) {
     pthread_mutex_lock(&files_lock);
-    const char *f = (next_index >= file_count || next_index >= max_tracks) ? NULL : files[next_index++];
+    const bool ok = next_index < file_count && next_index < max_tracks;
+    if (ok) *index = next_index++;
     pthread_mutex_unlock(&files_lock);
-    return f;
+    return ok;
 }
 
 static void prefetch_upcoming(void);
 
-static AuPlayConfig play_config(void) {
-    return (AuPlayConfig){ .filters = filter };
+static AuPlayConfig play_config(const size_t index) {
+    AuPlayConfig cfg = { .filters = filter };
+    if (cue_entries) {
+        const CueEntry *e = &cue_entries[index];
+        cfg.start_seconds = e->start;
+        cfg.length_seconds = e->length;
+        if (!isnan(e->replaygain.track_gain_db) || !isnan(e->replaygain.album_gain_db)) cfg.replaygain = &e->replaygain;
+    }
+    return cfg;
+}
+
+// Play (or queue) entry `index`; returns the handle
+static int32_t start_entry(const size_t index, const bool queue) {
+    const AuPlayConfig cfg = play_config(index);
+    const int32_t h = queue ? au_queue(files[index], &cfg) : au_play(files[index], &cfg);
+    if (h > 0) {
+        pthread_mutex_lock(&files_lock);
+        handle_map[handle_map_next].handle = h;
+        handle_map[handle_map_next].index = index;
+        handle_map_next = (handle_map_next + 1) % HANDLE_MAP;
+        pthread_mutex_unlock(&files_lock);
+    }
+    return h;
+}
+
+static const CueEntry *entry_of(const int32_t handle) {
+    if (!cue_entries) return NULL;
+    const CueEntry *e = NULL;
+    pthread_mutex_lock(&files_lock);
+    for (int i = 0; i < HANDLE_MAP; i++)
+        if (handle_map[i].handle == handle) e = &cue_entries[handle_map[i].index];
+    pthread_mutex_unlock(&files_lock);
+    return e;
+}
+
+static char *dup_or_null(const char *s) { return s && s[0] ? strdup(s) : NULL; }
+
+// A .cue file, or an audio file with an embedded cue sheet or chapters: its tracks become the play list
+static bool load_cue(const char *path) {
+    int err = 0;
+    const AuCueSheet *cue = au_cue_read(path, &err);
+    if (!cue || cue->count == 0) {
+        fprintf(stderr, "%s: no cue sheet or chapters (%d)\n", path, err);
+        au_cue_release(cue);
+        return false;
+    }
+    cue_entries = calloc((size_t)cue->count, sizeof(CueEntry));
+    files = calloc((size_t)cue->count, sizeof(char *));
+    if (!cue_entries || !files) return false;
+    for (int i = 0; i < cue->count; i++) {
+        const AuCueTrack *t = cue->tracks[i];
+        files[i] = strdup(t->path);
+        cue_entries[i] = (CueEntry){ .number = t->number, .start = t->start_seconds, .length = t->length_seconds,
+                                     .title = dup_or_null(t->title), .performer = dup_or_null(t->performer),
+                                     .replaygain = t->replaygain };
+    }
+    file_count = file_cap = (size_t)cue->count;
+    printf("%s%s%s: %d tracks in %s\n", cue->performer[0] ? cue->performer : "", cue->performer[0] ? " - " : "",
+           cue->title[0] ? cue->title : path, cue->count, files[0]);
+    au_cue_release(cue);
+    return true;
 }
 
 static void on_log(const char *msg, int64_t req, enum AU_LOG_LEVEL level, void *ud) {
@@ -177,6 +255,18 @@ static void on_eof(bool skip, bool error, int32_t handle, void *ud) {
 static void on_started(int32_t handle, void *ud) {
     (void)ud;
     clear_queued_if(handle);
+    const CueEntry *ce = entry_of(handle);
+    if (ce) {
+        // A track of the cue sheet: its own title, and where it is in the file
+        const double end = ce->length > 0 ? ce->start + ce->length : -1;
+        printf("> now playing #%d: track %d/%zu: %s%s%s  [%d:%05.2f", handle, ce->number, file_count,
+               ce->performer ? ce->performer : "", ce->performer ? " - " : "", ce->title ? ce->title : "?",
+               (int)(ce->start / 60), fmod(ce->start, 60));
+        if (end >= 0) printf(" - %d:%05.2f]\n", (int)(end / 60), fmod(end, 60));
+        else printf(" - end]\n");
+        prefetch_upcoming();
+        return;
+    }
     const AuMediaInfo *info = au_track_info(handle);
     double gain = 0;
     const bool has_gain = au_track_gain_db(handle, &gain) == AU_OK && gain != 0;
@@ -231,12 +321,12 @@ static void prefetch_upcoming(void) {
 }
 
 static void queue_next_file(void) {
-    const char *f = take_next();
-    if (!f) { printf("  (no more files)\n"); return; }
-    const AuPlayConfig cfg = play_config();
-    const int32_t h = au_queue(f, &cfg);
+    size_t i;
+    if (!take_next(&i)) { printf("  (no more files)\n"); return; }
+    const int32_t h = start_entry(i, true);
     set_queued(h);
-    printf("  queued #%d %s\n", h, f);
+    if (cue_entries) printf("  queued #%d track %d\n", h, cue_entries[i].number);
+    else printf("  queued #%d %s\n", h, files[i]);
 }
 
 static void on_prepare_next(int32_t current, void *ud) {
@@ -510,7 +600,7 @@ static void on_device(int32_t channels, int32_t rate, void *ud) {
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <music-dir | URL> [-u URL]... [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]\n", argv[0]);
+        fprintf(stderr, "usage: %s <music-dir | sheet.cue | audio file | URL> [-u URL]... [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]\n", argv[0]);
         return 1;
     }
     double crossfade = 0;
@@ -555,7 +645,14 @@ int main(int argc, char **argv) {
         const char *u = i == 1 ? argv[1] : (!strcmp(argv[i - 1], "-u") ? argv[i] : NULL);
         if (u && au_is_network_url(u)) collect(u, NULL, FTW_F, NULL);
     }
-    if (!au_is_network_url(argv[1]) && nftw(argv[1], collect, 20, FTW_PHYS) != 0) file_count = 0;
+    struct stat st;
+    if (!au_is_network_url(argv[1]) && stat(argv[1], &st) == 0 && S_ISREG(st.st_mode)) {
+        // A file: a cue sheet, or an audio file with one inside (or chapters)
+        if (file_count > 0) { fprintf(stderr, "-u can not be used with a cue sheet\n"); return 1; }
+        if (!load_cue(argv[1])) return 1;
+        if (shuffle) { printf("(-s ignored: a cue sheet plays in order)\n"); shuffle = false; }
+    }
+    else if (!au_is_network_url(argv[1]) && nftw(argv[1], collect, 20, FTW_PHYS) != 0) file_count = 0;
     if (file_count == 0) {
         fprintf(stderr, "No files found under %s\n", argv[1]);
         return 1;
@@ -621,9 +718,9 @@ int main(int argc, char **argv) {
         printf("crossfade: %.1f s\n", crossfade);
     }
 
-    const AuPlayConfig cfg = play_config();
-    const char *first_file = take_next();
-    au_play(first_file, &cfg);
+    size_t first = 0;
+    take_next(&first);
+    start_entry(first, false);
 
     setvbuf(stdout, NULL, _IOLBF, 0);
     enable_key_mode();
@@ -640,10 +737,11 @@ int main(int argc, char **argv) {
                     au_skip();
                 }
                 else {
-                    const char *f = take_next();
-                    if (!f) { printf("  (no more files)\n"); break; }
-                    const AuPlayConfig next_cfg = play_config();
-                    printf("  next: #%d %s\n", au_play(f, &next_cfg), f);
+                    size_t i;
+                    if (!take_next(&i)) { printf("  (no more files)\n"); break; }
+                    const int32_t h = start_entry(i, false);
+                    if (cue_entries) printf("  next: #%d track %d\n", h, cue_entries[i].number);
+                    else printf("  next: #%d %s\n", h, files[i]);
                 }
                 if (paused) {
                     au_pause(false); // au_skip() does not resume on its own
@@ -798,7 +896,14 @@ int main(int argc, char **argv) {
     restore_terminal();
     au_gain_scan_stop();
     au_shutdown();
-    for (size_t i = 0; i < file_count; i++) free(files[i]);
+    for (size_t i = 0; i < file_count; i++) {
+        free(files[i]);
+        if (cue_entries) {
+            free(cue_entries[i].title);
+            free(cue_entries[i].performer);
+        }
+    }
     free(files);
+    free(cue_entries);
     return 0;
 }

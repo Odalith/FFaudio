@@ -637,8 +637,11 @@ macOS allocators return memory to the system more readily.
 without anything depending on timing, so a render from before a change can be compared with one after it.
 
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
-`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]`
-plays a folder on real hardware for listening tests.
+`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir | sheet.cue | audio file> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]`
+plays a folder on real hardware for listening tests, or the tracks of a cue sheet (or of an audio file with one inside,
+or with chapters). `scripts/make_cue_album.sh <album-dir> <out-dir> [rate]` makes a test album for that from an
+album's tracks: one FLAC image (tracks at another sample rate are resampled) and its `album.cue`; the album's files are
+only read.
 
 ## Roadmap
 - [x] ReplayGain / R128 read from tags automatically (track/album mode, preamp, clipping prevention)
