@@ -231,6 +231,21 @@ static void test_meters_during_format_changes(void) {
     CHECK(TC_WAIT_FIELD(device, 21, 3000));
 }
 
+// A track that can not be played (cover art in a music folder) and was started with au_play(), nothing queued: the
+// application must hear AU_EVENT_PREPARE_NEXT to start the next one. Found on Windows: the end of a failed track
+// could reach the control thread before its failure, and then no prepare-next came and playback stopped.
+static void test_failed_track_asks_for_next(void) {
+    int missed = 0;
+    for (int i = 0; i < 40; i++) {
+        tc_reset_events();
+        au_play(fx("not_audio.bin"), NULL);
+        CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+        if (!TC_WAIT_FIELD(prepare_next, 1, 1000)) missed++;
+    }
+    printf("   prepare-next missing after %d of 40 failed tracks\n", missed);
+    CHECK(missed == 0);
+}
+
 static void test_skip_to_next(void) {
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(300);
@@ -360,6 +375,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_all_formats);
     RUN_TEST(test_bad_inputs);
     RUN_TEST(test_queue_next);
+    RUN_TEST(test_failed_track_asks_for_next);
     RUN_TEST(test_prepare_next_setter);
     RUN_TEST(test_output_format_setter);
     RUN_TEST(test_range_time);

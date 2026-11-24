@@ -35,6 +35,13 @@
   end crossfade count from the range's start, as the duration and `au_seek_fraction()` already did (positions used to
   be file time).
 - Loops of tracks shorter than half a second are reported (`AU_EVENT_RESTARTED` with `from_loop`).
+- A track that could not be played (cover art in a music folder, a damaged file) and was the current one with
+  nothing queued could end without `AU_EVENT_PREPARE_NEXT`, so a player that queues on that event stopped there. Its
+  end could reach the control thread before its failure, which then found the track already gone. The player now
+  asks for the next track whenever the current one ends with nothing queued and it was never asked. Found on Windows.
+- A track no longer starts with only its first frames decoded: it waits for 1/10 s (or all of it, if shorter). With
+  a filter that holds audio back (`adeclip`) and SDL3 (or sdl2-compat, as the Windows release uses), which asks for
+  a lot of audio at once when the device starts, the first frames played and then 33 ms of silence followed.
 - A seek the demuxer can not do (some FLAC files without a seek table, close to their end) decodes from the start up
   to the target instead of playing nothing.
 - `au_playlist_read()` / `au_playlist_parse()` refuse cue sheets with `AU_ERR_UNSUPPORTED` (their lines used to be

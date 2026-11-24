@@ -106,4 +106,8 @@ int32_t ring_read(SampleRing *r, float *dst, int32_t max);
 // Drop the rest of the current marker
 void ring_skip(SampleRing *r);
 
+// At least `frames` frames are there to take (counting from the current marker, all serials), or half of the markers
+// are in use (in tiny chunks the ring may never hold that many frames: waiting for them would wait forever)
+bool ring_has_frames(SampleRing *r, uint32_t frames);
+
 #endif //FFAUDIO_SAMPLE_RING_H

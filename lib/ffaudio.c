@@ -913,9 +913,20 @@ static void process_mixer_events(AudioPlayer *ap) {
                 note_add((AuEvent){ .type = AU_EVENT_RESTARTED, .handle = t->handle,
                                     .data.restarted = { e->position, true, SDL_AtomicGet(&t->loops_remaining) } });
                 break;
-            case MIX_EV_TRACK_ENDED:
+            case MIX_EV_TRACK_ENDED: {
                 end_track(ap, t, END_NATURAL);
+                // The current track ended with nothing after it, and the application was never asked for the next
+                // one: a track that failed before it opened (whose failure message can arrive after this event), or
+                // one too short for the usual warning. Ask now, or playback stops here.
+                lock_mixer(ap);
+                const bool idle = !ap->mixer.current && !ap->mixer.next;
+                unlock_mixer(ap);
+                if (idle && !t->prepare_next_sent) {
+                    t->prepare_next_sent = true;
+                    note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = 0 });
+                }
                 break;
+            }
             case MIX_EV_FADE_DONE:
                 end_track(ap, t, t->fade_reason ? t->fade_reason : END_SKIPPED);
                 break;
