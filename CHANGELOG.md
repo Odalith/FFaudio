@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.1.0 (unreleased)
+## 3.1.0 (2026-11-23)
 
 ### Added
 - Embedded pictures (cover art): `au_media_picture(path, type, &err)` returns an `AuPicture` (the image as stored,
