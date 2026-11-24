@@ -23,10 +23,12 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
   peak) per track and per album, independent of playback, and get ReplayGain/R128 gains back. Read only:
   ffaudio never modifies your files
 - **Metadata**: tags (normalized names across formats), track/disc numbers and format details, for playing
-  tracks or by probing a file without playing it
+  tracks or by probing a file without playing it, and embedded cover art (FLAC, MP3, M4A, Ogg/Opus, APE)
+- **Playlist files**: `.m3u`, `.m3u8` and `.pls`, local or from a URL (internet radio stations), read into a list
+  of entries for the player
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers for
   graphic and parametric EQ (AutoEq / EqualizerAPO profiles), bass/treble, balance, width, mono, channel swap,
-  crossfeed, bs2b, compressor and limiter
+  crossfeed, bs2b, compressor and limiter, and click and clipping repair for damaged sources
 - Volume with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
 - Playback speed 0.25x to 4x, keeping the pitch or tape-style, changeable while playing without gaps
 - Events for track open/start/end, prepare-next, restarts (seek/loop), duration, buffering, "now playing", device
@@ -34,7 +36,8 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - Follows the system default device, or uses a chosen one and falls back to the default if it disappears;
   `AU_EVENT_DEVICES_CHANGED` reports outputs that are plugged in or removed
 - Surround files up to 7.1 play on multichannel outputs with SDL's speaker order, or are mixed down at full level
-  (like mpv), normalized (never clips), or with your own filters (e.g. `sofalizer` for headphones)
+  (like mpv), normalized (never clips), or with your own filters (e.g. `sofalizer` for headphones); mono and stereo
+  files can be spread over every speaker of a surround output
 - Safe to drive from any thread, including from its own event callback: no function ever waits for the player
 - Linux tested; Windows builds with MSYS2 (see CI); macOS, Android and iOS untested
 - LGPL-2.1
@@ -203,6 +206,25 @@ Named filters can be changed with commands; a command reaches the tracks that ar
 string for tracks that start later. `au_filter_available()` tells whether this FFmpeg build has a filter (bs2b
 needs libbs2b); the helpers return `AU_ERR_UNSUPPORTED` when it does not.
 
+Repairing damaged sources (vinyl and shellac transfers, clipped masters). These need the samples as they are stored,
+so they go in the source filters, which run on each track's decoded audio before the conversion to the output
+format:
+```c
+AuFilterBuilder *repair = au_fb_create();
+au_fb_add_declick(repair, NULL, NULL);            // clicks and crackle
+au_fb_add_declip(repair, NULL, NULL);             // rebuilds clipped peaks
+au_set_source_filters(au_fb_peek(repair));        // every track, at the file's own rate and channels
+au_fb_free(repair);
+
+AuFilterBuilder *after = au_fb_create();
+au_fb_add_limiter(after, NULL, NULL);             // rebuilt peaks can go past full scale
+au_set_filters(au_fb_peek(after));
+au_fb_free(after);
+```
+Declip finds clipping by its flat tops, which resampling to the device rate smooths away; as an ordinary filter it
+would repair nothing whenever the file and the device rates differ. On music each repair costs about 5 % of one
+core per track.
+
 ### Network streams
 URLs work wherever paths do: files on web and music servers (seekable when the server supports range requests),
 Icecast/SHOUTcast internet radio and HLS (`.m3u8`).
@@ -230,6 +252,28 @@ local files. A server that stops answering ends the track with an error after th
 a track that is still connecting interrupts it. Network files are not measured for ReplayGain unless
 `AuNetworkConfig.measure_streams` is set (it downloads the whole file). The release archives use the system's
 GnuTLS for https on Linux and Windows' own TLS.
+
+### Playlist files
+```c
+#include <ffaudio_playlist.h>
+
+int err;
+const AuPlaylistFile *pl = au_playlist_read("/music/road trip.m3u8", &err);  // or a station's .pls URL
+if (pl) {
+    for (int i = 0; i < pl->count; i++) {
+        const AuPlaylistEntry *e = &pl->entries[i];
+        printf("%s (%s, %.0f s)\n", e->path, e->title, e->duration);       // title "", duration -1 when not given
+    }
+    au_play(pl->entries[0].path, NULL);
+    au_playlist_file_release(pl);
+}
+```
+`.m3u` / `.m3u8` (plain and extended, with `#EXTINF` titles and durations) and `.pls` are read; nothing is played,
+the application decides what to do with the entries. Relative entries are resolved against the playlist's folder or
+URL and `file://` URIs become paths. Text that is not UTF-8 is read as Latin-1, as old Windows tools wrote it. An HLS
+playlist (`#EXT-X-` lines) is a stream rather than a list, so it gives one entry: itself. A playlist read from a URL
+may only list URLs (local paths in it are left out), the same rule the player applies to streams.
+`au_playlist_parse()` takes text already in memory. Neither needs `au_init()`.
 
 ### 5. ReplayGain and metadata
 ```c
@@ -260,9 +304,18 @@ if (info) {
 // The same for a playing or queued track (0 = current), from AU_EVENT_TRACK_OPENED on
 const AuMediaInfo *now = au_track_info(0);
 au_media_info_release(now);
+
+// Cover art: the front cover, else the first picture (or ask for AU_PICTURE_BACK_COVER, ...)
+const AuPicture *cover = au_media_picture("/music/song.flac", AU_PICTURE_ANY, NULL);
+if (cover) {
+    printf("%s, %dx%d, %zu bytes\n", cover->mime, cover->width, cover->height, cover->size);
+    // cover->data is the image file as stored (JPEG, PNG, ...): save it, or decode it with your toolkit
+    au_picture_release(cover);
+}
 ```
 An `AuMediaInfo` is one immutable block: it never changes once made, so it can be kept and read from any thread
-until it is released. The player shares its own with `au_track_info()` (no copy); a stream's "now playing" change
+until it is released. `info->picture_count` tells whether a file has pictures; they are only read when
+`au_media_picture()` asks for one, so probing stays fast. The player shares its own with `au_track_info()` (no copy); a stream's "now playing" change
 makes a new one.
 
 ReplayGain 2.0 tags (`REPLAYGAIN_TRACK_GAIN`, `..._PEAK`, `REPLAYGAIN_ALBUM_...`) are read from every format FFmpeg
@@ -391,6 +444,15 @@ au_set_downmix(AU_DOWNMIX_CUSTOM,              // or a matrix that keeps the LFE
 ```
 The standard matrix (ITU-R BS.775) puts the centre and surrounds in at -3 dB and drops the LFE.
 
+Mono and stereo files on a surround output play on the front left and right speakers by default. To use every
+speaker:
+```c
+au_set_upmix(AU_UPMIX_SURROUND, NULL);          // FFmpeg's surround filter: centred sound to the centre, ambience
+                                                // to the surrounds, bass to the LFE
+au_set_upmix(AU_UPMIX_CUSTOM, "surround=lfe=0"); // or your own filters (a pan matrix, other surround options)
+au_set_upmix(AU_UPMIX_NONE, NULL);              // back to the default
+```
+
 ### 8. Shut down
 ```c
 au_shutdown();   // not from on_event; au_init() may be called again afterwards
@@ -507,15 +569,19 @@ plays a folder on real hardware for listening tests.
 ## Roadmap
 - [x] ReplayGain / R128 read from tags automatically (track/album mode, preamp, clipping prevention)
 - [x] Metadata API and probing a file without playing it
-- [ ] Embedded cover art
+- [x] Embedded cover art
+- [x] Playlist files (.m3u, .m3u8, .pls)
+- [ ] Playlist organizer (an ordered list with append/insert helpers and history)
+- [ ] Level meters and spectrum
 - [x] Measure R128 / ReplayGain values for files (loudness analysis; read only)
 - [x] Playback speed (tempo with and without pitch change)
 - [x] Network streams: HTTP(S) files, HLS, Icecast/SHOUTcast with "now playing", buffering, reconnects
 - [ ] Cue sheets / gapless playback of track ranges inside one file
-- [x] Verified multichannel (5.1/7.1) playback and configurable downmixing
+- [x] Verified multichannel (5.1/7.1) playback, configurable downmixing and upmixing
 - [x] Device added/removed notifications for the application
-- [ ] SDL3 port
-- [ ] Release binaries for Linux and Windows; test macOS, Android and iOS
+- [ ] SDL3 port, or native audio backends instead of SDL
+- [x] Release binaries for Linux and Windows
+- [ ] Test macOS, Android and iOS
 - [ ] Update the C# bindings (FFAudioSharp) to this API
 
 Note: this project is not affiliated with FFmpeg, FFplay, or their authors.
