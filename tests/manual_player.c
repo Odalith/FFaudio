@@ -49,13 +49,66 @@
 #include <string.h>
 #include <stdbool.h>
 #include <time.h>
+#include <signal.h>
+#include <math.h>
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#include <conio.h>
+#include <io.h>
+#include <sys/stat.h>
+#else
 #include <unistd.h>
 #include <ftw.h>
-#include <signal.h>
 #include <pthread.h>
 #include <termios.h>
 #include <sys/stat.h>
-#include <math.h>
+#endif
+
+//+-----------------------------------------------------+
+//| Portability: locks, paths (Windows: UTF-8)          |
+//+-----------------------------------------------------+
+
+#ifdef _WIN32
+typedef SRWLOCK Lock;
+#define LOCK_INIT SRWLOCK_INIT
+static void lock(Lock *l) { AcquireSRWLockExclusive(l); }
+static void unlock(Lock *l) { ReleaseSRWLockExclusive(l); }
+
+static char *utf8_from_wide(const wchar_t *w) {
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    char *s = n > 0 ? malloc((size_t)n) : NULL;
+    if (s) WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
+    return s;
+}
+static wchar_t *wide_from_utf8(const char *s) {
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    wchar_t *w = n > 0 ? malloc((size_t)n * sizeof(wchar_t)) : NULL;
+    if (w) MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    return w;
+}
+#else
+typedef pthread_mutex_t Lock;
+#define LOCK_INIT PTHREAD_MUTEX_INITIALIZER
+static void lock(Lock *l) { pthread_mutex_lock(l); }
+static void unlock(Lock *l) { pthread_mutex_unlock(l); }
+#endif
+
+// 1 = a regular file, 2 = a folder, 0 = neither or missing
+static int path_kind(const char *path) {
+#ifdef _WIN32
+    wchar_t *w = wide_from_utf8(path);
+    struct _stat64 st;
+    const int r = w ? _wstat64(w, &st) : -1;
+    free(w);
+    if (r != 0) return 0;
+    return (st.st_mode & _S_IFREG) ? 1 : (st.st_mode & _S_IFDIR) ? 2 : 0;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0) return 0;
+    return S_ISREG(st.st_mode) ? 1 : S_ISDIR(st.st_mode) ? 2 : 0;
+#endif
+}
 
 #include "../lib/ffaudio.h"
 
@@ -76,25 +129,25 @@ static const char *filter = NULL;
 
 // Handle of the track queued with au_queue() that has not started yet (0 = none).
 // Written from callbacks (control thread) and read by the key loop.
-static pthread_mutex_t queue_lock = PTHREAD_MUTEX_INITIALIZER;
+static Lock queue_lock = LOCK_INIT;
 static int32_t queued_handle = 0;
 
 static void set_queued(const int32_t handle) {
-    pthread_mutex_lock(&queue_lock);
+    lock(&queue_lock);
     queued_handle = handle;
-    pthread_mutex_unlock(&queue_lock);
+    unlock(&queue_lock);
 }
 
 static void clear_queued_if(const int32_t handle) {
-    pthread_mutex_lock(&queue_lock);
+    lock(&queue_lock);
     if (queued_handle == handle) queued_handle = 0;
-    pthread_mutex_unlock(&queue_lock);
+    unlock(&queue_lock);
 }
 
 static int32_t get_queued(void) {
-    pthread_mutex_lock(&queue_lock);
+    lock(&queue_lock);
     const int32_t h = queued_handle;
-    pthread_mutex_unlock(&queue_lock);
+    unlock(&queue_lock);
     return h;
 }
 
@@ -102,6 +155,18 @@ static int32_t get_queued(void) {
 //| Terminal: read single keys without waiting for Enter |
 //+-----------------------------------------------------+
 
+#ifdef _WIN32
+// The console reads single keys with _getch() (no echo, no Enter); piped input is read as it is
+static bool console_keys = false;
+static void restore_terminal(void) {}
+static void enable_key_mode(void) { console_keys = _isatty(_fileno(stdin)) != 0; }
+static int read_key(void) {
+    if (!console_keys) return getchar();
+    const int c = _getch();
+    if (c == 0 || c == 0xE0) { _getch(); return ' '; }   // arrow and function keys: ignored
+    return c == 3 ? 'q' : c;                              // Ctrl-C
+}
+#else
 static struct termios saved_termios;
 static bool termios_saved = false;
 
@@ -127,6 +192,8 @@ static void enable_key_mode(void) {
     raw.c_cc[VTIME] = 0;
     tcsetattr(STDIN_FILENO, TCSANOW, &raw);
 }
+static int read_key(void) { return getchar(); }
+#endif
 
 static void print_help(void) {
     printf("keys: n=next  p=pause/resume  s=stop  m=mute  +/-=volume  >/<=seek 10s  [/]=speed  \\=pitch mode\n"
@@ -135,9 +202,7 @@ static void print_help(void) {
            "      space=position  h=help  q=quit\n");
 }
 
-static int collect(const char *path, const struct stat *sb, int type, struct FTW *ftw) {
-    (void)sb; (void)ftw;
-    if (type != FTW_F) return 0;
+static int add_file(const char *path) {
     if (file_count == file_cap) {
         file_cap = file_cap ? file_cap * 2 : 128;
         char **n = realloc(files, file_cap * sizeof(char *));
@@ -148,8 +213,51 @@ static int collect(const char *path, const struct stat *sb, int type, struct FTW
     return 0;
 }
 
+// Every file under a folder (recursively), into the play list
+#ifdef _WIN32
+static void walk_folder(const wchar_t *dir) {
+    const size_t n = wcslen(dir);
+    wchar_t *pattern = malloc((n + 3) * sizeof(wchar_t));
+    if (!pattern) return;
+    swprintf(pattern, n + 3, L"%ls\\*", dir);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    free(pattern);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        const size_t len = n + wcslen(fd.cFileName) + 2;
+        wchar_t *full = malloc(len * sizeof(wchar_t));
+        if (!full) continue;
+        swprintf(full, len, L"%ls\\%ls", dir, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) walk_folder(full);   // no links: no loops
+        } else {
+            char *utf8 = utf8_from_wide(full);
+            if (utf8) add_file(utf8);
+            free(utf8);
+        }
+        free(full);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+static void collect_folder(const char *dir) {
+    wchar_t *w = wide_from_utf8(dir);
+    if (w) walk_folder(w);
+    free(w);
+}
+#else
+static int collect(const char *path, const struct stat *sb, int type, struct FTW *ftw) {
+    (void)sb; (void)ftw;
+    return type == FTW_F ? add_file(path) : 0;
+}
+static void collect_folder(const char *dir) {
+    if (nftw(dir, collect, 20, FTW_PHYS) != 0) file_count = 0;
+}
+#endif
+
 // next_index is used from the key loop and from callbacks
-static pthread_mutex_t files_lock = PTHREAD_MUTEX_INITIALIZER;
+static Lock files_lock = LOCK_INIT;
 static bool use_cache = false;
 
 // A cue sheet's tracks (or a file's chapters) instead of a folder: each entry of `files` is then a range of a file,
@@ -168,10 +276,10 @@ static struct { int32_t handle; size_t index; } handle_map[HANDLE_MAP];
 static int handle_map_next = 0;
 
 static bool take_next(size_t *index) {
-    pthread_mutex_lock(&files_lock);
+    lock(&files_lock);
     const bool ok = next_index < file_count && next_index < max_tracks;
     if (ok) *index = next_index++;
-    pthread_mutex_unlock(&files_lock);
+    unlock(&files_lock);
     return ok;
 }
 
@@ -193,11 +301,11 @@ static int32_t start_entry(const size_t index, const bool queue) {
     const AuPlayConfig cfg = play_config(index);
     const int32_t h = queue ? au_queue(files[index], &cfg) : au_play(files[index], &cfg);
     if (h > 0) {
-        pthread_mutex_lock(&files_lock);
+        lock(&files_lock);
         handle_map[handle_map_next].handle = h;
         handle_map[handle_map_next].index = index;
         handle_map_next = (handle_map_next + 1) % HANDLE_MAP;
-        pthread_mutex_unlock(&files_lock);
+        unlock(&files_lock);
     }
     return h;
 }
@@ -205,10 +313,10 @@ static int32_t start_entry(const size_t index, const bool queue) {
 static const CueEntry *entry_of(const int32_t handle) {
     if (!cue_entries) return NULL;
     const CueEntry *e = NULL;
-    pthread_mutex_lock(&files_lock);
+    lock(&files_lock);
     for (int i = 0; i < HANDLE_MAP; i++)
         if (handle_map[i].handle == handle) e = &cue_entries[handle_map[i].index];
-    pthread_mutex_unlock(&files_lock);
+    unlock(&files_lock);
     return e;
 }
 
@@ -313,10 +421,10 @@ static void prefetch_upcoming(void) {
     if (!use_cache) return;
     const char *upcoming[PREFETCH_COUNT];
     int n = 0;
-    pthread_mutex_lock(&files_lock);
+    lock(&files_lock);
     for (size_t i = next_index; i < file_count && i < max_tracks && n < PREFETCH_COUNT; i++)
         upcoming[n++] = files[i];
-    pthread_mutex_unlock(&files_lock);
+    unlock(&files_lock);
     au_gain_cache_request(upcoming, n, AU_SCAN_PREFETCH);
 }
 
@@ -372,7 +480,7 @@ static EqPreset eq_presets[] = {
 static const char *bs2b_names[] = { "default (700 Hz, 4.5 dB)", "Chu Moy (700 Hz, 6 dB)", "Jan Meier (650 Hz, 9.5 dB)" };
 
 // Changed by the key loop, read when the output device changes (control thread)
-static pthread_mutex_t fx_lock = PTHREAD_MUTEX_INITIALIZER;
+static Lock fx_lock = LOCK_INIT;
 static int eq_index = 0;          // into eq_presets
 static bool have_custom_eq = false;
 static bool crossfeed_on = false;
@@ -392,7 +500,7 @@ static char last_filters[8192] = "";
 // Rebuild the global filter string from the effect settings and the output channel count.
 // Order: parametric EQ, graphic EQ, tone, stereo image, crossfeed/bs2b, compressor, limiter (last: the safety net).
 static void apply_effects(void) {
-    pthread_mutex_lock(&fx_lock);
+    lock(&fx_lock);
     int rate = 0, channels = 0;
     rate = status().sample_rate;
     channels = status().channels;
@@ -400,7 +508,7 @@ static void apply_effects(void) {
     const bool stereo = channels == 2;
 
     AuFilterBuilder *fb = au_fb_create();
-    if (!fb) { pthread_mutex_unlock(&fx_lock); return; }
+    if (!fb) { unlock(&fx_lock); return; }
     char desc[512] = "";
     if (peq_on) {
         if (au_fb_add_parametric_eq(fb, NULL, &peq) != AU_OK) printf("  parametric eq: %s\n", au_fb_last_error(fb));
@@ -465,13 +573,13 @@ static void apply_effects(void) {
         printf("  effects:%s\n", desc[0] ? desc : " none");
     }
     au_fb_free(fb);
-    pthread_mutex_unlock(&fx_lock);
+    unlock(&fx_lock);
 }
 
 // Balance changes right away through a command to the named stereotools filter; the rebuilt string (a moment
 // later) keeps the value for the tracks that start afterwards
 static void change_balance(const double delta) {
-    pthread_mutex_lock(&fx_lock);
+    lock(&fx_lock);
     balance += delta;
     if (balance > 1) balance = 1;
     if (balance < -1) balance = -1;
@@ -480,14 +588,14 @@ static void change_balance(const double delta) {
     snprintf(arg, sizeof(arg), "%.2f", balance);
     for (char *c = arg; *c; c++) if (*c == ',') *c = '.'; // the command value must not depend on the locale
     const int r = au_send_filter_command(0, "stereotools@st", "balance_out", arg);
-    pthread_mutex_unlock(&fx_lock);
+    unlock(&fx_lock);
     if (r != AU_OK) printf("  (balance command failed: %d)\n", r);
     apply_effects();
 }
 
 // The settings and the filter string ffaudio got (for copying into -f or an application)
 static void print_effects(void) {
-    pthread_mutex_lock(&fx_lock);
+    lock(&fx_lock);
     printf("  peq=%s eq=%s bass=%+.0f treble=%+.0f balance=%+.1f width=%.2g%s%s crossfeed=%s bs2b=%s "
            "compressor=%s limiter=%s\n",
            peq_on ? "on" : (have_peq ? "off" : "none"), eq_presets[eq_index].name, bass_db, treble_db, balance, width,
@@ -495,7 +603,7 @@ static void print_effects(void) {
            bs2b_mode >= 0 ? bs2b_names[bs2b_mode] : "off", compressor_names[compressor_mode], limiter_on ? "on" : "off");
     printf("  global filters: %s\n", last_filters[0] ? last_filters : "(none)");
     if (filter) printf("  track filters (-f): %s\n", filter);
-    pthread_mutex_unlock(&fx_lock);
+    unlock(&fx_lock);
 }
 
 // -P: an EqualizerAPO / AutoEq ParametricEQ.txt file
@@ -599,6 +707,20 @@ static void on_device(int32_t channels, int32_t rate, void *ud) {
 }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    // UTF-8 arguments (paths with any characters) and console output
+    SetConsoleOutputCP(CP_UTF8);
+    {
+        int wargc = 0;
+        wchar_t **wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+        if (wargv) {
+            char **u = calloc((size_t)wargc + 1, sizeof(char *));
+            for (int i = 0; u && i < wargc; i++) u[i] = utf8_from_wide(wargv[i]);
+            LocalFree(wargv);
+            if (u) { argv = u; argc = wargc; }
+        }
+    }
+#endif
     if (argc < 2) {
         fprintf(stderr, "usage: %s <music-dir | sheet.cue | audio file | URL> [-u URL]... [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]\n", argv[0]);
         return 1;
@@ -643,16 +765,15 @@ int main(int argc, char **argv) {
     // Streams: a URL instead of the folder, and every -u
     for (int i = 1; i < argc; i++) {
         const char *u = i == 1 ? argv[1] : (!strcmp(argv[i - 1], "-u") ? argv[i] : NULL);
-        if (u && au_is_network_url(u)) collect(u, NULL, FTW_F, NULL);
+        if (u && au_is_network_url(u)) add_file(u);
     }
-    struct stat st;
-    if (!au_is_network_url(argv[1]) && stat(argv[1], &st) == 0 && S_ISREG(st.st_mode)) {
+    if (!au_is_network_url(argv[1]) && path_kind(argv[1]) == 1) {
         // A file: a cue sheet, or an audio file with one inside (or chapters)
         if (file_count > 0) { fprintf(stderr, "-u can not be used with a cue sheet\n"); return 1; }
         if (!load_cue(argv[1])) return 1;
         if (shuffle) { printf("(-s ignored: a cue sheet plays in order)\n"); shuffle = false; }
     }
-    else if (!au_is_network_url(argv[1]) && nftw(argv[1], collect, 20, FTW_PHYS) != 0) file_count = 0;
+    else if (!au_is_network_url(argv[1])) collect_folder(argv[1]);
     if (file_count == 0) {
         fprintf(stderr, "No files found under %s\n", argv[1]);
         return 1;
@@ -728,7 +849,7 @@ int main(int argc, char **argv) {
 
     bool paused = false, muted = false, keep_pitch = true;
     int c;
-    while ((c = getchar()) != EOF && c != 'q') {
+    while ((c = read_key()) != EOF && c != 'q') {
         switch (c) {
             case 'n': {
                 // Use the queued track if there is one, otherwise start the next file right away
@@ -804,31 +925,31 @@ int main(int argc, char **argv) {
                 printf("  %s\n", keep_pitch ? "speed keeps the pitch" : "speed changes the pitch (tape)");
                 break;
             case 'e':
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 eq_index = (eq_index + 1) % EQ_PRESETS;
                 if (eq_index == EQ_PRESETS - 1 && !have_custom_eq) eq_index = 0; // no -e gains given
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 apply_effects();
                 break;
             case 'x':
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 crossfeed_on = !crossfeed_on;
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 apply_effects();
                 break;
             case 'b':
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 bs2b_mode = bs2b_mode >= AU_BS2B_JAN_MEIER ? -1 : bs2b_mode + 1;
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 apply_effects();
                 break;
             case 'f':
                 print_effects();
                 break;
             case 'a':
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 if (have_peq) peq_on = !peq_on;
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 if (have_peq) apply_effects();
                 else printf("  (no parametric EQ: start with -P ParametricEQ.txt)\n");
                 break;
@@ -836,12 +957,12 @@ int main(int argc, char **argv) {
             case '2':
             case '3':
             case '4': {
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 double *v = c <= '2' ? &bass_db : &treble_db;
                 *v += (c == '2' || c == '4') ? 2 : -2;
                 if (*v > 12) *v = 12;
                 if (*v < -12) *v = -12;
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 apply_effects();
                 break;
             }
@@ -851,37 +972,37 @@ int main(int argc, char **argv) {
                 break;
             case 'w': {
                 static const double widths[] = { 1, 1.5, 2, 0.5 };
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 int i = 0;
                 while (i < 4 && widths[i] != width) i++;
                 width = widths[(i + 1) % 4];
                 mono = false;
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 apply_effects();
                 break;
             }
             case 'o':
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 mono = !mono;
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 apply_effects();
                 break;
             case 'c':
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 swap_lr = !swap_lr;
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 apply_effects();
                 break;
             case 'C':
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 compressor_mode = (compressor_mode + 1) % 3;
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 apply_effects();
                 break;
             case 'L':
-                pthread_mutex_lock(&fx_lock);
+                lock(&fx_lock);
                 limiter_on = !limiter_on;
-                pthread_mutex_unlock(&fx_lock);
+                unlock(&fx_lock);
                 apply_effects();
                 break;
             case 'h':

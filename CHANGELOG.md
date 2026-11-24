@@ -18,6 +18,13 @@
   takes text in memory, `au_cue_release()` frees it. Tracks are reached through pointers (`tracks[i]`), so
   `AuCueTrack` can gain fields. A FILE that is missing is looked for with other audio extensions next to it.
 
+### Changed
+- FFmpeg's own messages (its errors, e.g. "Failed to send close message" when a TLS stream is stopped) come as
+  `AU_EVENT_LOG` warnings, as "FFmpeg <part>: ...", instead of being printed to the application's stderr. ffaudio
+  sets FFmpeg's log callback in `au_init()` and puts the default back in `au_shutdown()`.
+- The manual test player (`tests/manual_player.c`) builds and runs on Windows too: single keys in the console,
+  UTF-8 paths and arguments.
+
 ### Fixed
 - Play ranges (`AuPlayConfig.start_seconds` / `.length_seconds`) and seeks are exact to the sample. A range used to
   start at the nearest packet and end up to a packet late; now consecutive ranges of one file join with nothing

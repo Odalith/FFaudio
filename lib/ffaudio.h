@@ -78,7 +78,7 @@ extern "C" {
     // au_shutdown()); what such a call changes is reported by later events.
 
     typedef enum AU_EVENT {
-        AU_EVENT_LOG = 0,          // data.log: a message from the library
+        AU_EVENT_LOG = 0,          // data.log: a message from the library, or from FFmpeg ("FFmpeg <part>: ...", since 3.2)
         AU_EVENT_DEVICE,           // data.device: the output device was opened (ok), or could not be (!ok)
         AU_EVENT_DEVICES_CHANGED,  // an output device was added or removed: au_list_devices() has the new list
         AU_EVENT_TRACK_OPENED,     // data.opened: the track is open; au_track_info() has its details now
@@ -259,7 +259,9 @@ extern "C" {
     //+-----------------------------------------------------+
 
     // Start the player and open the output device (AuConfig.device); AU_EVENT_DEVICE reports the result. Tracks
-    // can be started right away: they wait for the device.
+    // can be started right away: they wait for the device. Until au_shutdown(), FFmpeg's own error messages come as
+    // AU_EVENT_LOG warnings instead of going to stderr (it sets av_log_set_callback(); an application that wants
+    // FFmpeg's messages itself sets its own callback after au_init()). Since 3.2.
     FFAUDIO_API int au_init(const AuConfig *config);
 
     // Stops playback and frees everything. Not from on_event. au_init() may be called again afterwards.

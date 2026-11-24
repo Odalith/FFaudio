@@ -113,6 +113,23 @@ void ff_gain_cache_changed(const char *path) {
     SDL_UnlockMutex(lock);
 }
 
+// FFmpeg's own messages, as AU_EVENT_LOG instead of lines on the application's stderr. Their levels are one step
+// down: an FFmpeg error (a damaged packet, a TLS close the server did not answer) is something a player gets past.
+// Only what av_log_get_level() lets through (errors, see au_init()) comes here.
+static void ffmpeg_log(void *avcl, const int level, const char *fmt, va_list vl) {
+    if (level > av_log_get_level() || !audio_player) return;
+    char msg[1024];
+    vsnprintf(msg, sizeof(msg), fmt, vl);
+    size_t n = strlen(msg);
+    while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r' || msg[n - 1] == ' ')) msg[--n] = '\0';
+    if (n == 0) return;
+    const AVClass *cls = avcl ? *(const AVClass *const *)avcl : NULL;
+    const char *name = cls && cls->item_name ? cls->item_name(avcl) : NULL;
+    const AU_LOG_LEVEL l = level <= AV_LOG_FATAL ? AU_LOG_ERROR : level <= AV_LOG_ERROR ? AU_LOG_WARNING : AU_LOG_INFO;
+    if (name && name[0]) ff_log(l, "FFmpeg %s: %s", name, msg);
+    else ff_log(l, "FFmpeg: %s", msg);
+}
+
 AudioPlayer *ff_player(void) {
     return audio_player;
 }
@@ -1239,6 +1256,7 @@ int au_init(const AuConfig *config) {
     publish_idle_status(ap);
 
     av_log_set_level(AV_LOG_ERROR);
+    av_log_set_callback(ffmpeg_log);   // FFmpeg's messages come as AU_EVENT_LOG (until au_shutdown())
 
     // A library must not take over the host's Ctrl-C / SIGTERM handling
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
@@ -1330,6 +1348,7 @@ void au_shutdown(void) {
     SDL_WaitThread(ap->control_thread, NULL);
     SDL_DelEventWatch(device_event_watch, ap); // returns once a watch call in progress has finished
 
+    av_log_set_callback(av_log_default_callback); // every thread of the player has ended
     SDL_mutex *lock = lifecycle_mutex();
     SDL_LockMutex(lock);
     audio_player = NULL;

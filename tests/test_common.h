@@ -99,8 +99,18 @@ static void tc_bump(int *field) {
     SDL_UnlockMutex(tc_mutex);
 }
 
+// The last log line from FFmpeg (they start with "FFmpeg"), under tc_mutex
+static char tc_ffmpeg_log[512];
+static int tc_ffmpeg_log_level = -1;
+
 static void tc_on_log(const AuEvent *e) {
     const char *message = e->data.log.message;
+    if (message && !strncmp(message, "FFmpeg", 6)) {
+        SDL_LockMutex(tc_mutex);
+        snprintf(tc_ffmpeg_log, sizeof(tc_ffmpeg_log), "%s", message);
+        tc_ffmpeg_log_level = (int)e->data.log.level;
+        SDL_UnlockMutex(tc_mutex);
+    }
     if (e->data.log.level >= AU_LOG_ERROR) tc_bump(&tc_ev.log_error);
     if (tc_verbose || e->data.log.level >= AU_LOG_ERROR)
         fprintf(stderr, "[ffaudio %d] %s\n", (int)e->data.log.level, message ? message : "(null)");
