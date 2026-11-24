@@ -566,7 +566,7 @@ static void cmd_seek(AudioPlayer *ap, const Msg *msg) {
     ap->mixer.in_fade.active = false;
     unlock_mixer(ap);
     if (!cur) return;
-    if (msg->type == CMD_SEEK_US) track_request_seek(cur, msg->i64);
+    if (msg->type == CMD_SEEK) track_request_seek(cur, msg->d);
     else track_request_seek_percent(cur, msg->d);
 }
 
@@ -709,12 +709,11 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
         }
         if (cur) {
             SDL_AtomicSet(&cur->filter_reconfigure, 1);
-            if (cur->started) track_request_seek(cur, SecondsToMicroseconds(cur_pos));
-            else track_request_seek(cur, SecondsToMicroseconds(track_start_position(cur)));
+            track_request_seek(cur, cur->started ? cur_pos : 0.0); // positions are track time
         }
         if (next) {
             SDL_AtomicSet(&next->filter_reconfigure, 1);
-            track_request_seek(next, SecondsToMicroseconds(track_start_position(next)));
+            track_request_seek(next, 0.0);
         }
     }
 
@@ -943,7 +942,7 @@ static void housekeeping(AudioPlayer *ap) {
 
     if (cur && !have_next && !cur->prepare_next_sent && ffa_load_acquire(&cur->opened)
         && SDL_AtomicGet(&cur->loops_remaining) == 0) {
-        const double end = track_end_position(cur);
+        const double end = track_duration(cur); // positions count from 0, so the track ends at its duration
         const double lead = ap->prepare_next_seconds + FFMAX(0.0, ap->crossfade.on_track_end.seconds);
         SDL_LockMutex(ap->format_mutex);
         const double speed = ap->speed > 0 ? ap->speed : 1.0;
@@ -1017,7 +1016,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_CLEAR_NEXT:       cmd_clear_next(ap); break;
         case CMD_STOP:             cmd_stop(ap); break;
         case CMD_PAUSE:            cmd_pause(ap, msg->b); break;
-        case CMD_SEEK_US:
+        case CMD_SEEK:
         case CMD_SEEK_PERCENT:     cmd_seek(ap, msg); break;
         case CMD_SET_LOOP:         cmd_set_loop(ap, (int)msg->i64); break;
         case CMD_SET_CROSSFADE:    apply_crossfade_config(ap, &msg->crossfade); break;
@@ -1456,7 +1455,7 @@ void au_pause(const bool paused) {
 
 void au_seek(const double seconds) {
     if (!isfinite(seconds) || seconds < 0) return;
-    post_simple(CMD_SEEK_US, llround(seconds * 1e6), 0, false);
+    post_simple(CMD_SEEK, 0, seconds, false);
 }
 
 void au_seek_fraction(const double fraction) {

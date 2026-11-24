@@ -92,6 +92,17 @@ sine chain_c.opus      440 2 48000 2 -c:a libopus
 sine chain_d.opus      660 1 48000 2 -c:a libopus
 cat chain_c.opus chain_d.opus > chained.opus
 
+# Counters for sample-exact tests: sample n is (n + 1) / 2^23 on the left and its negative on the right, 4 s at 48 kHz.
+# Float WAV and 24-bit FLAC both decode to exactly these values.
+counter="(n+1)/8388608|-(n+1)/8388608"
+ff -f lavfi -i "aevalsrc=${counter}:s=48000:d=4" -c:a pcm_f32le counter_48k.wav
+ff -f lavfi -i "aevalsrc=${counter}:s=48000:d=4" -c:a flac -sample_fmt s32 -bits_per_raw_sample 24 counter_48k.flac
+
+# A chirp for lossy range and seek tests: it never repeats (a sine would align at any period), and it starts at 0.3
+chirp="0.3*cos(2*PI*(200*t+400*t*t))"
+ff -f lavfi -i "aevalsrc=${chirp}|${chirp}:s=48000:d=4" -c:a libmp3lame -b:a 192k chirp_48k.mp3
+ff -f lavfi -i "aevalsrc=${chirp}|${chirp}:s=48000:d=4" -c:a libopus -b:a 128k chirp_48k.opus
+
 # Restoration: a 440 Hz sine (1/8) with a 0.6 click every 8000 samples, and a 1/8 sine with a 20 ms burst at 0.3
 # every 0.25 s, hard-clipped at 0.25 (like a loud master: a few percent of the samples clipped; adeclip's cost grows
 # steeply with that share)

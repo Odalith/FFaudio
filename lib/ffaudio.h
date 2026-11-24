@@ -234,6 +234,10 @@ extern "C" {
     } AuConfig;
 
     typedef struct AuPlayConfig {
+        // A range of the file to play as the track, exact to the sample at the file's rate: consecutive ranges of one
+        // file (cue sheet tracks) join with nothing missing or doubled. The track's position, duration, seeks and
+        // events then count from the range's start. Since 3.2 exact and in range time (before: packet-exact, and
+        // positions in file time).
         double start_seconds;                // start this far into the file; 0 = from the start
         double length_seconds;               // play this long, then end the track; 0 = to the end
         // This track's own filter graph (NULL = none), after the conversion to the output format (float, the device's
@@ -312,7 +316,8 @@ extern "C" {
     // Pause (fading out per AuCrossfade.on_pause) or resume
     FFAUDIO_API void au_pause(bool paused);
 
-    // Seek the current track to this many seconds from its start
+    // Seek the current track to this many seconds from its start (of its range, AuPlayConfig.start_seconds), exact to
+    // the sample. A position past the end ends the track (or loops it).
     FFAUDIO_API void au_seek(double seconds);
 
     // Seek the current track to this fraction (0..1) of its duration; also before the duration is known
@@ -599,7 +604,7 @@ extern "C" {
 
     typedef struct AuStatus {
         int32_t handle;                // the audible track, 0 when nothing is playing
-        double position;               // seconds into it, as heard; -1 when nothing is playing
+        double position;               // seconds into it (into its range), as heard; -1 when nothing is playing
         double duration;               // seconds, -1 when unknown or nothing is playing
         bool buffering;                // the audible track waits for network data (its position holds)
         // The settings as last set, also before the control thread has applied them

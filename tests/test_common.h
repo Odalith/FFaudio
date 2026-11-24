@@ -245,14 +245,16 @@ static void tc_sleep_ms(uint32_t ms) { SDL_Delay(ms); }
 
 /* ---------- player setup ---------- */
 
-// Output channel count for the next tc_init_player*() call (0 = device default)
+// Output channel count and sample rate for the next tc_init_player*() call (0 = device default)
 static int tc_output_channels = 0;
+static int tc_output_rate = 0;
 
 // Start a player; it opens the system default device (AU_EVENT_DEVICE)
 static int tc_initialize(int loop_count, double prepare_next_seconds) {
     const AuConfig config = {
         .app_name = "ffaudio-tests",
         .output_channels = tc_output_channels,
+        .output_sample_rate = tc_output_rate,
         .volume = 0.5f,
         .loop_count = loop_count,
         .prepare_next_seconds = prepare_next_seconds,

@@ -171,8 +171,8 @@ static double planned_end_fade(Mixer *m, const FadeCurve **curve_out, double *re
 
     // Everything below is in output (wall clock) seconds: file seconds / playback speed
     const double speed = cur->play_speed > 0 ? cur->play_speed : 1.0;
-    const double end = track_end_position(cur);
-    const double cur_len = track_duration(cur) / speed;
+    const double end = track_duration(cur); // positions count from 0: the track ends at its duration
+    const double cur_len = end / speed;
     if (end < 0 || cur_len < 0) return 0; // unknown length: play gapless instead
 
     const double min_len = m->min_track_seconds > 0 ? m->min_track_seconds : 2.0 * fade->seconds;

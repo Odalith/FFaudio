@@ -43,6 +43,8 @@
 #define NET_BUFFER_FALLBACK_BYTES (256 * 1024)
 // A backwards jump of the frame timestamps larger than this, without a seek, means the track looped
 #define LOOP_DETECT_SECONDS 0.25
+// Audio kept on both sides of a cut when the file is resampled (longer than the resampler's filter)
+#define RESAMPLE_MARGIN_SECONDS 0.05
 // Most audio (in file seconds) the speed stage can hold between its input and output
 #define SPEED_MAX_LAG_SECONDS 0.2
 
@@ -252,22 +254,11 @@ static void wait_for_request(TrackState *t, const int ms) {
     SDL_UnlockMutex(t->wait_mutex);
 }
 
-double track_start_position(const TrackState *t) {
-    return t->start_time != AV_NOPTS_VALUE ? t->start_time / AV_TIME_BASE_DOUBLE : 0.0;
-}
-
-// No lock: end_pos_us is written once, before `opened` is set, and read only after `opened` has been seen (the audio
+// No lock: duration_s is written once, before `opened` is set, and read only after `opened` has been seen (the audio
 // callback calls this every period)
-double track_end_position(TrackState *t) {
-    if (!ffa_load_acquire(&t->opened)) return -1;
-    const int64_t end = t->end_pos_us;
-    return end == AV_NOPTS_VALUE ? -1 : end / AV_TIME_BASE_DOUBLE;
-}
-
 double track_duration(TrackState *t) {
-    const double end = track_end_position(t);
-    if (end < 0) return -1;
-    return FFMAX(0.0, end - track_start_position(t));
+    if (!ffa_load_acquire(&t->opened)) return -1;
+    return t->duration_s;
 }
 
 //+-----------------------------------------------------+
@@ -281,10 +272,11 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     t->ap = ap;
     t->handle = handle;
     t->audio_stream = -1;
-    t->start_time = AV_NOPTS_VALUE;
-    t->play_duration = AV_NOPTS_VALUE;
-    t->end_pos_us = AV_NOPTS_VALUE;
     t->pending_seek_percent = -1;
+    t->seek_done_serial = -1;
+    t->trim.serial = -1;
+    t->range_end_sample = INT64_MAX;
+    t->duration_s = -1;
     t->last_frame_pts = NAN;
     t->play_speed = 1.0;
     ffa_store_relaxed(&t->eos_serial, -1);
@@ -307,10 +299,11 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
             goto fail;
         if (config->http_headers && config->http_headers[0] && !(t->http_headers = av_strdup(config->http_headers)))
             goto fail;
-        if (config->length_seconds > 0)
-            t->play_duration = SecondsToMicroseconds(config->length_seconds);
-        if (config->start_seconds > 0)
-            t->start_time = SecondsToMicroseconds(config->start_seconds);
+        // Kept as given: the samples are worked out once the file's rate is known
+        if (isfinite(config->length_seconds) && config->length_seconds > 0)
+            t->range_len_s = config->length_seconds;
+        if (isfinite(config->start_seconds) && config->start_seconds > 0)
+            t->range_start_s = config->start_seconds;
         if (config->fade_in) {
             t->fade_in_override = *config->fade_in;
             fade_curve_build(&t->fade_in_curve, config->fade_in); // control thread: a custom curve is called here
@@ -420,10 +413,10 @@ void track_destroy(TrackState *t) {
     av_free(t);
 }
 
-void track_request_seek(TrackState *t, int64_t pos_us) {
-    if (pos_us < 0) pos_us = 0;
+void track_request_seek(TrackState *t, double seconds) {
+    if (!(seconds > 0)) seconds = 0;
     SDL_LockMutex(t->seek_mutex);
-    t->seek_pos = pos_us;
+    t->seek_pos = seconds;
     t->seek_req = true;
     t->pending_seek_percent = -1;
     SDL_AtomicSet(&t->seek_pending, 1);
@@ -587,6 +580,33 @@ static int seek_file(TrackState *t, int64_t pos_us) {
     return avformat_seek_file(ic, -1, INT64_MIN, target, INT64_MAX, 0);
 }
 
+// File seconds (from the container's start) of a sample of the range's rate
+static double sample_seconds(const TrackState *t, const int64_t sample) {
+    return (double)sample / t->range_rate;
+}
+
+// Where the demuxer is asked to go for a playback start at `sample`: earlier by the decoder's preroll and by room for
+// the resampling margin (see TrimState)
+static int64_t seek_base_sample(const TrackState *t, const int64_t sample) {
+    return FFMAX(0, sample - (int64_t)llround((t->preroll_s + 3 * RESAMPLE_MARGIN_SECONDS) * t->range_rate));
+}
+
+// Work out the range in samples of `rate` (at open, and again if the file's rate changes). The start in seconds
+// stays where it was set the first time, so positions keep counting from it.
+static void range_set_rate(TrackState *t, const int rate) {
+    const AVStream *st = t->audio_st;
+    t->range_rate = rate;
+    t->pts_offset_samples = t->ic->start_time != AV_NOPTS_VALUE
+        ? av_rescale_rnd(t->ic->start_time, rate, AV_TIME_BASE, AV_ROUND_NEAR_INF) : 0;
+    // Timestamps in a coarser time base than the samples jitter by up to one of its units
+    const int64_t unit = st && st->time_base.num > 0 && st->time_base.den > 0
+        ? av_rescale_rnd(st->time_base.num, rate, st->time_base.den, AV_ROUND_UP) : 1;
+    t->ts_tol = FFMAX(1, unit) + 1;
+    t->range_start_sample = llround(t->range_start_s * rate);
+    // Both ends from seconds (not start + length in samples): consecutive ranges then share the boundary sample
+    t->range_end_sample = t->range_len_s > 0 ? llround((t->range_start_s + t->range_len_s) * rate) : INT64_MAX;
+}
+
 // One more loop to play? Takes it from the count in one step: au_set_loop_count() can store a new count at any time,
 // and a separate read and decrement could turn its 0 into -1 (loop forever)
 static bool take_loop(TrackState *t) {
@@ -604,14 +624,21 @@ typedef enum DemuxEnd { DEMUX_LOOPED, DEMUX_ENDED, DEMUX_ENDED_BEFORE } DemuxEnd
 // then drains the decoder with an empty packet).
 static DemuxEnd handle_demux_end(TrackState *t) {
     if (!SDL_AtomicGet(&t->had_error) && take_loop(t)) {
-        if (seek_file(t, t->start_time != AV_NOPTS_VALUE ? t->start_time : 0) >= 0) {
+        // A range loops from its start, decoding the preroll again (the trimmer drops it); no flush, as above
+        const int64_t base = t->has_range ? seek_base_sample(t, t->range_start_sample) : 0;
+        if (seek_file(t, t->has_range ? llrint(sample_seconds(t, base) * 1e6) : 0) >= 0) {
             SDL_AtomicAdd(&t->loops_started, 1);
             reset_timestamps(t); // the jump back of a loop is meant
+            if (t->has_range && !t->network) {
+                t->trim.next = base;        // where frames without timestamps continue
+                t->trim.end_armed = false;  // the frames still in the decoder are past the end: no second loop
+            }
             return DEMUX_LOOPED;
         }
         ff_log(AU_LOG_WARNING, "%s: could not seek back to loop", t->filename);
     }
     if (t->demux_eof) return DEMUX_ENDED_BEFORE;
+    if (!t->network) t->trim.end_armed = false; // the trimmer is the worker's (for streams, this is the reader)
     t->demux_eof = true;
     SDL_AtomicSet(&t->read_ended, 1);
     ff_post_track_msg(MSG_TRACK_DEMUX_EOF, t->handle, 0);
@@ -621,15 +648,16 @@ static DemuxEnd handle_demux_end(TrackState *t) {
 // A pending seek request, done by whoever reads (the worker for local files, the reader for streams)
 static void process_seek_request(TrackState *t) {
     SDL_LockMutex(t->seek_mutex);
-    if (t->pending_seek_percent >= 0 && t->end_pos_us != AV_NOPTS_VALUE) {
-        const double start = track_start_position(t);
-        const double len = FFMAX(0.0, t->end_pos_us / AV_TIME_BASE_DOUBLE - start);
-        t->seek_pos = SecondsToMicroseconds(start + len * t->pending_seek_percent / 100.0);
-        t->seek_req = true;
+    if (t->pending_seek_percent >= 0) {
+        if (t->duration_s >= 0) {
+            t->seek_pos = t->duration_s * t->pending_seek_percent / 100.0;
+            t->seek_req = true;
+        }
+        else ff_log(AU_LOG_INFO, "%s: the duration is not known, a seek to a fraction of it is ignored", t->filename);
         t->pending_seek_percent = -1;
     }
     bool seek_req = t->seek_req;
-    const int64_t seek_pos = t->seek_pos;
+    double seek_pos = t->seek_pos;
     t->seek_req = false;
     if (t->pending_seek_percent < 0) SDL_AtomicSet(&t->seek_pending, 0);
     SDL_UnlockMutex(t->seek_mutex);
@@ -643,12 +671,31 @@ static void process_seek_request(TrackState *t) {
     }
     if (!seek_req) return;
 
-    if (seek_file(t, seek_pos) < 0) {
+    // Seconds into the range, kept inside it; the demuxer goes to the decoder's preroll before the exact sample, which
+    // the trimmer then cuts to
+    if (t->duration_s >= 0) seek_pos = FFMIN(seek_pos, t->duration_s);
+    int64_t target = AV_NOPTS_VALUE, base = AV_NOPTS_VALUE;
+    int64_t seek_us;
+    if (t->range_rate > 0) {
+        target = t->range_start_sample + llround(seek_pos * t->range_rate);
+        if (t->range_end_sample != INT64_MAX) target = FFMIN(target, t->range_end_sample);
+        base = seek_base_sample(t, target);
+        seek_us = llrint(sample_seconds(t, base) * 1e6);
+    }
+    else seek_us = llrint((t->origin_s + seek_pos) * 1e6);
+    if (seek_file(t, seek_us) < 0) {
         ff_log(AU_LOG_ERROR, "%s: error while seeking", t->filename);
         return;
     }
-    // New serial: the decoder, the filter graph and the mixer drop everything older
+    // New serial: the decoder, the filter graph and the mixer drop everything older. The trimmer learns the target
+    // before any packet of the new serial can be read (this thread reads them).
     packet_queue_flush(&t->audio_queue);
+    SDL_LockMutex(t->seek_mutex);
+    t->seek_done_serial = target != AV_NOPTS_VALUE ? packet_queue_serial(&t->audio_queue) : -1;
+    t->seek_done_sample = target;
+    t->seek_done_base = base;
+    SDL_UnlockMutex(t->seek_mutex);
+    if (!t->network) t->range_end_hit = false; // worker state (for streams this runs on the reader thread)
     wake_producer(t); // it may be waiting for room with audio from before the seek
     SDL_LockMutex(t->seek_mutex);
     free_stream_meta(t->stream_meta);
@@ -661,17 +708,20 @@ static void process_seek_request(TrackState *t) {
     t->demux_eof = false;
     SDL_AtomicSet(&t->read_ended, 0);
     t->read_errors = 0;
-    ff_post_track_msg(MSG_TRACK_SEEKED, t->handle, seek_pos / AV_TIME_BASE_DOUBLE);
+    ff_post_track_msg(MSG_TRACK_SEEKED, t->handle, seek_pos);
 }
 
-// After a packet of the audio stream: false when it is past the end of the requested play range
+// After a packet of the audio stream: false when it is well past the end of the range. The trimmer ends local files
+// on the exact sample; this is the end for network files (their reader runs ahead of the decoder) and a safety net
+// for local ones, so the margin keeps the packets the decoder still needs for the last samples.
 static bool within_play_range(const TrackState *t, const AVPacket *pkt) {
-    if (t->play_duration == AV_NOPTS_VALUE) return true;
+    if (!t->has_range || t->range_end_sample == INT64_MAX) return true;
     const AVStream *st = t->ic->streams[pkt->stream_index];
-    const int64_t stream_start = st->start_time != AV_NOPTS_VALUE ? st->start_time : 0;
     const int64_t pkt_ts = pkt->pts == AV_NOPTS_VALUE ? pkt->dts : pkt->pts;
-    const double pos = (pkt_ts - stream_start) * av_q2d(st->time_base);
-    return pkt_ts == AV_NOPTS_VALUE || pos <= t->end_pos_us / AV_TIME_BASE_DOUBLE;
+    if (pkt_ts == AV_NOPTS_VALUE) return true;
+    const double pos = pkt_ts * av_q2d(st->time_base) - t->pts_offset;
+    const double margin = t->preroll_s + 2 * RESAMPLE_MARGIN_SECONDS + (t->network ? 0.0 : 1.0);
+    return pos < sample_seconds(t, t->range_end_sample) + margin;
 }
 
 // Local files: the decoder's packets, read straight from the file by the worker (no packet queue, no reader thread).
@@ -686,6 +736,15 @@ static int local_get_packet(void *ctx, AVPacket *pkt, int *serial) {
         if (t->demux_eof) {
             wait_for_request(t, 1000);
             continue;
+        }
+        if (t->range_end_hit) {
+            // The trimmer reached the end of the range: loop, or drain the decoder as at the end of the file
+            t->range_end_hit = false;
+            if (handle_demux_end(t) == DEMUX_LOOPED) continue;
+            av_packet_unref(pkt);
+            pkt->stream_index = t->audio_stream;
+            *serial = packet_queue_serial(&t->audio_queue);
+            return 1;
         }
 
         const int ret = av_read_frame(ic, pkt);
@@ -809,6 +868,47 @@ static void read_thread_fail(TrackState *t) {
     ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
 }
 
+// After the decoder is open: the play range in samples, the decoder's preroll, the first seek and the duration
+static void open_range(TrackState *t) {
+    AVFormatContext *ic = t->ic;
+    const AVCodecParameters *par = t->audio_st->codecpar;
+    const int rate = t->audio_decoder.avctx->sample_rate;
+    const double file_s = ic->duration != AV_NOPTS_VALUE && ic->duration > 0 ? ic->duration / AV_TIME_BASE_DOUBLE : -1;
+    const bool wants_range = t->range_start_s > 0 || t->range_len_s > 0;
+
+    // Lossy decoders need some audio before a seek target to settle (MP3's bit reservoir, overlapping blocks); Opus
+    // says how much
+    const AVCodecDescriptor *desc = avcodec_descriptor_get(par->codec_id);
+    if (par->seek_preroll > 0 && par->sample_rate > 0) t->preroll_s = (double)par->seek_preroll / par->sample_rate;
+    else if (desc && (desc->props & AV_CODEC_PROP_LOSSY)) t->preroll_s = 0.1;
+
+    if (rate > 0) range_set_rate(t, rate);
+    if (wants_range && t->live) ff_log(AU_LOG_INFO, "%s: live stream, the play range is ignored", t->filename);
+    t->has_range = wants_range && !t->live && rate > 0;
+    t->origin_s = t->has_range ? sample_seconds(t, t->range_start_sample) : 0.0;
+
+    if (!t->has_range) {
+        t->range_end_sample = INT64_MAX;
+        t->duration_s = file_s;
+        return;
+    }
+    double d = file_s >= 0 ? file_s - t->origin_s : -1;
+    if (t->range_end_sample != INT64_MAX) {
+        const double len = sample_seconds(t, t->range_end_sample - t->range_start_sample);
+        d = d >= 0 ? FFMIN(d, len) : len;
+    }
+    t->duration_s = d >= 0 ? FFMAX(0.0, d) : -1;
+
+    // Start the decoder its preroll before the range; where seeking is not possible (a chained Ogg file, or a
+    // failed seek) the trimmer drops everything before the start instead (exact, only slower to start)
+    if (t->range_start_sample > 0 && !t->chained_ogg) {
+        const int64_t base = seek_base_sample(t, t->range_start_sample);
+        if (seek_file(t, llrint(sample_seconds(t, base) * 1e6)) < 0)
+            ff_log(AU_LOG_WARNING, "%s: could not seek to %.3f s, decoding from the start", t->filename, t->origin_s);
+        else t->trim.base = base;
+    }
+}
+
 // Open the input and the decoder, read the tags and publish the duration. < 0 = the track can not be played.
 static int open_track(TrackState *t) {
     const AVIOInterruptCB interrupt = { decode_interrupt_cb, t };
@@ -838,9 +938,6 @@ static int open_track(TrackState *t) {
     // containers start their timestamps later
     t->pts_offset = ic->start_time != AV_NOPTS_VALUE ? ic->start_time / AV_TIME_BASE_DOUBLE : 0.0;
 
-    if (t->start_time != AV_NOPTS_VALUE && seek_file(t, t->start_time) < 0)
-        ff_log(AU_LOG_WARNING, "%s: could not seek to position %0.3f", t->filename, t->start_time / AV_TIME_BASE_DOUBLE);
-
     // Tags and the ReplayGain gain are ready before the decoder starts, so the first sample is already
     // at the right level
     MediaDraft draft;
@@ -865,16 +962,8 @@ static int open_track(TrackState *t) {
         return AVERROR_STREAM_NOT_FOUND;
     }
 
-    // Publish the duration and the end position (read by other threads under seek_mutex)
-    int64_t end_pos = ic->duration;
-    if (t->play_duration != AV_NOPTS_VALUE) {
-        const int64_t end = (t->start_time != AV_NOPTS_VALUE ? t->start_time : 0) + t->play_duration;
-        end_pos = end_pos == AV_NOPTS_VALUE ? end : FFMIN(end_pos, end);
-    }
-    SDL_LockMutex(t->seek_mutex);
-    t->end_pos_us = end_pos;
-    SDL_UnlockMutex(t->seek_mutex);
-    ffa_store_release(&t->opened, 1); // publishes end_pos_us
+    open_range(t);
+    ffa_store_release(&t->opened, 1); // publishes the range and duration_s
     ff_post_track_msg(MSG_TRACK_OPENED, t->handle, 0);
     return 0;
 }
@@ -1035,7 +1124,7 @@ static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const
         return 0;
     }
     const double speed = t->speed_chain.graph ? t->speed_cur : 1.0;
-    const double pts = frame->pts == AV_NOPTS_VALUE ? NAN : frame->pts * av_q2d(tb) - t->pts_offset;
+    const double pts = frame->pts == AV_NOPTS_VALUE ? NAN : frame->pts * av_q2d(tb) - t->pts_offset - t->origin_s;
     const float *src = (const float *)frame->data[0];
     int ret = 0;
     for (int done = 0; done < frame->nb_samples;) {
@@ -1179,10 +1268,13 @@ static int apply_speed(TrackState *t, AVFrame *spd, AVFrame *tmp, const int seri
 }
 
 // Pass everything the convert graph has produced on to the speed and user graphs
+static bool trim_output(TrackState *t, AVFrame *frame, AVFrame *cut, AVRational tb);
+
 static int drain_convert(TrackState *t, AVFrame *conv, AVFrame *spd, AVFrame *tmp, const int serial) {
     int ret;
     while ((ret = av_buffersink_get_frame_flags(t->convert.sink, conv, 0)) >= 0) {
         const AVRational tb = av_buffersink_get_time_base(t->convert.sink);
+        if (!trim_output(t, conv, tmp, tb)) continue;
         if ((ret = feed_speed(t, conv, spd, tmp, tb, serial)) < 0)
             return ret;
         if (packet_queue_serial(&t->audio_queue) != serial)
@@ -1275,17 +1367,153 @@ static void fail_track(TrackState *t) {
     ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
 }
 
+static void trim_reached(TrackState *t);
+
+// Keep `keep` samples of a frame from sample `head` on; `cut` is a spare frame for a cut at the head. False (frame
+// unreferenced) when that fails.
+static bool cut_frame(AVFrame *frame, AVFrame *cut, const int head, const int keep) {
+    if (head <= 0) {
+        frame->nb_samples = keep;
+        return true;
+    }
+    av_frame_unref(cut);
+    cut->format = frame->format;
+    cut->sample_rate = frame->sample_rate;
+    cut->nb_samples = keep;
+    if (av_channel_layout_copy(&cut->ch_layout, &frame->ch_layout) < 0 || av_frame_get_buffer(cut, 0) < 0 ||
+        av_frame_copy_props(cut, frame) < 0) {
+        av_frame_unref(cut);
+        av_frame_unref(frame);
+        return false;
+    }
+    av_samples_copy(cut->extended_data, frame->extended_data, 0, head, keep, frame->ch_layout.nb_channels,
+                    frame->format);
+    av_frame_unref(frame);
+    av_frame_move_ref(frame, cut);
+    return true;
+}
+
+static int64_t align_down(const int64_t v, const int64_t step) {
+    if (step <= 1) return v;
+    const int64_t r = v % step;
+    return r < 0 ? v - r - step : v - r;
+}
+
+// A new serial (the start, or a seek): what to keep of it
+static void trim_begin(TrackState *t, const int serial) {
+    TrimState *tr = &t->trim;
+    const int64_t first_base = tr->serial < 0 ? tr->base : 0;
+    tr->serial = serial;
+    tr->next = AV_NOPTS_VALUE;
+    tr->end_armed = true;
+    SDL_LockMutex(t->seek_mutex);
+    const bool sought = t->seek_done_serial == serial;
+    tr->floor = sought ? t->seek_done_sample : (t->has_range ? t->range_start_sample : INT64_MIN);
+    tr->base = sought ? t->seek_done_base : (t->has_range ? first_base : 0);
+    SDL_UnlockMutex(t->seek_mutex);
+    tr->seek_floor = sought;
+    tr->active = t->has_range || sought;
+
+    // Resampled to the device's rate? Then the margin and the grid both rates share (e.g. 147 samples of 44.1 kHz
+    // are 160 of 48 kHz)
+    SDL_LockMutex(t->ap->format_mutex);
+    const int out = t->ap->output_ready ? t->ap->audio_target.freq : 0;
+    SDL_UnlockMutex(t->ap->format_mutex);
+    const int in = t->range_rate;
+    if (in > 0 && out > 0 && in != out) {
+        tr->margin = llround(RESAMPLE_MARGIN_SECONDS * in);
+        tr->align = in / av_gcd(in, out);
+    } else {
+        tr->margin = 0;
+        tr->align = 1;
+    }
+}
+
+// Cut a decoded frame (file rate, before the conversion) to what plays: from the range start or a seek target, up to
+// the range end (with the resampling margin, see TrimState). False when nothing of it plays (then it is
+// unreferenced). Frames of a serial without a range or a seek target are not touched at all.
+static bool trim_frame(TrackState *t, AVFrame *frame, AVFrame *cut, const int serial) {
+    TrimState *tr = &t->trim;
+    if (tr->serial != serial) trim_begin(t, serial);
+    if (!tr->active) return true;
+    if (frame->sample_rate != t->range_rate && frame->sample_rate > 0) range_set_rate(t, frame->sample_rate);
+
+    // Where this frame starts, in samples from the container's start: from its timestamp, counted on through small
+    // differences (coarse time bases), or counted on when it has none
+    const int64_t n = frame->nb_samples;
+    int64_t s0;
+    if (frame->pts != AV_NOPTS_VALUE) {
+        const int64_t p = frame->pts - t->pts_offset_samples;
+        s0 = tr->next != AV_NOPTS_VALUE && llabs(p - tr->next) <= t->ts_tol ? tr->next : p;
+    }
+    else s0 = tr->next != AV_NOPTS_VALUE ? tr->next : tr->base;
+    tr->next = s0 + n;
+
+    const int64_t lo_lim = tr->floor == INT64_MIN ? INT64_MIN : align_down(tr->floor - tr->margin, tr->align);
+    const int64_t hi_lim = t->range_end_sample == INT64_MAX ? INT64_MAX : t->range_end_sample + tr->margin;
+    if (s0 + n < hi_lim) tr->end_armed = true;
+    else if (tr->end_armed && !t->network) {
+        t->range_end_hit = true; // local_get_packet ends (or loops) the track before the next packet
+        tr->end_armed = false;
+    }
+
+    const int64_t lo = FFMAX(s0, lo_lim), hi = FFMIN(s0 + n, hi_lim);
+    if (hi <= lo) {
+        av_frame_unref(frame);
+        return false;
+    }
+    if (!cut_frame(frame, cut, (int)(lo - s0), (int)(hi - lo))) return false;
+    frame->pts = lo + t->pts_offset_samples;
+    if (tr->margin == 0) trim_reached(t);
+    return true;
+}
+
+// Something at or after the floor was kept: a seek target is reached, from now on (loops) the range start is the
+// limit again
+static void trim_reached(TrackState *t) {
+    TrimState *tr = &t->trim;
+    if (!tr->seek_floor) return;
+    tr->seek_floor = false;
+    tr->floor = t->has_range ? t->range_start_sample : INT64_MIN;
+    if (!t->has_range) tr->active = false;
+}
+
+// The exact cut of a converted frame (output rate) when the file is resampled: the same range and seek target, in
+// output samples. False when nothing of it plays (then it is unreferenced).
+static bool trim_output(TrackState *t, AVFrame *frame, AVFrame *cut, const AVRational tb) {
+    TrimState *tr = &t->trim;
+    if (!tr->active || tr->margin == 0 || frame->pts == AV_NOPTS_VALUE || t->range_rate <= 0) return true;
+    const int rate = frame->sample_rate, in = t->range_rate;
+    const AVRational out_tb = { 1, rate };
+    const int64_t off = t->ic->start_time != AV_NOPTS_VALUE
+        ? av_rescale_rnd(t->ic->start_time, rate, AV_TIME_BASE, AV_ROUND_NEAR_INF) : 0;
+    const int64_t o0 = av_rescale_q(frame->pts, tb, out_tb) - off, n = frame->nb_samples;
+    const int64_t lo_lim = tr->floor == INT64_MIN ? INT64_MIN : av_rescale_rnd(tr->floor, rate, in, AV_ROUND_NEAR_INF);
+    const int64_t hi_lim = t->range_end_sample == INT64_MAX ? INT64_MAX
+                         : av_rescale_rnd(t->range_end_sample, rate, in, AV_ROUND_NEAR_INF);
+    const int64_t lo = FFMAX(o0, lo_lim), hi = FFMIN(o0 + n, hi_lim);
+    if (hi <= lo) {
+        av_frame_unref(frame);
+        return false;
+    }
+    if (!cut_frame(frame, cut, (int)(lo - o0), (int)(hi - lo))) return false;
+    frame->pts = av_rescale_q(lo + off, out_tb, tb);
+    trim_reached(t);
+    return true;
+}
+
 static void decode_loop(TrackState *t) {
     AVFrame *frame = av_frame_alloc();
     AVFrame *conv = av_frame_alloc();
     AVFrame *spd = av_frame_alloc();
     AVFrame *tmp = av_frame_alloc();
+    AVFrame *cut = av_frame_alloc();
     int last_serial = -1;
     int ended_serial = -1;     // serial whose audio has completely been queued
     bool user_built = false;
     int ret = 0;
 
-    if (!frame || !conv || !spd || !tmp)
+    if (!frame || !conv || !spd || !tmp || !cut)
         goto end;
 
     for (;;) {
@@ -1320,6 +1548,8 @@ static void decode_loop(TrackState *t) {
             av_frame_unref(frame);
             continue;
         }
+        // Only what plays goes on: the range and the seek target, exact to the sample
+        if (!trim_frame(t, frame, cut, serial)) continue;
 
         const bool rebuild_convert =
             !t->convert.graph
@@ -1385,6 +1615,7 @@ end:
     av_frame_free(&conv);
     av_frame_free(&spd);
     av_frame_free(&tmp);
+    av_frame_free(&cut);
 }
 
 //+-----------------------------------------------------+
@@ -1466,8 +1697,11 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
             if (!isnan(m->pts)) {
                 // A jump back without a seek is a loop only if the read thread actually looped; anything else
                 // (e.g. a small position correction from the speed stage) is not reported
+                // (more than LOOP_DETECT_SECONDS back, or half of a shorter track: a short range loops too)
+                const double dur = track_duration(t);
+                const double back = dur > 0 ? FFMIN(LOOP_DETECT_SECONDS, dur * 0.5) : LOOP_DETECT_SECONDS;
                 if (t->started && !isnan(t->last_frame_pts) && m->serial == t->last_frame_serial &&
-                    m->pts < t->last_frame_pts - LOOP_DETECT_SECONDS &&
+                    m->pts < t->last_frame_pts - back &&
                     SDL_AtomicGet(&t->loops_started) > t->loops_heard) {
                     t->loops_heard++;
                     *looped = true;

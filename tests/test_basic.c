@@ -136,6 +136,60 @@ static void test_output_format_setter(void) {
     CHECK(e.eof_error == 0 && e.device_failed == 0);
 }
 
+// A range plays like its own track: positions, seeks, events and prepare-next count from its start
+static void test_range_time(void) {
+    CHECK(au_set_prepare_next(1.0) == AU_OK);
+    SDL_LockMutex(tc_mutex);
+    tc_on_prepare_next_hook = record_prepare_position;
+    SDL_UnlockMutex(tc_mutex);
+    const AuPlayConfig pc = { .start_seconds = 2.0, .length_seconds = 3.0 };
+    const int32_t h = au_play(fx("long_6s.flac"), &pc);
+    CHECK(TC_WAIT_FIELD(opened, 1, 3000));
+    TcEvents e = tc_snapshot();
+    printf("   opened: duration %.3f\n", e.opened_duration);
+    CHECK(fabs(e.opened_duration - 3.0) < 1e-6);
+    tc_sleep_ms(300);
+    AuStatus s;
+    au_get_status(&s);
+    printf("   0.3 s in: position %.3f, duration %.3f\n", s.position, s.duration);
+    CHECK(s.handle == h && s.position >= 0 && s.position < 1.0 && fabs(s.duration - 3.0) < 1e-6);
+
+    au_seek(1.0);
+    CHECK(TC_WAIT_FIELD(restart, 1, 2000));
+    tc_sleep_ms(100);
+    au_get_status(&s);
+    printf("   after seek(1): position %.3f\n", s.position);
+    CHECK(s.position >= 0.95 && s.position < 1.6);
+    au_seek_fraction(0.5);
+    CHECK(TC_WAIT_FIELD(restart, 2, 2000));
+    tc_sleep_ms(100);
+    au_get_status(&s);
+    printf("   after fraction 0.5: position %.3f\n", s.position);
+    CHECK(s.position >= 1.45 && s.position < 2.1);
+
+    CHECK(TC_WAIT_FIELD(prepare_next, 1, 3000));
+    SDL_LockMutex(tc_mutex);
+    const double at = prepare_position;
+    SDL_UnlockMutex(tc_mutex);
+    printf("   prepare-next at %.2f (1 s before the end of 3)\n", at);
+    CHECK(at > 1.8 && at < 2.2);
+    au_seek(5.0);                               // past the end: clamped, the track ends
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    e = tc_snapshot();
+    CHECK(e.eof_error == 0);
+
+    SDL_LockMutex(tc_mutex);
+    tc_on_prepare_next_hook = NULL;
+    SDL_UnlockMutex(tc_mutex);
+    CHECK(au_set_prepare_next(10) == AU_OK);
+
+    // A start past the end of the file plays nothing and ends cleanly
+    const AuPlayConfig past = { .start_seconds = 60.0 };
+    au_play(fx("long_6s.flac"), &past);
+    CHECK(TC_WAIT_FIELD(eof, 2, 3000));
+    CHECK(tc_snapshot().eof_error == 0);
+}
+
 static void test_skip_to_next(void) {
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(300);
@@ -267,6 +321,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_queue_next);
     RUN_TEST(test_prepare_next_setter);
     RUN_TEST(test_output_format_setter);
+    RUN_TEST(test_range_time);
     RUN_TEST(test_skip_to_next);
     RUN_TEST(test_pause_resume);
     RUN_TEST(test_seek);

@@ -112,7 +112,7 @@ Everything the player reports is an `AuEvent`: a type, the track's handle and pe
 int32_t handle = au_play("/music/song.flac", NULL);
 
 const AuPlayConfig cfg = { .start_seconds = 30, .length_seconds = 60 };
-au_queue("/music/next.mp3", &cfg);    // starts gaplessly when song.flac ends
+au_queue("/music/next.mp3", &cfg);    // starts gaplessly when song.flac ends; plays 0:30 to 1:30 as a 60 s track
 
 au_pause(true);
 au_seek(90);                          // seconds; au_seek_fraction(0.5) jumps to the middle
@@ -128,8 +128,13 @@ au_get_status(&st);                   // the audible track, its position and dur
 No function waits for the player: changes are queued and done in order on ffaudio's control thread, and what follows
 from them comes as events (`AU_EVENT_TRACK_STARTED`, `AU_EVENT_TRACK_OPENED`, ...). `au_get_status()` is a snapshot;
 the settings in it are the last ones set, also before the control thread has applied them. At other speeds,
-positions and durations stay in file time, while crossfade lengths and `prepare_next_seconds` stay in wall clock
-time; a speed change is heard within about half a second and never leaves a gap.
+positions and durations stay in the file's own seconds, while crossfade lengths and `prepare_next_seconds` stay in
+wall clock time; a speed change is heard within about half a second and never leaves a gap.
+
+Ranges and seeks are exact to the sample. A range plays like a track of its own (its position, duration, seeks and
+events count from its start), and consecutive ranges of one file join with nothing missing or doubled, also when the
+file is resampled to the device's rate. Lossy files start each range or seek a little earlier, so the decoder has
+settled by the first sample that plays.
 
 Devices: `au_list_devices()` lists the outputs (free the list with `au_free_devices()`), `au_get_device_name()` names
 the one in use, `au_set_device(name)` switches (NULL = follow the system default), and `AU_EVENT_DEVICES_CHANGED`

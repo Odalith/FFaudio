@@ -35,10 +35,10 @@ void track_destroy(TrackState *t);
 void track_stop(TrackState *t);
 bool track_stopped(TrackState *t);
 
-// Control thread: seek to an absolute file position (AV_TIME_BASE units)
-void track_request_seek(TrackState *t, int64_t pos_us);
+// Control thread: seek to this many seconds into the track (into its range); exact to the sample
+void track_request_seek(TrackState *t, double seconds);
 
-// Control thread: seek to a percentage of the duration, resolved once the duration is known
+// Control thread: seek to a percentage of the duration (of the range), resolved once the duration is known
 void track_request_seek_percent(TrackState *t, double percent);
 
 // Any thread: recompute the ReplayGain gain from the current settings (no-op until the tags are known)
@@ -53,14 +53,9 @@ int track_set_filters(TrackState *t, const char *filters);
 // Any thread: run avfilter_graph_send_command() on the track's user graph before the next decoded frame
 int track_queue_filter_command(TrackState *t, const char *target, const char *cmd, const char *arg);
 
-// Any thread: duration in seconds of the part that will play, -1 when unknown
+// Any thread: duration in seconds of the part that will play (the range), -1 when unknown. Positions count from 0
+// at the start of that part, so the track ends at this position.
 double track_duration(TrackState *t);
-
-// Any thread: file position (seconds) at which playback of this track ends, -1 when unknown
-double track_end_position(TrackState *t);
-
-// Any thread: first file position (seconds) this track plays from
-double track_start_position(const TrackState *t);
 
 // SDL callback: copy up to `frames` interleaved float frames into dst without blocking.
 // *eos is set when the track has delivered all of its audio. *looped is set when playback wrapped around.

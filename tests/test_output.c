@@ -656,6 +656,248 @@ static void test_restoration_filters(void) {
     free(c.samples);
 }
 
+/* ---------- sample-exact ranges and seeks ---------- */
+
+#define COUNTER_SCALE 8388608.0f // the counter fixtures hold sample n as (n + 1) / 2^23 (left) and its negative (right)
+
+// The counter value of a frame captured at volume 0.5: the file's sample index + 1 (0 = silence), -1 when the frame is
+// not a clean counter value
+static long counter_at(const Capture *c, const size_t i) {
+    const float l = c->samples[i * c->channels] * 2.0f * COUNTER_SCALE;
+    const float r = c->samples[i * c->channels + 1] * 2.0f * COUNTER_SCALE;
+    const long k = lrintf(l);
+    if (fabsf(l - (float)k) > 1e-3f || fabsf(r + l) > 1e-3f) return -1;
+    return k;
+}
+
+// Checks the run first..last (every value once, in order) starting at frame *i; advances *i past it
+static bool counter_run(const Capture *c, size_t *i, const long first, const long last, const char *what) {
+    for (long k = first; k <= last; k++, (*i)++) {
+        if (*i >= c->frames) {
+            printf("   %s: the capture ends before value %ld\n", what, k);
+            return false;
+        }
+        const long got = counter_at(c, *i);
+        if (got != k) {
+            printf("   %s: frame %zu is %ld, expected %ld\n", what, *i, got, k);
+            return false;
+        }
+    }
+    return true;
+}
+
+static size_t skip_silence(const Capture *c, size_t i) {
+    while (i < c->frames && counter_at(c, i) == 0) i++;
+    return i;
+}
+
+// The audible part is exactly the run first..last, `times` times over, and nothing else
+static bool counter_exact(const Capture *c, const long first, const long last, const int times, const char *what) {
+    size_t i = skip_silence(c, 0);
+    for (int rep = 0; rep < times; rep++)
+        if (!counter_run(c, &i, first, last, what)) return false;
+    i = skip_silence(c, i);
+    if (i != c->frames) {
+        printf("   %s: %zu frames more after the end (frame %zu is %ld)\n", what, c->frames - i, i, counter_at(c, i));
+        return false;
+    }
+    printf("   %s: values %ld..%ld x%d, every sample exactly once\n", what, first, last, times);
+    return true;
+}
+
+// Consecutive ranges of one file, each queued when the one before asks for its successor
+static const char *range_file;
+static const double *range_bounds; // n + 1 boundaries in seconds; the last 0 = to the end of the file
+static int range_count, range_next;
+
+static AuPlayConfig range_config(const int i) {
+    const double start = range_bounds[i], end = range_bounds[i + 1];
+    const AuPlayConfig pc = { .start_seconds = start, .length_seconds = end > 0 ? end - start : 0 };
+    return pc;
+}
+
+static void queue_next_range(void) {
+    SDL_LockMutex(tc_mutex);
+    const int i = range_next < range_count ? range_next++ : -1;
+    SDL_UnlockMutex(tc_mutex);
+    if (i < 0) return;
+    const AuPlayConfig pc = range_config(i);
+    au_queue(fx(range_file), &pc);
+}
+
+static void start_capture_48k(const char *name) {
+    tc_output_rate = 48000;
+    start_capture_channels(name, 2);
+    tc_output_rate = 0;
+}
+
+static Capture play_ranges(const char *name, const char *file, const double *bounds, const int n) {
+    start_capture_48k(name);
+    SDL_LockMutex(tc_mutex);
+    range_file = file;
+    range_bounds = bounds;
+    range_count = n;
+    range_next = 1;
+    tc_on_prepare_next_hook = queue_next_range;
+    SDL_UnlockMutex(tc_mutex);
+    const AuPlayConfig first = range_config(0);
+    au_play(fx(file), &first);
+    wait_until_idle(n, 10000);
+    SDL_LockMutex(tc_mutex);
+    tc_on_prepare_next_hook = NULL;
+    SDL_UnlockMutex(tc_mutex);
+    return stop_capture();
+}
+
+static void test_exact_ranges(void) {
+    // Boundaries between samples, on samples, and far from any packet boundary
+    static const double bounds[] = { 0, 0.123456789, 1.0 / 3.0, 1.0000104, 2.5, 0 };
+    const char *files[] = { "counter_48k.wav", "counter_48k.flac" };
+    for (int f = 0; f < 2; f++) {
+        Capture c = play_ranges("ranges", files[f], bounds, 5);
+        CHECK(c.rate == 48000);
+        CHECK(counter_exact(&c, 1, 192000, 1, files[f]));
+        CHECK(tc_snapshot().eof_error == 0);
+        free(c.samples);
+    }
+}
+
+static void test_exact_range_loop(void) {
+    start_capture_48k("range_loop");
+    au_set_loop_count(2);                       // three times in all
+    const AuPlayConfig pc = { .start_seconds = 1.0 / 3.0, .length_seconds = 0.25 };
+    au_play(fx("counter_48k.flac"), &pc);
+    wait_until_idle(1, 6000);
+    Capture c = stop_capture();
+    CHECK(counter_exact(&c, 16001, 28000, 3, "range 1/3 + 0.25 looped twice"));
+    CHECK(tc_snapshot().restart_loop == 2);
+    free(c.samples);
+}
+
+// Plays `pc` of the counter, seeks to `to` after 0.3 s, and checks: a run from first_k, then exactly from_k..last_k
+static void check_exact_seek(const char *what, const AuPlayConfig *pc, const double to, const long first_k,
+                             const long from_k, const long last_k) {
+    start_capture_48k("seek");
+    au_play(fx("counter_48k.wav"), pc);
+    CHECK(TC_WAIT_FIELD(started, 1, 3000));
+    tc_sleep_ms(300);
+    au_seek(to);
+    wait_until_idle(1, 6000);
+    Capture c = stop_capture();
+    size_t i = skip_silence(&c, 0);
+    long k = first_k;
+    while (i < c.frames && counter_at(&c, i) == k) { i++; k++; }  // before the seek
+    printf("   %s: played %ld..%ld, then %ld\n", what, first_k, k - 1, i < c.frames ? counter_at(&c, i) : 0);
+    CHECK(k > first_k);
+    CHECK(counter_run(&c, &i, from_k, last_k, what));
+    CHECK(skip_silence(&c, i) == c.frames);
+    CHECK(TC_WAIT_FIELD(restart, 1, 100));
+    free(c.samples);
+}
+
+static void test_exact_seek(void) {
+    check_exact_seek("seek to 1.5 s", NULL, 1.5, 1, 72001, 192000);
+    // In a range, seconds count from its start: 0.5 s + 1.0 s is sample 72000
+    const AuPlayConfig pc = { .start_seconds = 0.5, .length_seconds = 2.0 };
+    check_exact_seek("range 0.5 + 2, seek to 1 s", &pc, 1.0, 24001, 72001, 120000);
+}
+
+// Lossy files: ranges and seeks start from the decoder's preroll, so they match playing the whole file to within the
+// codec's noise, at the exact sample. `w` is the whole file, `x` part of it that should equal w from w_at on.
+static int first_loud(const Capture *c) {
+    for (size_t i = 0; i < c->frames; i++)
+        if (fabsf(c->samples[i * c->channels]) > 0.1f) return (int)i;
+    return -1;
+}
+
+// The offset (within +-search) at which x best matches w from w_at, and the largest difference there
+static int best_offset(const Capture *w, const int w_at, const Capture *x, const int x_at, const int search,
+                       float *max_err) {
+    int best = 0;
+    double best_e = INFINITY;
+    for (int d = -search; d <= search; d++) {
+        double e = 0;
+        for (int i = 0; i < 4096; i++) {
+            const long a = (long)w_at + d + i, b = (long)x_at + i;
+            if (a < 0 || a >= (long)w->frames || b >= (long)x->frames) { e = INFINITY; break; }
+            const double diff = w->samples[a * w->channels] - x->samples[b * x->channels];
+            e += diff * diff;
+        }
+        if (e < best_e) { best_e = e; best = d; }
+    }
+    float m = 0;
+    for (long i = 0; x_at + i < (long)x->frames && w_at + best + i < (long)w->frames; i++)
+        m = fmaxf(m, fabsf(w->samples[(w_at + best + i) * w->channels] - x->samples[(x_at + i) * x->channels]));
+    *max_err = m;
+    return best;
+}
+
+static void test_lossy_ranges(void) {
+    static const double bounds[] = { 0, 1.0 / 3.0, 1.0000104, 0 };
+    const char *files[] = { "chirp_48k.mp3", "chirp_48k.opus" };
+    for (int f = 0; f < 2; f++) {
+        start_capture_48k("lossy_whole");
+        au_play(fx(files[f]), NULL);
+        wait_until_idle(1, 8000);
+        Capture w = stop_capture();
+        const int w0 = first_loud(&w);
+        REQUIRE(w0 >= 0);
+
+        Capture j = play_ranges("lossy_join", files[f], bounds, 3);
+        float err_j = 0;
+        const int dj = best_offset(&w, w0, &j, first_loud(&j), 200, &err_j);
+        size_t fj, lj, fw, lw;
+        audible_range(&j, &fj, &lj);
+        audible_range(&w, &fw, &lw);
+
+        start_capture_48k("lossy_range");
+        const AuPlayConfig pc = { .start_seconds = 1.5 };
+        au_play(fx(files[f]), &pc);
+        wait_until_idle(1, 8000);
+        Capture r = stop_capture();
+        size_t fr, lr;
+        audible_range(&r, &fr, &lr);
+        float err_r = 0;
+        const int dr = best_offset(&w, w0 + 72000, &r, (int)fr, 2000, &err_r);
+
+        printf("   %s: joined ranges: offset %d, largest difference %.5f, %zu vs %zu frames; "
+               "from 1.5 s: offset %d, largest difference %.5f\n", files[f], dj, err_j, lj - fj, lw - fw, dr, err_r);
+        CHECK(dj == 0 && err_j < 0.02f);
+        CHECK(labs((long)(lj - fj) - (long)(lw - fw)) <= 1);
+        CHECK(dr == 0 && err_r < 0.02f);
+        free(w.samples);
+        free(j.samples);
+        free(r.samples);
+    }
+}
+
+// A 44.1 kHz file on a 48 kHz device: each range has its own resampler, so the join is not bit-exact, but nothing
+// is lost or doubled and there is no gap or click
+static void test_resampled_ranges(void) {
+    static const double bounds[] = { 0, 1.0 / 3.0, 2.5, 0 };
+    start_capture_48k("rs_whole");
+    au_play(fx("long_6s.flac"), NULL);
+    wait_until_idle(1, 10000);
+    Capture w = stop_capture();
+    Capture j = play_ranges("rs_join", "long_6s.flac", bounds, 3);
+    size_t fw, lw, fj, lj;
+    audible_range(&w, &fw, &lw);
+    audible_range(&j, &fj, &lj);
+    const float jump = largest_jump(&j, fj, lj), step = max_sine_step(&j, fj, lj);
+    printf("   44.1 kHz ranges on 48 kHz: %zu frames (whole file %zu), longest silence %zu, largest step %.4f (max %.4f)\n",
+           lj - fj, lw - fw, longest_silence(&j, fj, lj), jump, step);
+    // And it is what playing the whole file gives, to within the resampler's rounding
+    float err = 0;
+    const int d = best_offset(&w, (int)fw, &j, (int)fj, 50, &err);
+    printf("   compared with the whole file: offset %d, largest difference %.6f\n", d, err);
+    CHECK(labs((long)(lj - fj) - (long)(lw - fw)) <= 2);
+    CHECK(longest_silence(&j, fj, lj) < 2);
+    CHECK(jump <= step);
+    CHECK(d == 0 && err < 1e-4f);
+    free(w.samples);
+    free(j.samples);
+}
+
 /* ---------- ReplayGain ---------- */
 
 // Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
@@ -1010,6 +1252,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_bad_custom_downmix_rejected);
     RUN_TEST(test_multichannel_routing);
     RUN_TEST(test_upmix);
+    RUN_TEST(test_exact_ranges);
+    RUN_TEST(test_exact_range_loop);
+    RUN_TEST(test_exact_seek);
+    RUN_TEST(test_lossy_ranges);
+    RUN_TEST(test_resampled_ranges);
     RUN_TEST(test_restoration_filters);
     RUN_TEST(test_replaygain_levels);
     RUN_TEST(test_replaygain_from_first_sample);

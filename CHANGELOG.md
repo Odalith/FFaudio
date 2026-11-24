@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.2.0 (unreleased)
+
+### Fixed
+- Play ranges (`AuPlayConfig.start_seconds` / `.length_seconds`) and seeks are exact to the sample. A range used to
+  start at the nearest packet and end up to a packet late; now consecutive ranges of one file join with nothing
+  missing or doubled, also when the file is resampled to the device's rate (each side of the join keeps a little
+  audio for the resampler and the exact cut is made after it). Lossy files decode from a little earlier (their
+  preroll), so seeks and range starts match playing straight through.
+- A range now plays like a track of its own: the position, `au_seek()`, `AU_EVENT_RESTARTED`, prepare-next and the
+  end crossfade count from the range's start, as the duration and `au_seek_fraction()` already did (positions used to
+  be file time).
+- Loops of tracks shorter than half a second are reported (`AU_EVENT_RESTARTED` with `from_loop`).
+
 ## 3.1.0 (2026-11-23)
 
 ### Added
