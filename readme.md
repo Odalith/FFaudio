@@ -284,6 +284,41 @@ playlist (`#EXT-X-` lines) is a stream rather than a list, so it gives one entry
 may only list URLs (local paths in it are left out), the same rule the player applies to streams.
 `au_playlist_parse()` takes text already in memory. Neither needs `au_init()`.
 
+### Cue sheets and chapters
+Albums ripped to one file with a `.cue` sheet, files with an embedded cue sheet, and audiobooks or mixes with
+chapters all list tracks inside one file. `au_cue_read()` reads any of them; each track is a range of a file:
+```c
+#include <ffaudio_playlist.h>
+
+static const AuCueSheet *album;
+static int next_track;
+
+static AuPlayConfig track_config(const AuCueTrack *t) {
+    const AuPlayConfig pc = { .start_seconds = t->start_seconds, .length_seconds = t->length_seconds,
+                              .replaygain = &t->replaygain };   // the sheet's REM REPLAYGAIN_* values, if any
+    return pc;
+}
+
+// in on_event, case AU_EVENT_PREPARE_NEXT:
+if (next_track < album->count) {
+    const AuCueTrack *t = album->tracks[next_track++];
+    const AuPlayConfig pc = track_config(t);
+    au_queue(t->path, &pc);
+}
+
+album = au_cue_read("/music/Album/album.cue", NULL);   // or the .flac / .m4b itself
+const AuCueTrack *first = album->tracks[next_track++];
+const AuPlayConfig pc = track_config(first);
+au_play(first->path, &pc);
+printf("%d. %s - %s\n", first->number, first->performer, first->title);
+// au_cue_release(album) once nothing uses its strings any more (the ReplayGain values are copied by au_play())
+```
+The tracks join without a gap and without a sample missing or doubled. A track starts at its `INDEX 01`; a pregap
+(`INDEX 00`) plays at the end of the track before, so the album plays straight through. For an audio file, the
+embedded `CUESHEET` tag (FLAC, WavPack, APE) comes first, then a FLAC `CUESHEET` block, then chapters (M4B/M4A,
+Matroska, MP3 `CHAP` frames). A sheet written for a `.wav` that was later encoded finds the `.flac` (or `.wv`, `.ape`,
+...) next to it. `au_playlist_read()` refuses cue sheets (`AU_ERR_UNSUPPORTED`), as their lines are not paths.
+
 ### 5. ReplayGain and metadata
 ```c
 const AuReplayGainConfig rg = {

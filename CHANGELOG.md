@@ -2,6 +2,14 @@
 
 ## 3.2.0 (unreleased)
 
+### Added
+- Cue sheets and chapters (`ffaudio_playlist.h`): `au_cue_read()` reads the tracks of a `.cue` file, of an audio file
+  with an embedded cue sheet (the `CUESHEET` tag, or a FLAC `CUESHEET` block, read for its exact `INDEX 01`), or of an
+  audio file's chapters (M4B/M4A, Matroska, MP3 `CHAP`), as an `AuCueSheet` of `AuCueTrack`s: path, start and length
+  for `AuPlayConfig`, title, performer, songwriter, ISRC and the sheet's `REM REPLAYGAIN_*` values. `au_cue_parse()`
+  takes text in memory, `au_cue_release()` frees it. Tracks are reached through pointers (`tracks[i]`), so
+  `AuCueTrack` can gain fields. A FILE that is missing is looked for with other audio extensions next to it.
+
 ### Fixed
 - Play ranges (`AuPlayConfig.start_seconds` / `.length_seconds`) and seeks are exact to the sample. A range used to
   start at the nearest packet and end up to a packet late; now consecutive ranges of one file join with nothing
@@ -12,6 +20,10 @@
   end crossfade count from the range's start, as the duration and `au_seek_fraction()` already did (positions used to
   be file time).
 - Loops of tracks shorter than half a second are reported (`AU_EVENT_RESTARTED` with `from_loop`).
+- A seek the demuxer can not do (some FLAC files without a seek table, close to their end) decodes from the start up
+  to the target instead of playing nothing.
+- `au_playlist_read()` / `au_playlist_parse()` refuse cue sheets with `AU_ERR_UNSUPPORTED` (their lines used to be
+  read as paths).
 
 ## 3.1.0 (2026-11-23)
 

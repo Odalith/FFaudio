@@ -70,6 +70,8 @@ add_library(ffaudio
         lib/input.c
         lib/ogg_chain.c
         lib/playlist.c
+        lib/text_list.c
+        lib/cue.c
         lib/picture.c
         lib/numbers.c
         lib/events.c
@@ -239,7 +241,7 @@ if(FFAUDIO_BUILD_TESTS)
         if(WIN32)
             string(APPEND FFAUDIO_TEST_DATA_ENV ";LOCALAPPDATA=${CMAKE_BINARY_DIR}/localappdata")
         endif()
-        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network test_playlist)
+        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network test_playlist test_cue)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})

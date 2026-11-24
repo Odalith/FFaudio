@@ -103,6 +103,22 @@ chirp="0.3*cos(2*PI*(200*t+400*t*t))"
 ff -f lavfi -i "aevalsrc=${chirp}|${chirp}:s=48000:d=4" -c:a libmp3lame -b:a 192k chirp_48k.mp3
 ff -f lavfi -i "aevalsrc=${chirp}|${chirp}:s=48000:d=4" -c:a libopus -b:a 128k chirp_48k.opus
 
+# Cue sheets inside files: a 6 s CD-format FLAC with a CUESHEET block, and one with a CUESHEET tag (metaflac, from
+# the flac package; the tests skip these when it is missing). Track 2 has a pregap: INDEX 00 at 1.667 s, INDEX 01 at
+# 2.0 s. And chapters in M4A, MKA and MP3 (ID3 CHAP): 0, 2 and 4.5 s.
+sine cd_6s.flac 440 6 44100 2 -sample_fmt s16
+printf 'PERFORMER "Band"\r\nTITLE "Album"\r\nFILE "image.wav" WAVE\r\n  TRACK 01 AUDIO\r\n    TITLE "One"\r\n    INDEX 01 00:00:00\r\n  TRACK 02 AUDIO\r\n    TITLE "Two"\r\n    INDEX 00 00:01:50\r\n    INDEX 01 00:02:00\r\n  TRACK 03 AUDIO\r\n    TITLE "Three"\r\n    INDEX 01 00:04:37\r\n' > cd_6s.cue
+if command -v metaflac > /dev/null; then
+    cp cd_6s.flac cue_block.flac && metaflac --import-cuesheet-from=cd_6s.cue cue_block.flac
+    cp cd_6s.flac cue_tag.flac && metaflac --set-tag-from-file=CUESHEET=cd_6s.cue cue_tag.flac
+fi
+rm -f cd_6s.cue
+printf ';FFMETADATA1\nalbum=Book\nartist=Reader\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=2000\ntitle=Intro\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=2000\nEND=4500\ntitle=Chapter One\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=4500\nEND=6000\ntitle=End\n' > chapters.txt
+ff -i cd_6s.flac -i chapters.txt -map 0:a -map_metadata 1 -map_chapters 1 -c:a aac chapters.m4a
+ff -i cd_6s.flac -i chapters.txt -map 0:a -map_metadata 1 -map_chapters 1 -c:a flac chapters.mka
+ff -i cd_6s.flac -i chapters.txt -map 0:a -map_metadata 1 -map_chapters 1 -c:a libmp3lame chapters.mp3
+rm -f chapters.txt
+
 # Restoration: a 440 Hz sine (1/8) with a 0.6 click every 8000 samples, and a 1/8 sine with a 20 ms burst at 0.3
 # every 0.25 s, hard-clipped at 0.25 (like a loud master: a few percent of the samples clipped; adeclip's cost grows
 # steeply with that share)

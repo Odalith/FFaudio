@@ -607,6 +607,20 @@ static void range_set_rate(TrackState *t, const int rate) {
     t->range_end_sample = t->range_len_s > 0 ? llround((t->range_start_s + t->range_len_s) * rate) : INT64_MAX;
 }
 
+// Seek to the sample *base (from the container's start). When the demuxer can not (a FLAC file without a seek table,
+// close to its end), go back to the start instead: the trimmer then decodes up to the target, exact but slower.
+// *base is where the demuxer went. < 0 when neither worked.
+static int seek_or_rewind(TrackState *t, int64_t *base) {
+    if (seek_file(t, llrint(sample_seconds(t, *base) * 1e6)) >= 0) return 0;
+    if (*base > 0 && seek_file(t, 0) >= 0) {
+        ff_log(AU_LOG_INFO, "%s: could not seek to %.3f s, decoding from the start", t->filename,
+               sample_seconds(t, *base));
+        *base = 0;
+        return 0;
+    }
+    return -1;
+}
+
 // One more loop to play? Takes it from the count in one step: au_set_loop_count() can store a new count at any time,
 // and a separate read and decrement could turn its 0 into -1 (loop forever)
 static bool take_loop(TrackState *t) {
@@ -625,8 +639,8 @@ typedef enum DemuxEnd { DEMUX_LOOPED, DEMUX_ENDED, DEMUX_ENDED_BEFORE } DemuxEnd
 static DemuxEnd handle_demux_end(TrackState *t) {
     if (!SDL_AtomicGet(&t->had_error) && take_loop(t)) {
         // A range loops from its start, decoding the preroll again (the trimmer drops it); no flush, as above
-        const int64_t base = t->has_range ? seek_base_sample(t, t->range_start_sample) : 0;
-        if (seek_file(t, t->has_range ? llrint(sample_seconds(t, base) * 1e6) : 0) >= 0) {
+        int64_t base = t->has_range ? seek_base_sample(t, t->range_start_sample) : 0;
+        if ((t->has_range ? seek_or_rewind(t, &base) : seek_file(t, 0)) >= 0) {
             SDL_AtomicAdd(&t->loops_started, 1);
             reset_timestamps(t); // the jump back of a loop is meant
             if (t->has_range && !t->network) {
@@ -675,15 +689,15 @@ static void process_seek_request(TrackState *t) {
     // the trimmer then cuts to
     if (t->duration_s >= 0) seek_pos = FFMIN(seek_pos, t->duration_s);
     int64_t target = AV_NOPTS_VALUE, base = AV_NOPTS_VALUE;
-    int64_t seek_us;
+    int r;
     if (t->range_rate > 0) {
         target = t->range_start_sample + llround(seek_pos * t->range_rate);
         if (t->range_end_sample != INT64_MAX) target = FFMIN(target, t->range_end_sample);
         base = seek_base_sample(t, target);
-        seek_us = llrint(sample_seconds(t, base) * 1e6);
+        r = seek_or_rewind(t, &base);
     }
-    else seek_us = llrint((t->origin_s + seek_pos) * 1e6);
-    if (seek_file(t, seek_us) < 0) {
+    else r = seek_file(t, llrint((t->origin_s + seek_pos) * 1e6));
+    if (r < 0) {
         ff_log(AU_LOG_ERROR, "%s: error while seeking", t->filename);
         return;
     }
@@ -899,12 +913,13 @@ static void open_range(TrackState *t) {
     }
     t->duration_s = d >= 0 ? FFMAX(0.0, d) : -1;
 
-    // Start the decoder its preroll before the range; where seeking is not possible (a chained Ogg file, or a
-    // failed seek) the trimmer drops everything before the start instead (exact, only slower to start)
+    // Start the decoder its preroll before the range; where seeking is not possible (a chained Ogg file, or a seek
+    // the demuxer fails) it decodes from the start and the trimmer drops everything before the range (exact, only
+    // slower to start)
     if (t->range_start_sample > 0 && !t->chained_ogg) {
-        const int64_t base = seek_base_sample(t, t->range_start_sample);
-        if (seek_file(t, llrint(sample_seconds(t, base) * 1e6)) < 0)
-            ff_log(AU_LOG_WARNING, "%s: could not seek to %.3f s, decoding from the start", t->filename, t->origin_s);
+        int64_t base = seek_base_sample(t, t->range_start_sample);
+        if (seek_or_rewind(t, &base) < 0)
+            ff_log(AU_LOG_WARNING, "%s: could not seek to %.3f s", t->filename, t->origin_s);
         else t->trim.base = base;
     }
 }

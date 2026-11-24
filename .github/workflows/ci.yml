@@ -43,7 +43,7 @@ jobs:
           mkdir -p ~/apt-cache/partial
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends -o Dir::Cache::Archives="$HOME/apt-cache" \
-            ninja-build ffmpeg libsdl2-dev \
+            ninja-build ffmpeg flac libsdl2-dev \
             libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev libswresample-dev
           # apt leaves root-owned files behind; the cache action needs to read them
           sudo rm -f ~/apt-cache/lock
@@ -81,8 +81,9 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-SDL2
             mingw-w64-ucrt-x86_64-ffmpeg
+            mingw-w64-ucrt-x86_64-flac
 
-      # The test fixtures are generated with MSYS2's ffmpeg.exe (bash comes with MSYS2)
+      # The test fixtures are generated with MSYS2's ffmpeg.exe (and metaflac.exe) (bash comes with MSYS2)
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=none
 

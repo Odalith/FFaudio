@@ -3,6 +3,7 @@
  * sample by sample (gapless joins, crossfade length, fades, volume ramps, filters).
  */
 #include "test_common.h"
+#include "../lib/ffaudio_playlist.h"
 #include <locale.h>
 #include <math.h>
 #ifndef _WIN32
@@ -898,6 +899,33 @@ static void test_resampled_ranges(void) {
     free(j.samples);
 }
 
+// A cue sheet over the counter file, its tracks played one after another: exactly the whole file
+static void test_cue_playback(void) {
+    char path[1200];
+    snprintf(path, sizeof(path), "%s/counter_play.cue", tc_fixture_dir);
+    FILE *f = fopen(path, "wb");
+    REQUIRE(f);
+    fputs("FILE \"counter_48k.flac\" WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"
+          "  TRACK 02 AUDIO\n    INDEX 01 00:01:10\n  TRACK 03 AUDIO\n    INDEX 00 00:02:00\n    INDEX 01 00:02:37\n"
+          "  TRACK 04 AUDIO\n    INDEX 01 00:03:74\n", f);
+    fclose(f);
+    const AuCueSheet *cue = au_cue_read(path, NULL);
+    remove(path);
+    REQUIRE(cue && cue->count == 4);
+    static double bounds[5];
+    for (int i = 0; i < 4; i++) {
+        bounds[i] = cue->tracks[i]->start_seconds;
+        if (i < 3) CHECK(fabs(cue->tracks[i]->start_seconds + cue->tracks[i]->length_seconds -
+                              cue->tracks[i + 1]->start_seconds) < 1e-12);
+    }
+    bounds[4] = 0;
+    CHECK(cue->tracks[3]->length_seconds == 0);
+    au_cue_release(cue);
+    Capture c = play_ranges("cue", "counter_48k.flac", bounds, 4);
+    CHECK(counter_exact(&c, 1, 192000, 1, "cue sheet tracks"));
+    free(c.samples);
+}
+
 /* ---------- ReplayGain ---------- */
 
 // Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
@@ -1257,6 +1285,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_exact_seek);
     RUN_TEST(test_lossy_ranges);
     RUN_TEST(test_resampled_ranges);
+    RUN_TEST(test_cue_playback);
     RUN_TEST(test_restoration_filters);
     RUN_TEST(test_replaygain_levels);
     RUN_TEST(test_replaygain_from_first_sample);
