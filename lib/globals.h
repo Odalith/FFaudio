@@ -27,7 +27,7 @@
  *                     (float32 at the output rate/layout)
  *  - reader thread  : network tracks only: reads ahead into audio_queue, so a stalled connection does not stop the
  *                     worker from decoding what is queued
- *  - SDL callback   : mixer, takes from the rings without locks, never allocates, frees or signals
+ *  - SDL callback   : mixer, takes from the rings without locks, never blocks, allocates or frees; fills the meter tap
  * Mixer slots (Mixer.current/next/outgoing) are only changed while holding the SDL audio device lock.
  */
 

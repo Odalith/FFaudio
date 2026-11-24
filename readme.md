@@ -26,6 +26,11 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
   tracks or by probing a file without playing it, and embedded cover art (FLAC, MP3, M4A, Ogg/Opus, APE)
 - **Playlist files**: `.m3u`, `.m3u8` and `.pls`, local or from a URL (internet radio stations), read into a list
   of entries for the player
+- **Cue sheets and chapters**: albums in one file with a `.cue` sheet (or one embedded in the file) and audiobooks
+  with chapters play as separate tracks that join without a gap and without a sample lost; any range of a file plays
+  like a track of its own, and seeks are exact to the sample
+- **Level meters and spectrum**: peak and RMS per channel and an FFT spectrum of what is being heard, for VU meters
+  and visualizers, read from any thread without ever holding up the audio
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers for
   graphic and parametric EQ (AutoEq / EqualizerAPO profiles), bass/treble, balance, width, mono, channel swap,
   crossfeed, bs2b, compressor and limiter, and click and clipping repair for damaged sources
@@ -472,6 +477,29 @@ au_gain_cache_request_album(album_paths, n, AU_SCAN_PREFETCH);
 The cache and the queue work without `au_init()`, survive `au_shutdown()`, are thread-safe, and paths are
 compared as exact strings (pass them the same way every time, e.g. always absolute).
 
+### Level meters and spectrum
+```c
+#include <ffaudio_meters.h>
+
+// On a UI timer, 30 to 60 times a second
+AuLevels lv;
+au_get_levels(0.05, &lv);                       // the last 50 ms heard
+for (int c = 0; c < lv.channels; c++)
+    draw_meter(c, lv.peak[c], lv.rms[c]);       // linear, 1.0 = full scale; add your own ballistics
+
+AuSpectrum *sp = au_spectrum_create(2048);      // once per visualizer
+float mags[2048 / 2 + 1], bars[32];
+int rate;
+au_spectrum_read(sp, -1, mags, &rate);           // all channels; bin k is k * rate / 2048 Hz
+au_spectrum_bands(mags, 2048, rate, 30, 16000, bars, 32);   // 32 log-spaced bars
+au_spectrum_free(sp);
+```
+They show the music, not the volume knob: the mix after ReplayGain, fades and crossfades, before the master volume and
+mute, and silence while paused or when nothing plays. What they read is what is being heard (the device's latency is
+taken off). The audio callback copies the mix into a history buffer without ever waiting; readers copy from it and
+check nothing was overwritten meanwhile, so any thread can read, as often as it likes. The first call turns this on;
+programs that never call them pay nothing. The FFT runs on the thread that calls `au_spectrum_read()`.
+
 ### 7. Surround files and the output format
 By default the output uses the device's own channel count and sample rate. Files with more channels than the
 output are mixed down; files with fewer are spread onto the matching speakers.
@@ -578,7 +606,8 @@ macOS allocators return memory to the system more readily.
 - `lib/events.c`: the event queue behind `au_poll_event()`.
 - `lib/track.c`: the per-track worker (and a reader thread for network streams), filter graphs, and the
   non-blocking `track_pull()`.
-- `lib/output.c`: device handling and the mixer (SDL callback). It never blocks, allocates, frees or signals.
+- `lib/output.c`: device handling and the mixer (SDL callback). It never blocks, allocates or frees; it only posts the
+  control thread's semaphore (which never blocks) when it has an event for it.
 - `lib/sample_ring.c`: the lock-free ring between a track's decoder and the mixer.
 - `lib/filtergraph.c`: the convert graph (decoder format → output format) and the user graph (filters).
 - `lib/filters.c`: the filter-string builder (`ffaudio_filters.h`).
@@ -617,11 +646,11 @@ plays a folder on real hardware for listening tests.
 - [x] Embedded cover art
 - [x] Playlist files (.m3u, .m3u8, .pls)
 - [ ] Playlist organizer (an ordered list with append/insert helpers and history)
-- [ ] Level meters and spectrum
+- [x] Level meters and spectrum
 - [x] Measure R128 / ReplayGain values for files (loudness analysis; read only)
 - [x] Playback speed (tempo with and without pitch change)
 - [x] Network streams: HTTP(S) files, HLS, Icecast/SHOUTcast with "now playing", buffering, reconnects
-- [ ] Cue sheets / gapless playback of track ranges inside one file
+- [x] Cue sheets and chapters, sample-exact gapless playback of track ranges inside one file
 - [x] Verified multichannel (5.1/7.1) playback, configurable downmixing and upmixing
 - [x] Device added/removed notifications for the application
 - [ ] SDL3 port, or native audio backends instead of SDL

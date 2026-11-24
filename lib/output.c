@@ -19,7 +19,8 @@
 /*
  * Output device and mixer.
  *
- * The SDL callback runs with the device lock held. It never blocks, allocates, frees or signals: it
+ * The SDL callback runs with the device lock held. It never blocks, allocates or frees (it posts the control
+ * thread's semaphore, which never blocks, only when it has an event for it): it
  * takes float frames from the rings of the tracks in the mixer slots (lib/sample_ring.c), applies fades
  * and gain, and converts to the device format (with TPDF dither for integer formats). The status for the
  * getters goes out with a try-lock that skips a period rather than wait. Slot changes it makes itself (gapless
