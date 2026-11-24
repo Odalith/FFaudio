@@ -31,8 +31,9 @@
  *   -P  parametric EQ from an EqualizerAPO / AutoEq ParametricEQ.txt file (headphone correction)
  *   -L  limiter at -1 dBFS;  -C  compressor: gentle (levelling) or night (low-volume listening)
  *
- * Plays the files under <music-dir> (shuffled with -s), queueing the next one from on_prepare_next. A .cue sheet, or
- * an audio file with an embedded cue sheet or chapters, plays its tracks in order instead (ranges of the file).
+ * Plays the files under <music-dir> (shuffled with -s; cover art, playlists and other non-audio files are skipped),
+ * queueing the next one from on_prepare_next. A .cue sheet, or an audio file with an embedded cue sheet or chapters,
+ * plays its tracks in order instead (ranges of the file); any other audio file plays on its own.
  * Keys (no Enter needed in a terminal): n = next, p = pause/resume, s = stop, m = mute, + / - = volume,
  * > / < = seek +/-10 s, [ / ] = slower / faster, backslash = speed keeps / changes the pitch,
  * e = next equalizer preset, a = parametric EQ (-P) on/off, 1 / 2 = bass -/+, 3 / 4 = treble -/+,
@@ -202,7 +203,23 @@ static void print_help(void) {
            "      space=position  h=help  q=quit\n");
 }
 
+// Files a music folder holds besides audio: cover art, rip logs, playlists, cue sheets (play those by name)
+static bool is_not_audio(const char *path) {
+    static const char *const skip[] = { ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".txt", ".nfo", ".log",
+                                        ".cue", ".m3u", ".m3u8", ".pls", ".pdf", ".db", ".ini", ".sfv", ".md5",
+                                        ".accurip", ".lrc", ".url", NULL };
+    const char *dot = strrchr(path, '.');
+    if (!dot || strchr(dot, '/') || strchr(dot, '\\')) return false;
+    for (int i = 0; skip[i]; i++) {
+        const char *a = dot, *b = skip[i];
+        while (*a && *b && (*a | 0x20) == (*b | 0x20)) { a++; b++; }
+        if (!*a && !*b) return true;
+    }
+    return false;
+}
+
 static int add_file(const char *path) {
+    if (!au_is_network_url(path) && is_not_audio(path)) return 0;
     if (file_count == file_cap) {
         file_cap = file_cap ? file_cap * 2 : 128;
         char **n = realloc(files, file_cap * sizeof(char *));
@@ -326,6 +343,11 @@ static char *dup_or_null(const char *s) { return s && s[0] ? strdup(s) : NULL; }
 static bool load_cue(const char *path) {
     int err = 0;
     const AuCueSheet *cue = au_cue_read(path, &err);
+    if (!cue && err == AU_ERR_NOTHING_TO_DO) {
+        // A plain audio file: play just that
+        au_cue_release(cue);
+        return add_file(path) == 0 && file_count == 1;
+    }
     if (!cue || cue->count == 0) {
         fprintf(stderr, "%s: no cue sheet or chapters (%d)\n", path, err);
         au_cue_release(cue);
