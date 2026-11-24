@@ -37,8 +37,9 @@
 - Loops of tracks shorter than half a second are reported (`AU_EVENT_RESTARTED` with `from_loop`).
 - A track that could not be played (cover art in a music folder, a damaged file) and was the current one with
   nothing queued could end without `AU_EVENT_PREPARE_NEXT`, so a player that queues on that event stopped there. Its
-  end could reach the control thread before its failure, which then found the track already gone. The player now
-  asks for the next track whenever the current one ends with nothing queued and it was never asked. Found on Windows.
+  end and its failure reach the control thread separately, and in either order one of them found the track already
+  dealt with and asked nothing. Now whichever comes first asks for the next track when nothing plays or is queued and
+  nobody asked yet. Found on Windows.
 - A track no longer starts with only its first frames decoded: it waits for 1/10 s (or all of it, if shorter). With
   a filter that holds audio back (`adeclip`) and SDL3 (or sdl2-compat, as the Windows release uses), which asks for
   a lot of audio at once when the device starts, the first frames played and then 33 ms of silence followed.

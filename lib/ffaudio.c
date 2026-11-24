@@ -823,6 +823,19 @@ static int cmd_set_output_format(AudioPlayer *ap, const Msg *msg) {
 //| Track messages and mixer events                     |
 //+-----------------------------------------------------+
 
+// A track that was current has ended and nothing plays or waits after it: ask the application for the next one, unless
+// it was asked already for this track (prepare-next before the end). Called from both ends of a track, whichever
+// comes first: its failure message, or the mixer's end event.
+static void ask_for_next_if_idle(AudioPlayer *ap, TrackState *t) {
+    lock_mixer(ap);
+    const bool idle = !ap->mixer.current && !ap->mixer.next;
+    unlock_mixer(ap);
+    if (idle && !t->prepare_next_sent) {
+        t->prepare_next_sent = true;
+        note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = 0 });
+    }
+}
+
 static void msg_track_failed(AudioPlayer *ap, TrackState *t) {
     if (!t || t->ended) return;
     lock_mixer(ap);
@@ -837,9 +850,13 @@ static void msg_track_failed(AudioPlayer *ap, TrackState *t) {
 
     end_track(ap, t, END_ERROR);
 
-    // Give the application a chance to queue something else
-    if ((was_next || was_current) && !have_next)
+    // Give the application a chance to queue something else. A failed current track the mixer has let go of already
+    // (it saw the end first) is in no slot any more: then its end event is skipped, so this is the only chance.
+    if ((was_next || was_current) && !have_next) {
+        t->prepare_next_sent = true;
         note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = cur ? cur->handle : 0 });
+    }
+    else if (!was_next && !was_current) ask_for_next_if_idle(ap, t);
     update_device_running(ap);
 }
 
@@ -915,16 +932,9 @@ static void process_mixer_events(AudioPlayer *ap) {
                 break;
             case MIX_EV_TRACK_ENDED: {
                 end_track(ap, t, END_NATURAL);
-                // The current track ended with nothing after it, and the application was never asked for the next
-                // one: a track that failed before it opened (whose failure message can arrive after this event), or
-                // one too short for the usual warning. Ask now, or playback stops here.
-                lock_mixer(ap);
-                const bool idle = !ap->mixer.current && !ap->mixer.next;
-                unlock_mixer(ap);
-                if (idle && !t->prepare_next_sent) {
-                    t->prepare_next_sent = true;
-                    note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = 0 });
-                }
+                // The application may never have been asked for the next track: one that failed before it opened
+                // (its failure message can come after this), or one too short for the usual warning
+                ask_for_next_if_idle(ap, t);
                 break;
             }
             case MIX_EV_FADE_DONE:
