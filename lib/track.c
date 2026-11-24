@@ -36,6 +36,7 @@
 #include "filtergraph.h"
 #include "packet_queue_utils.h"
 #include "libavutil/opt.h"
+#include "chaos.h"
 
 // Network tracks read ahead by time (max_buffer_seconds); this caps the bytes for very high bit rates
 #define NET_MAX_QUEUE_SIZE (32 * 1024 * 1024)
@@ -218,6 +219,7 @@ static bool add_icy_headers(AVFormatContext *ic, MediaDraft *info) {
 // Network tracks: end the wait for data once enough is queued (or nothing more will come). The reader calls it for
 // every packet; the worker after writing audio, since the reader sleeps while its queue is full or at the end.
 static void update_buffering(TrackState *t) {
+    CHAOS("update_buffering");
     if (!t->network) return;
     const double s = queued_seconds(t);
     SDL_AtomicSet(&t->buffered_ms, (int)(s * 1000));
@@ -242,6 +244,7 @@ static void wait_ms(TrackState *t, int ms) {
 }
 
 static void wake_read_thread(TrackState *t) {
+    CHAOS("wake_read_thread");
     SDL_LockMutex(t->wait_mutex);
     SDL_CondSignal(t->continue_read_thread);
     SDL_UnlockMutex(t->wait_mutex);
@@ -250,6 +253,7 @@ static void wake_read_thread(TrackState *t) {
 // Whoever reads (worker or reader) waits for a seek request or an abort, or `ms` at most. The check is made under
 // wait_mutex, which the requests signal under, so none is missed.
 static void wait_for_request(TrackState *t, const int ms) {
+    CHAOS("wait_for_request");
     SDL_LockMutex(t->wait_mutex);
     if (!SDL_AtomicGet(&t->abort_request) && !SDL_AtomicGet(&t->seek_pending))
         SDL_CondWaitTimeout(t->continue_read_thread, t->wait_mutex, (Uint32)ms);
@@ -348,6 +352,7 @@ static void free_stream_meta(StreamMeta *m) {
 }
 
 void track_stop(TrackState *t) {
+    CHAOS("track_stop");
     if (!t || !t->worker_tid) return;
     SDL_AtomicSet(&t->abort_request, 1);
     packet_queue_abort(&t->audio_queue);
@@ -364,6 +369,7 @@ bool track_stopped(TrackState *t) {
 }
 
 void track_destroy(TrackState *t) {
+    CHAOS("track_destroy");
     if (!t) return;
 
     if (t->worker_tid) {
@@ -416,6 +422,7 @@ void track_destroy(TrackState *t) {
 }
 
 void track_request_seek(TrackState *t, double seconds) {
+    CHAOS("track_request_seek");
     if (!(seconds > 0)) seconds = 0;
     SDL_LockMutex(t->seek_mutex);
     t->seek_pos = seconds;
@@ -428,6 +435,7 @@ void track_request_seek(TrackState *t, double seconds) {
 }
 
 void track_request_seek_percent(TrackState *t, const double percent) {
+    CHAOS("track_request_seek_percent");
     // Resolved by the read thread, which knows the duration once the file is open
     SDL_LockMutex(t->seek_mutex);
     t->pending_seek_percent = percent;
@@ -438,6 +446,7 @@ void track_request_seek_percent(TrackState *t, const double percent) {
 }
 
 void track_update_gain(TrackState *t, const bool late) {
+    CHAOS("track_update_gain");
     AudioPlayer *ap = t->ap;
     SDL_LockMutex(ap->format_mutex);
     const AuReplayGainConfig cfg = ap->replaygain;
@@ -467,6 +476,7 @@ void track_update_gain(TrackState *t, const bool late) {
 // Read thread, before the decoder starts: a track without any ReplayGain value gets an urgent measurement
 // (AuReplayGainConfig.measure_missing) and waits for it a little, so it can start at the right level
 static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
+    CHAOS("wait_for_measurement");
     AudioPlayer *ap = t->ap;
     SDL_LockMutex(ap->format_mutex);
     const AuReplayGainConfig cfg = ap->replaygain;
@@ -496,6 +506,7 @@ static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
 }
 
 int track_set_filters(TrackState *t, const char *filters) {
+    CHAOS("track_set_filters");
     char *copy = NULL;
     if (filters && filters[0] && !(copy = av_strdup(filters)))
         return AVERROR(ENOMEM);
@@ -508,6 +519,7 @@ int track_set_filters(TrackState *t, const char *filters) {
 }
 
 int track_queue_filter_command(TrackState *t, const char *target, const char *cmd, const char *arg) {
+    CHAOS("track_queue_filter_command");
     FilterCmd *c = av_mallocz(sizeof(FilterCmd));
     if (!c) return AVERROR(ENOMEM);
     c->target = av_strdup(target);
@@ -532,6 +544,7 @@ int track_queue_filter_command(TrackState *t, const char *target, const char *cm
 static int local_get_packet(void *ctx, AVPacket *pkt, int *serial);
 
 static int queue_get_packet(void *ctx, AVPacket *pkt, int *serial) {
+    CHAOS("queue_get_packet");
     TrackState *t = ctx;
     return packet_queue_get(&t->audio_queue, pkt, 1, serial);
 }
@@ -639,6 +652,7 @@ typedef enum DemuxEnd { DEMUX_LOOPED, DEMUX_ENDED, DEMUX_ENDED_BEFORE } DemuxEnd
 // loop is gapless; the mixer reports the restart when it is heard). DEMUX_ENDED: the end, the first time (the caller
 // then drains the decoder with an empty packet).
 static DemuxEnd handle_demux_end(TrackState *t) {
+    CHAOS("handle_demux_end");
     if (!SDL_AtomicGet(&t->had_error) && take_loop(t)) {
         // A range loops from its start, decoding the preroll again (the trimmer drops it); no flush, as above
         int64_t base = t->has_range ? seek_base_sample(t, t->range_start_sample) : 0;
@@ -663,13 +677,15 @@ static DemuxEnd handle_demux_end(TrackState *t) {
 
 // A pending seek request, done by whoever reads (the worker for local files, the reader for streams)
 static void process_seek_request(TrackState *t) {
+    CHAOS("process_seek_request");
     SDL_LockMutex(t->seek_mutex);
+    bool fraction_ignored = false;
     if (t->pending_seek_percent >= 0) {
         if (t->duration_s >= 0) {
             t->seek_pos = t->duration_s * t->pending_seek_percent / 100.0;
             t->seek_req = true;
         }
-        else ff_log(AU_LOG_INFO, "%s: the duration is not known, a seek to a fraction of it is ignored", t->filename);
+        else fraction_ignored = true;
         t->pending_seek_percent = -1;
     }
     bool seek_req = t->seek_req;
@@ -677,6 +693,8 @@ static void process_seek_request(TrackState *t) {
     t->seek_req = false;
     if (t->pending_seek_percent < 0) SDL_AtomicSet(&t->seek_pending, 0);
     SDL_UnlockMutex(t->seek_mutex);
+    if (fraction_ignored)   // logged outside seek_mutex: ff_log() takes msg_mutex
+        ff_log(AU_LOG_INFO, "%s: the duration is not known, a seek to a fraction of it is ignored", t->filename);
     if (seek_req && t->live) {
         ff_log(AU_LOG_INFO, "%s: live stream, seeking is ignored", t->filename);
         seek_req = false;
@@ -706,6 +724,7 @@ static void process_seek_request(TrackState *t) {
     // New serial: the decoder, the filter graph and the mixer drop everything older. The trimmer learns the target
     // before any packet of the new serial can be read (this thread reads them).
     packet_queue_flush(&t->audio_queue);
+    CHAOS("seek: queue flushed, target not handed over");
     SDL_LockMutex(t->seek_mutex);
     t->seek_done_serial = target != AV_NOPTS_VALUE ? packet_queue_serial(&t->audio_queue) : -1;
     t->seek_done_sample = target;
@@ -744,6 +763,7 @@ static bool within_play_range(const TrackState *t, const AVPacket *pkt) {
 // Seeks are done here, between packets. At the end it returns one empty packet to drain the decoder, then waits for a
 // seek or the end of the track instead of reading the end of the file again and again.
 static int local_get_packet(void *ctx, AVPacket *pkt, int *serial) {
+    CHAOS("local_get_packet");
     TrackState *t = ctx;
     AVFormatContext *ic = t->ic;
     for (;;) {
@@ -878,14 +898,17 @@ static int net_reader(void *arg) {
 }
 
 static void read_thread_fail(TrackState *t) {
+    CHAOS("read_thread_fail");
     SDL_AtomicSet(&t->had_error, 1);
     // Nothing more will ever come out of this track
     ffa_store_release(&t->eos_serial, packet_queue_serial(&t->audio_queue));
+    CHAOS("eos stored, failure not posted");
     ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
 }
 
 // After the decoder is open: the play range in samples, the decoder's preroll, the first seek and the duration
 static void open_range(TrackState *t) {
+    CHAOS("open_range");
     AVFormatContext *ic = t->ic;
     const AVCodecParameters *par = t->audio_st->codecpar;
     const int rate = t->audio_decoder.avctx->sample_rate;
@@ -928,6 +951,7 @@ static void open_range(TrackState *t) {
 
 // Open the input and the decoder, read the tags and publish the duration. < 0 = the track can not be played.
 static int open_track(TrackState *t) {
+    CHAOS("open_track");
     const AVIOInterruptCB interrupt = { decode_interrupt_cb, t };
     AVFormatContext *ic = NULL;
     int st_index = -1;
@@ -970,6 +994,7 @@ static int open_track(TrackState *t) {
     t->info = info;
     SDL_UnlockMutex(t->seek_mutex);
     ff_publish_info(t->ap, t->handle, info);   // before MSG_TRACK_OPENED: AU_EVENT_TRACK_OPENED promises it
+    CHAOS("info published, gain not set");
     wait_for_measurement(t, info);
     track_update_gain(t, false);
 
@@ -981,12 +1006,14 @@ static int open_track(TrackState *t) {
 
     open_range(t);
     ffa_store_release(&t->opened, 1); // publishes the range and duration_s
+    CHAOS("opened stored, MSG_TRACK_OPENED not posted");
     ff_post_track_msg(MSG_TRACK_OPENED, t->handle, 0);
     return 0;
 }
 
 // The track's thread: open, then decode (and for local files read) until the track is destroyed
 static int track_thread(void *arg) {
+    CHAOS("track_thread");
     ff_thread_use_c_locale();
     TrackState *t = arg;
     if (open_track(t) < 0) {
@@ -1041,6 +1068,7 @@ end:
 // Ring storage is kept between tracks: a few hundred KB allocated and freed with every track would be the kind of
 // large block glibc raises its trim thresholds for (see "Memory use" in the readme)
 static float *ring_storage_take(AudioPlayer *ap, const size_t floats, size_t *got) {
+    CHAOS("ring_storage_take");
     SDL_LockMutex(ap->ring_pool_mutex);
     int best = -1;
     for (int i = 0; i < ap->n_ring_pool; i++)
@@ -1060,6 +1088,7 @@ static float *ring_storage_take(AudioPlayer *ap, const size_t floats, size_t *go
 }
 
 void ring_storage_give(AudioPlayer *ap, float *buf, const size_t floats) {
+    CHAOS("ring_storage_give");
     SDL_LockMutex(ap->ring_pool_mutex);
     const int n = (int)(sizeof(ap->ring_pool) / sizeof(ap->ring_pool[0]));
     if (ap->n_ring_pool < n) {
@@ -1078,6 +1107,7 @@ void ring_storage_free_all(AudioPlayer *ap) {
 }
 
 static void wake_producer(TrackState *t) {
+    CHAOS("wake_producer");
     SDL_LockMutex(t->ring_mutex);
     SDL_CondSignal(t->ring_cond);
     SDL_UnlockMutex(t->ring_mutex);
@@ -1086,6 +1116,7 @@ static void wake_producer(TrackState *t) {
 // Storage for DECODED_BUFFER_SECONDS of the output format plus a chunk. Another device that needs more (more channels,
 // a higher rate) gets new storage once the mixer has taken or dropped everything in the old one.
 static int ensure_ring(TrackState *t) {
+    CHAOS("ensure_ring");
     SampleRing *r = &t->ring;
     const int channels = t->convert_channels;
     const uint32_t need = (uint32_t)(t->convert_rate * DECODED_BUFFER_SECONDS) + RING_MAX_CHUNK_FRAMES;
@@ -1114,6 +1145,7 @@ static int ensure_ring(TrackState *t) {
 // thread), so this sleeps as long as the mixer needs to play the ring down to half the limit; seeks and aborts wake
 // it early. Returns 1 when there is room, 0 when a seek made the chunk stale, -1 when aborted.
 static int ring_wait_room(TrackState *t, const int frames, const int serial) {
+    CHAOS("ring_wait_room");
     const int rate = FFMAX(1, t->convert_rate);
     const uint32_t high = (uint32_t)(rate * DECODED_BUFFER_SECONDS), low = high / 2;
     for (;;) {
@@ -1135,6 +1167,7 @@ static int ring_wait_room(TrackState *t, const int frames, const int serial) {
 
 // Copy a converted frame into the ring (in pieces of at most RING_MAX_CHUNK_FRAMES); the frame is unreferenced
 static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const int serial) {
+    CHAOS("queue_frame");
     const int channels = frame->ch_layout.nb_channels;
     if (frame->format != AV_SAMPLE_FMT_FLT || channels != t->ring.stride || frame->sample_rate != t->convert_rate) {
         av_frame_unref(frame); // made for an output format that is gone (the graphs are being rebuilt)
@@ -1165,6 +1198,7 @@ static int queue_frame(TrackState *t, AVFrame *frame, const AVRational tb, const
 // Feed one converted frame (NULL = flush) through the user graph, or straight into the queue.
 // Returns AVERROR_EOF when the user graph ended by itself, AVERROR_EXIT when aborted.
 static int feed_user(TrackState *t, AVFrame *frame, AVFrame *tmp, const AVRational tb, const int serial) {
+    CHAOS("feed_user");
     if (!t->user.graph)
         return frame ? queue_frame(t, frame, tb, serial) : 0;
 
@@ -1288,6 +1322,7 @@ static int apply_speed(TrackState *t, AVFrame *spd, AVFrame *tmp, const int seri
 static bool trim_output(TrackState *t, AVFrame *frame, AVFrame *cut, AVRational tb);
 
 static int drain_convert(TrackState *t, AVFrame *conv, AVFrame *spd, AVFrame *tmp, const int serial) {
+    CHAOS("drain_convert");
     int ret;
     while ((ret = av_buffersink_get_frame_flags(t->convert.sink, conv, 0)) >= 0) {
         const AVRational tb = av_buffersink_get_time_base(t->convert.sink);
@@ -1302,6 +1337,7 @@ static int drain_convert(TrackState *t, AVFrame *conv, AVFrame *spd, AVFrame *tm
 
 // (Re)configure the convert graph, waiting for an output device if none is open yet. < 0 = give up.
 static int ensure_convert_graph(TrackState *t) {
+    CHAOS("ensure_convert_graph");
     AudioPlayer *ap = t->ap;
     for (;;) {
         const int ret = configure_convert_graph(ap, t);
@@ -1320,6 +1356,7 @@ static int ensure_convert_graph(TrackState *t) {
 // Rebuild the user graph from the current track and global filter strings. On failure the previous
 // graph is kept, except on the first build (then the error is returned and the track fails).
 static int rebuild_user_graph(TrackState *t, const bool first) {
+    CHAOS("rebuild_user_graph");
     AudioPlayer *ap = t->ap;
     char *track_filters = NULL, *global_filters = NULL;
     AVChannelLayout layout = {0};
@@ -1355,6 +1392,7 @@ static int rebuild_user_graph(TrackState *t, const bool first) {
 }
 
 static void run_filter_commands(TrackState *t) {
+    CHAOS("run_filter_commands");
     SDL_LockMutex(t->seek_mutex);
     FilterCmd *list = t->filter_cmds;
     t->filter_cmds = NULL;
@@ -1379,8 +1417,10 @@ static void run_filter_commands(TrackState *t) {
 }
 
 static void fail_track(TrackState *t) {
+    CHAOS("fail_track");
     SDL_AtomicSet(&t->had_error, 1);
     ffa_store_release(&t->eos_serial, packet_queue_serial(&t->audio_queue));
+    CHAOS("eos stored, failure not posted");
     ff_post_track_msg(MSG_TRACK_FAILED, t->handle, 0);
 }
 
@@ -1418,6 +1458,7 @@ static int64_t align_down(const int64_t v, const int64_t step) {
 
 // A new serial (the start, or a seek): what to keep of it
 static void trim_begin(TrackState *t, const int serial) {
+    CHAOS("trim_begin");
     TrimState *tr = &t->trim;
     const int64_t first_base = tr->serial < 0 ? tr->base : 0;
     tr->serial = serial;
@@ -1556,6 +1597,7 @@ static void decode_loop(TrackState *t) {
                 }
                 ended_serial = serial;
                 ffa_store_release(&t->eos_serial, serial); // after the last frames are in the ring
+                CHAOS("decoder drained: eos stored");
             }
             continue;
         }
@@ -1640,6 +1682,8 @@ end:
 //+-----------------------------------------------------+
 
 StreamMeta *track_take_stream_meta(TrackState *t, const double position) {
+    CHAOS("track_take_stream_meta");
+    const AuMediaInfo *publish = NULL;
     SDL_LockMutex(t->seek_mutex);
     StreamMeta *m = t->stream_meta;
     if (m && m->position <= position + 0.05) {
@@ -1650,13 +1694,19 @@ StreamMeta *track_take_stream_meta(TrackState *t, const double position) {
         if (now) {
             au_media_info_release(t->info);
             t->info = now;
-            ff_publish_info(t->ap, t->handle, now);
+            publish = media_info_retain(now);
         }
     }
     else {
         m = NULL;
     }
     SDL_UnlockMutex(t->seek_mutex);
+    // Published outside seek_mutex (pub_mutex is taken alone); only the control thread calls this, so two
+    // publications can not overtake each other
+    if (publish) {
+        ff_publish_info(t->ap, t->handle, publish);
+        au_media_info_release(publish);
+    }
     return m;
 }
 
@@ -1673,16 +1723,19 @@ static void drop_stale(TrackState *t, const int serial, const int rate, const in
 }
 
 void track_drop_stale(TrackState *t, const int rate, const int channels) {
+    CHAOS_RT("track_drop_stale");
     drop_stale(t, packet_queue_serial(&t->audio_queue), rate, channels);
 }
 
 bool track_has_audio(TrackState *t, const int rate, const int channels) {
+    CHAOS_RT("track_has_audio");
     if (SDL_AtomicGet(&t->buffering)) return false; // a network track that is still filling its buffer
     drop_stale(t, packet_queue_serial(&t->audio_queue), rate, channels);
     return ring_peek(&t->ring) != NULL;
 }
 
 int track_pull(TrackState *t, float *dst, const int frames, const int rate, const int channels, bool *eos, bool *looped) {
+    CHAOS_RT("track_pull");
     int written = 0;
     const int serial = packet_queue_serial(&t->audio_queue);
     *eos = false;

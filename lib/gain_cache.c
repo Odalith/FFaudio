@@ -58,6 +58,7 @@
 #include "SDL2/SDL_filesystem.h"
 #include "SDL2/SDL_mutex.h"
 #include "SDL2/SDL_stdinc.h"
+#include "chaos.h"
 
 #define CACHE_HEADER "ffaudio-replaygain-cache 1"
 #define CACHE_FILE_NAME "replaygain.cache"
@@ -570,6 +571,7 @@ static int write_file(void) {
 // Compact the file: read it again under the lock, so what other processes appended since it was loaded stays, then
 // rewrite it
 static int compact(void) {
+    CHAOS("compact");
     if (!persistent() || foreign) return AU_OK;
     const bool locked = take_file_lock();
     table_clear();
@@ -580,6 +582,7 @@ static int compact(void) {
 }
 
 static void ensure_loaded(void) {
+    CHAOS("ensure_loaded");
     if (loaded) return;
     loaded = true;
 
@@ -596,6 +599,7 @@ static void ensure_loaded(void) {
 }
 
 static int append_record(const char *record, const size_t len) {
+    CHAOS("append_record");
     if (!persistent()) return AU_OK;
     if (foreign) return AU_ERR_FILE; // kept in memory only: the file is not ours to write
     const bool locked = take_file_lock();
@@ -636,6 +640,7 @@ static int append_record(const char *record, const size_t len) {
 //+-----------------------------------------------------+
 
 bool gain_cache_lookup(const char *path, AuReplayGain *out) {
+    CHAOS("gain_cache_lookup");
     if (!path || !path[0]) return false;
     SDL_mutex *m = cache_mutex();
     if (!m) return false;
@@ -653,6 +658,7 @@ bool gain_cache_lookup(const char *path, AuReplayGain *out) {
 //+-----------------------------------------------------+
 
 int au_gain_cache_set_file(const char *path) {
+    CHAOS("au_gain_cache_set_file");
     SDL_mutex *m = cache_mutex();
     if (!m) return AU_ERR_SDL;
     char *copy = path ? av_strdup(path) : NULL;
@@ -690,6 +696,7 @@ int au_gain_cache_get_file(char *buf, const size_t size) {
 }
 
 int au_gain_cache_reload(void) {
+    CHAOS("au_gain_cache_reload");
     SDL_mutex *m = cache_mutex();
     if (!m) return AU_ERR_SDL;
     SDL_LockMutex(m);
@@ -704,6 +711,7 @@ int au_gain_cache_reload(void) {
 }
 
 int au_gain_cache_set(const char *path, const AuReplayGain *rg) {
+    CHAOS("au_gain_cache_set");
     if (!path || !path[0] || !rg) return AU_ERR_INVALID_ARGUMENT;
     SDL_mutex *m = cache_mutex();
     if (!m) return AU_ERR_SDL;
@@ -738,6 +746,7 @@ unsigned gain_cache_failure_mark(void) {
 }
 
 void gain_cache_note_failure(const char *path) {
+    CHAOS("gain_cache_note_failure");
     SDL_mutex *m = cache_mutex();
     if (!m || !path) return;
     char *copy = av_strdup(path);
@@ -759,6 +768,7 @@ static bool failed_since(const char *path, const unsigned mark) {
 }
 
 GainWait gain_cache_wait(const char *path, const int timeout_ms, SDL_atomic_t *abort, const unsigned mark) {
+    CHAOS("gain_cache_wait");
     if (!path || !path[0]) return GAIN_WAIT_FAILED;
     SDL_mutex *m = cache_mutex();
     if (!m) return GAIN_WAIT_FAILED;
@@ -784,6 +794,7 @@ bool au_gain_cache_get(const char *path, AuReplayGain *out) {
 }
 
 bool au_gain_cache_remove(const char *path) {
+    CHAOS("au_gain_cache_remove");
     if (!path || !path[0]) return false;
     SDL_mutex *m = cache_mutex();
     if (!m) return false;
@@ -806,6 +817,7 @@ bool au_gain_cache_remove(const char *path) {
 }
 
 void au_gain_cache_clear(void) {
+    CHAOS("au_gain_cache_clear");
     SDL_mutex *m = cache_mutex();
     if (!m) return;
     SDL_LockMutex(m);

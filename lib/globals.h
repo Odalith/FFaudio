@@ -21,7 +21,8 @@
 /*
  * Internal data structures shared by the library's modules. Not part of the public API.
  *
- * Threading model (see ARCHITECTURE in readme.md):
+ * Threading model, in short. The full reference (every thread, lock, condition, semaphore and atomic, the lock order and
+ * the ordered hand-offs) is docs/threading.md: keep it in step with any change to what is shared between threads.
  *  - control thread : owns every TrackState (creation, slot changes, destruction) and runs user callbacks
  *  - worker thread  : one per track: opens it, reads it (local files), decodes and filters into its SampleRing
  *                     (float32 at the output rate/layout)

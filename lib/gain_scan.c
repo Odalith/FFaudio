@@ -30,6 +30,7 @@
 #include "numbers.h"
 #include "loudness.h"
 #include "network.h"
+#include "chaos.h"
 
 #define MAX_WORKERS 16
 #define MAX_FAILED 1024          // files remembered as not measurable (the oldest are forgotten first)
@@ -296,6 +297,7 @@ static int wanted_workers(void) {
 }
 
 static void start_workers(void) {
+    CHAOS("start_workers");
     const int n = wanted_workers();
     for (int i = 0; i < n; i++) {
         if (workers[i].thread) continue;
@@ -323,6 +325,7 @@ static bool keep_going(double fraction, void *user) {
 }
 
 static void notify(const AuGainScanConfig *cfg, const char *path, const int result, const AuReplayGain *rg) {
+    CHAOS("notify");
     if (result != AU_OK) gain_cache_note_failure(path); // a player waiting for this value stops waiting
     if (cfg->on_cached) cfg->on_cached(path, result, rg, cfg->user);
 }
@@ -397,6 +400,7 @@ end:
 }
 
 static int worker_main(void *arg) {
+    CHAOS("worker_main");
     ff_thread_use_c_locale();
     const int index = (int)(intptr_t)arg;
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
@@ -565,6 +569,7 @@ static int request(const char *const *paths, const int count, const bool urgent,
 }
 
 bool gain_scan_request_for_player(const char *path) {
+    CHAOS("gain_scan_request_for_player");
     if (!path || !ready()) return false;
     SDL_LockMutex(lock);
     const bool bad = known_failure(path);
@@ -576,10 +581,12 @@ bool gain_scan_request_for_player(const char *path) {
 }
 
 int au_gain_cache_request(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
+    CHAOS("au_gain_cache_request");
     return request(paths, count, priority == AU_SCAN_URGENT, false, false);
 }
 
 int au_gain_cache_request_album(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
+    CHAOS("au_gain_cache_request_album");
     return request(paths, count, priority == AU_SCAN_URGENT, true, false);
 }
 
@@ -608,6 +615,7 @@ int au_gain_scan_configure(const AuGainScanConfig *cfg) {
 }
 
 void au_gain_cache_cancel_requests(void) {
+    CHAOS("au_gain_cache_cancel_requests");
     if (!ready()) return;
     SDL_LockMutex(lock);
     Job *prev = NULL, *j = head;
@@ -637,6 +645,7 @@ int au_gain_cache_pending(void) {
 }
 
 void au_gain_scan_stop(void) {
+    CHAOS("au_gain_scan_stop");
     if (!ready()) return;
     SDL_Thread *threads[MAX_WORKERS];
     int n = 0;

@@ -29,6 +29,7 @@
 #include "globals.h"
 #include "libavutil/mem.h"
 #include "libavutil/tx.h"
+#include "chaos.h"
 
 // A window of the tap that is being heard now
 typedef struct TapView {
@@ -89,6 +90,7 @@ static bool take_status(AudioPlayer *ap, StatusSnapshot *st) {
 }
 
 int au_get_levels(const double window_seconds, AuLevels *out) {
+    CHAOS("au_get_levels");
     if (!out) return AU_ERR_INVALID_ARGUMENT;
     memset(out, 0, sizeof(*out));
     AudioPlayer *ap = ff_player();
@@ -178,6 +180,7 @@ void au_spectrum_free(AuSpectrum *s) {
 }
 
 int au_spectrum_read(AuSpectrum *s, const int channel, float *magnitudes, int *sample_rate) {
+    CHAOS("au_spectrum_read");
     if (!s || !magnitudes) return AU_ERR_INVALID_ARGUMENT;
     const int bins = s->n / 2 + 1;
     memset(magnitudes, 0, (size_t)bins * sizeof(float));

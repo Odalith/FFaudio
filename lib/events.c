@@ -29,6 +29,7 @@
 #include "libavutil/common.h"
 #include "libavutil/mem.h"
 #include "once.h"
+#include "chaos.h"
 
 typedef struct Entry {
     AuEvent ev;
@@ -78,6 +79,7 @@ static void clear_locked(void) {
 }
 
 void events_open(void) {
+    CHAOS("events_open");
     if (!sync_ready()) return;
     SDL_LockMutex(mutex);
     clear_locked();
@@ -86,6 +88,7 @@ void events_open(void) {
 }
 
 void events_close(void) {
+    CHAOS("events_close");
     if (!sync_ready()) return;
     SDL_LockMutex(mutex);
     clear_locked();
@@ -126,6 +129,7 @@ static bool make_room_locked(const AuEvent *incoming) {
 }
 
 void events_push(const AuEvent *e) {
+    CHAOS("events_push");
     if (!sync_ready()) return;
     Entry n = { .ev = *e };
     const char **a, **b;
@@ -167,6 +171,7 @@ static bool take_locked(AuEvent *out) {
 }
 
 bool au_poll_event(AuEvent *out) {
+    CHAOS("au_poll_event");
     if (!out || !sync_ready()) return false;
     SDL_LockMutex(mutex);
     const bool got = take_locked(out);
@@ -175,6 +180,7 @@ bool au_poll_event(AuEvent *out) {
 }
 
 bool au_wait_event(AuEvent *out, const double timeout_seconds) {
+    CHAOS("au_wait_event");
     if (!out || !sync_ready()) return false;
     const bool forever = timeout_seconds < 0 || !isfinite(timeout_seconds);
     const Uint32 deadline = SDL_GetTicks() + (forever ? 0 : (Uint32)llround(timeout_seconds * 1000));

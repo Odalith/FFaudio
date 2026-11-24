@@ -672,9 +672,20 @@ static long counter_at(const Capture *c, const size_t i) {
     return k;
 }
 
+// Under chaos delays (FFAUDIO_CHAOS) the decoder may fall behind and the mixer plays silence until it catches up:
+// those gaps are timing, not wrong audio, so the counter checks skip them there (every value must still come exactly
+// once, in order). In a normal run a gap is a failure.
+static bool chaos_gaps(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("FFAUDIO_CHAOS") != NULL;
+    return on;
+}
+
 // Checks the run first..last (every value once, in order) starting at frame *i; advances *i past it
 static bool counter_run(const Capture *c, size_t *i, const long first, const long last, const char *what) {
     for (long k = first; k <= last; k++, (*i)++) {
+        if (chaos_gaps() && k > first)
+            while (*i < c->frames && counter_at(c, *i) == 0) (*i)++;
         if (*i >= c->frames) {
             printf("   %s: the capture ends before value %ld\n", what, k);
             return false;
@@ -788,7 +799,12 @@ static void check_exact_seek(const char *what, const AuPlayConfig *pc, const dou
     Capture c = stop_capture();
     size_t i = skip_silence(&c, 0);
     long k = first_k;
-    while (i < c.frames && counter_at(&c, i) == k) { i++; k++; }  // before the seek
+    while (i < c.frames && counter_at(&c, i) == k) {   // before the seek
+        i++;
+        k++;
+        if (chaos_gaps()) while (i < c.frames && counter_at(&c, i) == 0) i++;
+    }
+    if (chaos_gaps()) i = skip_silence(&c, i);
     printf("   %s: played %ld..%ld, then %ld\n", what, first_k, k - 1, i < c.frames ? counter_at(&c, i) : 0);
     CHECK(k > first_k);
     CHECK(counter_run(&c, &i, from_k, last_k, what));

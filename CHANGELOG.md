@@ -18,6 +18,12 @@
   takes text in memory, `au_cue_release()` frees it. Tracks are reached through pointers (`tracks[i]`), so
   `AuCueTrack` can gain fields. A FILE that is missing is looked for with other audio extensions next to it.
 
+### Development
+- `docs/threading.md`: the threading reference. Every thread, lock, condition, semaphore and atomic, the lock order,
+  ownership, lifecycles and the hand-offs that must happen in order; kept up to date with the code.
+- A chaos build (`-DFFAUDIO_CHAOS=ON`, testing only): random delays at the points where threads hand state over
+  (`FFAUDIO_CHAOS="seed:percent:max_us"`), to make races show up in tests.
+
 ### Changed
 - FFmpeg's own messages (its errors, e.g. "Failed to send close message" when a TLS stream is stopped) come as
   `AU_EVENT_LOG` warnings, as "FFmpeg <part>: ...", instead of being printed to the application's stderr. ffaudio
@@ -26,6 +32,9 @@
   UTF-8 paths and arguments.
 
 ### Fixed
+- A data race: the control thread decided whether the output device should run from the mixer slots read without the
+  device lock, while the audio callback changed them in a gapless handover. Found with the new chaos build under
+  ThreadSanitizer.
 - Play ranges (`AuPlayConfig.start_seconds` / `.length_seconds`) and seeks are exact to the sample. A range used to
   start at the nearest packet and end up to a packet late; now consecutive ranges of one file join with nothing
   missing or doubled, also when the file is resampled to the device's rate (each side of the join keeps a little
