@@ -87,6 +87,30 @@ sine live_id3.mp3      440 5 44100 2 -c:a libmp3lame -b:a 128k -write_xing 0 -me
 sine chain_a.ogg       440 2 44100 2 -c:a libvorbis -metadata title="First Part" -metadata artist="Ogg Artist"
 sine chain_b.ogg       660 2 44100 2 -c:a libvorbis -metadata title="Second Part" -metadata artist="Ogg Artist"
 cat chain_a.ogg chain_b.ogg > chained.ogg
+# The same with Opus parts (granules at 48 kHz, minus each part's pre-skip): 2 s + 1 s
+sine chain_c.opus      440 2 48000 2 -c:a libopus
+sine chain_d.opus      660 1 48000 2 -c:a libopus
+cat chain_c.opus chain_d.opus > chained.opus
+
+# Restoration: a 440 Hz sine (1/8) with a 0.6 click every 8000 samples, and a 1/8 sine with a 20 ms burst at 0.3
+# every 0.25 s, hard-clipped at 0.25 (like a loud master: a few percent of the samples clipped; adeclip's cost grows
+# steeply with that share)
+click="0.125*sin(2*PI*440*t)+if(eq(mod(n\,8000)\,4000)\,0.6\,0)"
+clip="clip((0.125+0.175*lt(mod(t\,0.25)\,0.02))*sin(2*PI*440*t)\,-0.25\,0.25)"
+ff -f lavfi -i "aevalsrc=${click}|${click}:s=44100:d=1" -c:a pcm_f32le clicks.wav
+ff -f lavfi -i "aevalsrc=${clip}|${clip}:s=44100:d=1" -c:a pcm_f32le clipped.wav
+
+# Embedded pictures: a 64x48 PNG front cover and a 40x30 JPEG back cover in FLAC (PICTURE blocks), the front cover in
+# MP3 (ID3v2 APIC) and M4A (covr)
+ff -f lavfi -i "color=c=red:s=64x48" -frames:v 1 cover.png
+ff -f lavfi -i "color=c=blue:s=40x30" -frames:v 1 back.jpg
+ff -f lavfi -i "sine=frequency=440:duration=1:sample_rate=44100" -i cover.png -i back.jpg -map 0:a -map 1 -map 2 \
+   -c:a flac -c:v copy -disposition:v attached_pic -metadata:s:v:0 comment="Cover (front)" \
+   -metadata:s:v:0 title="Front" -metadata:s:v:1 comment="Cover (back)" art.flac
+ff -f lavfi -i "sine=frequency=440:duration=1:sample_rate=44100" -i cover.png -map 0:a -map 1 -c:a libmp3lame \
+   -c:v copy -disposition:v attached_pic -id3v2_version 3 -metadata:s:v comment="Cover (front)" art.mp3
+ff -f lavfi -i "sine=frequency=440:duration=1:sample_rate=44100" -i cover.png -map 0:a -map 1 -c:a aac \
+   -c:v copy -disposition:v attached_pic art.m4a
 
 # Broken / non-audio inputs
 : > empty.flac

@@ -1,5 +1,44 @@
 # Changelog
 
+## 3.1.0 (2026-11-23)
+
+### Added
+- Embedded pictures (cover art): `au_media_picture(path, type, &err)` returns an `AuPicture` (the image as stored,
+  its MIME type, picture type, size and description) from FLAC, ID3v2 (MP3, AIFF, WAV), MP4/M4A, APE and Ogg/Opus
+  files, the front cover or a given `AU_PICTURE_TYPE`; `au_picture_release()` frees it. Nothing is decoded, and
+  pictures are only read when asked for. `AuMediaInfo.picture_count` (a new last field) says how many there are.
+- Playlist files (`ffaudio_playlist.h`): `au_playlist_read()` reads an `.m3u`, `.m3u8` or `.pls` file or URL (an
+  internet radio station's `.pls`, say) and `au_playlist_parse()` text already in memory; both return an
+  `AuPlaylistFile` of entries (path, title, duration) for `au_play()` / `au_queue()`, and play nothing themselves.
+  Relative entries are resolved against the playlist's folder or URL, `file://` URIs become paths, and text that is
+  not UTF-8 is read as Latin-1. An HLS playlist is a stream, so it gives one entry: itself. A playlist from a URL may
+  only list URLs (local paths in it are left out), like the protocol rules for streams. Works without `au_init()`.
+- Upmixing: `au_set_upmix(mode, custom)` decides how files with fewer channels than a surround output play.
+  `AU_UPMIX_NONE` (the default, as before) keeps each channel on its own speaker; `AU_UPMIX_SURROUND` spreads mono
+  and stereo over every speaker with FFmpeg's `surround` filter; `AU_UPMIX_CUSTOM` takes your own filters (a `pan`
+  matrix, `surround` with other options). Stereo and mono outputs are not affected.
+- Source filters: `au_set_source_filters()` runs filters on every track's decoded audio before the conversion to the
+  output format, at the file's own rate and layout, for repairs that need the samples as stored.
+- Restoration helpers: `au_fb_add_declick()` (FFmpeg `adeclick`, for vinyl and shellac transfers) and
+  `au_fb_add_declip()` (`adeclip`, rebuilds clipped peaks), with `AuDeclick` / `AuDeclip` settings. Declip belongs in
+  `au_set_source_filters()`: after resampling to the device rate it finds nothing to repair.
+
+- `au_set_output_format(channels, rate)` and `au_set_prepare_next(seconds)`: setters for the last two settings that
+  could only be given to `au_init()`. Every setting now has a setter; the `AuConfig` fields other than `app_name`,
+  `on_event` and `user_data` are initial values for them.
+
+### Changed
+- The soname is `libffaudio.so.3` (the major version only), so later 3.x releases load in place of each other. 3.0.0
+  used `libffaudio.so.3.0`: a link by that name is installed alongside on Linux, so programs built against 3.0 keep
+  working without relinking. The CMake package accepts any 3.x for `find_package(ffaudio 3.0)`.
+
+### Fixed
+- Chained Ogg files (parts one after another, e.g. a recorded Ogg radio stream or concatenated Vorbis/Opus/FLAC
+  files) reported only their last part's duration, as FFmpeg does. ffaudio now adds the parts up, for `au_probe()`,
+  the player and `AU_EVENT_TRACK_OPENED`. FFmpeg can not seek past the first part of such a file, so it is reported
+  as not seekable (`AuMediaInfo.seekable` false) and seeks are ignored, as for live streams. Network files keep
+  FFmpeg's duration (finding the parts would need a request per page).
+
 ## 3.0.0 (2026-11-23)
 
 The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.x.

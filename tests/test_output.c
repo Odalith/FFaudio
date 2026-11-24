@@ -540,6 +540,122 @@ static void test_multichannel_routing(void) {
     free(c.samples);
 }
 
+static Capture capture_upmix(const char *file, const int channels, const AU_UPMIX mode, const char *custom) {
+    start_capture_channels("upmix", channels);
+    au_set_volume(1.0f);
+    CHECK(au_set_upmix(mode, custom) == AU_OK);
+    au_play(fx(file), NULL);
+    wait_until_idle(1, 4000);
+    return stop_capture();
+}
+
+static void print_channels(const char *what, const Capture *c) {
+    printf("   %-24s", what);
+    for (int ch = 0; ch < c->channels; ch++) printf(" %7.1f", channel_peak_db(c, ch));
+    printf(" dB\n");
+}
+
+#define STEREO_DB (SINE_DB - 3.01f) // the stereo fixtures: the mono sine spread over two channels
+
+static void test_upmix(void) {
+    // Off: stereo plays on front left and right only
+    Capture c = capture_upmix("s44_stereo.flac", 6, AU_UPMIX_NONE, NULL);
+    print_channels("stereo -> 5.1 none", &c);
+    CHECK(c.channels == 6);
+    CHECK(fabsf(channel_peak_db(&c, 0) - STEREO_DB) < 0.3f && fabsf(channel_peak_db(&c, 1) - STEREO_DB) < 0.3f);
+    for (int ch = 2; ch < 6; ch++) CHECK(channel_peak_db(&c, ch) < -90);
+    free(c.samples);
+
+    // surround: identical left and right is a centred sound, so the centre speaker gets it too
+    c = capture_upmix("s44_stereo.flac", 6, AU_UPMIX_SURROUND, NULL);
+    print_channels("stereo -> 5.1 surround", &c);
+    CHECK(channel_peak_db(&c, 2) > STEREO_DB - 6);
+    free(c.samples);
+    c = capture_upmix("s44_mono.wav", 6, AU_UPMIX_SURROUND, NULL);
+    print_channels("mono -> 5.1 surround", &c);
+    CHECK(channel_peak_db(&c, 2) > SINE_DB - 9);
+    free(c.samples);
+
+    // Custom: a pan matrix copying the sum of left and right to the centre
+    c = capture_upmix("s44_stereo.flac", 6, AU_UPMIX_CUSTOM, "pan=5.1|c0=c0|c1=c1|c2=0.5*c0+0.5*c1");
+    print_channels("stereo -> 5.1 custom", &c);
+    CHECK(fabsf(channel_peak_db(&c, 2) - STEREO_DB) < 0.3f && fabsf(channel_peak_db(&c, 0) - STEREO_DB) < 0.3f);
+    CHECK(channel_peak_db(&c, 4) < -90);
+    free(c.samples);
+
+    // A stereo output is not touched
+    c = capture_upmix("s44_stereo.flac", 2, AU_UPMIX_SURROUND, NULL);
+    print_channels("stereo -> stereo surround", &c);
+    CHECK(c.channels == 2 && fabsf(channel_peak_db(&c, 0) - STEREO_DB) < 0.3f);
+    free(c.samples);
+
+    start_capture("upmix_bad");
+    CHECK(au_set_upmix(AU_UPMIX_CUSTOM, "no_such_filter") == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_upmix(AU_UPMIX_CUSTOM, NULL) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_upmix((AU_UPMIX)42, NULL) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_upmix(AU_UPMIX_NONE, NULL) == AU_OK);
+    c = stop_capture();
+    free(c.samples);
+}
+
+// Play `file` with track filters and return the capture
+static Capture capture_with_filters(const char *name, const char *file, const char *filters) {
+    start_capture(name);
+    au_set_volume(1.0f);
+    const AuPlayConfig pc = { .filters = filters };
+    au_play(fx(file), &pc);
+    wait_until_idle(1, 4000);
+    return stop_capture();
+}
+
+static void test_restoration_filters(void) {
+    AuFilterBuilder *fb = au_fb_create();
+    REQUIRE(au_fb_add_declick(fb, NULL, NULL) == AU_OK);
+    Capture raw = capture_with_filters("clicks", "clicks.wav", NULL);
+    Capture fixed = capture_with_filters("declick", "clicks.wav", au_fb_peek(fb));
+    size_t f1, l1, f2, l2;
+    audible_range(&raw, &f1, &l1);
+    audible_range(&fixed, &f2, &l2);
+    // The window's delay and its edges: judge the middle
+    const float jr = largest_jump(&raw, f1 + raw.rate / 5, l1 - raw.rate / 5);
+    const float jf = largest_jump(&fixed, f2 + fixed.rate / 5, l2 - fixed.rate / 5);
+    printf("   clicks: largest jump %.3f, declicked %.3f (a clean sine: %.3f)\n", jr, jf,
+           0.125f * 2.0f * (float)M_PI * 440.0f / (float)raw.rate);
+    CHECK(jr > 0.5f && jf < 0.1f);
+    free(raw.samples);
+    free(fixed.samples);
+
+    // Declip as a source filter: on the stored samples, before the 44.1 to 48 kHz conversion
+    au_fb_clear(fb);
+    REQUIRE(au_fb_add_declip(fb, NULL, NULL) == AU_OK);
+    raw = capture_with_filters("clipped", "clipped.wav", NULL);
+    start_capture("declip");
+    au_set_volume(1.0f);
+    CHECK(au_set_source_filters(au_fb_peek(fb)) == AU_OK);
+    au_play(fx("clipped.wav"), NULL);
+    wait_until_idle(1, 4000);
+    fixed = stop_capture();
+    audible_range(&raw, &f1, &l1);
+    audible_range(&fixed, &f2, &l2);
+    printf("   clipped: peak %.2f dB, declipped %.2f dB; audible %zu and %zu frames\n", channel_peak_db(&raw, 0),
+           channel_peak_db(&fixed, 0), l1 - f1, l2 - f2);
+    // Resampling overshoots a little at the clipped edges; the rebuilt peaks rise well above that
+    const float clip_db = 20 * log10f(0.25f);
+    CHECK(fabsf(channel_peak_db(&raw, 0) - clip_db) < 0.5f);
+    CHECK(channel_peak_db(&fixed, 0) > clip_db + 1.2f);
+    CHECK(labs((long)(l2 - f2) - (long)(l1 - f1)) < (long)fixed.rate / 100); // its buffered tail is played
+    free(raw.samples);
+    free(fixed.samples);
+    au_fb_free(fb);
+
+    start_capture("source_bad");
+    CHECK(au_set_source_filters("no_such_filter") == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_source_filters("") == AU_OK);
+    CHECK(au_set_source_filters(NULL) == AU_OK);
+    Capture c = stop_capture();
+    free(c.samples);
+}
+
 /* ---------- ReplayGain ---------- */
 
 // Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
@@ -893,6 +1009,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_downmix_levels);
     RUN_TEST(test_bad_custom_downmix_rejected);
     RUN_TEST(test_multichannel_routing);
+    RUN_TEST(test_upmix);
+    RUN_TEST(test_restoration_filters);
     RUN_TEST(test_replaygain_levels);
     RUN_TEST(test_replaygain_from_first_sample);
     RUN_TEST(test_gain_change_after_unchanged_late_value);

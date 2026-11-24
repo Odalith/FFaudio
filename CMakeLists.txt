@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ffAudio VERSION 3.0.0 LANGUAGES C)
+project(ffAudio VERSION 3.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -54,7 +54,8 @@ pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
 set(FFAUDIO_PUBLIC_HEADERS
         lib/ffaudio.h
         lib/ffaudio_filters.h
-        lib/ffaudio_loudness.h)
+        lib/ffaudio_loudness.h
+        lib/ffaudio_playlist.h)
 
 add_library(ffaudio
         ${FFAUDIO_PUBLIC_HEADERS}
@@ -67,6 +68,9 @@ add_library(ffaudio
         lib/gain_scan.c
         lib/network.c
         lib/input.c
+        lib/ogg_chain.c
+        lib/playlist.c
+        lib/picture.c
         lib/numbers.c
         lib/events.c
         lib/events.h
@@ -125,8 +129,21 @@ endif()
 set_target_properties(ffaudio PROPERTIES
         C_VISIBILITY_PRESET hidden
         VERSION ${PROJECT_VERSION}
-        SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+        # The soname follows the major version only: minor releases add to the ABI and never change it
+        SOVERSION ${PROJECT_VERSION_MAJOR}
         PUBLIC_HEADER "${FFAUDIO_PUBLIC_HEADERS}")
+
+# 3.0.0 was released with the soname libffaudio.so.3.0: a link by that name lets programs built against it run on
+# any 3.x without relinking. Remove in 4.0.
+set(FFAUDIO_COMPAT_SONAME_LINK OFF)
+if(BUILD_SHARED_LIBS AND UNIX AND NOT APPLE AND PROJECT_VERSION_MAJOR EQUAL 3)
+    set(FFAUDIO_COMPAT_SONAME_LINK ON)
+    add_custom_command(TARGET ffaudio POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E rm -f $<TARGET_FILE_DIR:ffaudio>/libffaudio.so.3.0
+            COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_SONAME_FILE_NAME:ffaudio>
+                    $<TARGET_FILE_DIR:ffaudio>/libffaudio.so.3.0
+            VERBATIM)
+endif()
 
 #+-----------------------------------------------------+
 #| Install                                             |
@@ -150,6 +167,9 @@ if(FFAUDIO_INSTALL)
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
             PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ffaudio)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ffaudio.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
+    if(FFAUDIO_COMPAT_SONAME_LINK)
+        install(FILES $<TARGET_FILE_DIR:ffaudio>/libffaudio.so.3.0 DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    endif()
     install(EXPORT ffaudioTargets NAMESPACE ffaudio:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ffaudio)
 
     # find_package(ffaudio) -> ffaudio::ffaudio
@@ -157,7 +177,7 @@ if(FFAUDIO_INSTALL)
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfig.cmake
          "include(\"\${CMAKE_CURRENT_LIST_DIR}/ffaudioTargets.cmake\")\n")
     write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfigVersion.cmake
-                                     COMPATIBILITY SameMinorVersion)
+                                     COMPATIBILITY SameMajorVersion)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfigVersion.cmake
             DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ffaudio)
 endif()
@@ -219,7 +239,7 @@ if(FFAUDIO_BUILD_TESTS)
         if(WIN32)
             string(APPEND FFAUDIO_TEST_DATA_ENV ";LOCALAPPDATA=${CMAKE_BINARY_DIR}/localappdata")
         endif()
-        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network)
+        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network test_playlist)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})

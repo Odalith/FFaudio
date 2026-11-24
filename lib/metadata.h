@@ -36,6 +36,7 @@ typedef struct MediaDraft {
     bool live;                  // no duration: a live stream
     bool seekable;
     AVDictionary *tags;         // container tags, then stream tags for keys the container lacks
+    int picture_count;          // attached pictures (cover art)
 } MediaDraft;
 
 // UTF-8 copy of text that may be Latin-1 (old Icecast servers): valid UTF-8 is kept, anything else is read as Latin-1

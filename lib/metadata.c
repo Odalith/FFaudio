@@ -174,6 +174,9 @@ int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int
     d->live = d->duration <= 0 && au_is_network_url(d->path);
     d->seekable = !d->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
                                (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
+    if (d->seekable && ff_ogg_is_chained((AVFormatContext *)ic, d->path)) d->seekable = false; // only its first part
+    for (unsigned int i = 0; i < ic->nb_streams; i++)
+        if (ic->streams[i]->disposition & AV_DISPOSITION_ATTACHED_PIC) d->picture_count++;
     if (!d->codec) d->codec = av_strdup("");
     if (!d->channel_layout) d->channel_layout = av_strdup("");
 
@@ -237,6 +240,7 @@ const AuMediaInfo *media_info_freeze(const MediaDraft *d) {
     }
     info->tag_count = n_tags;
     info->tags = tags;
+    info->picture_count = d->picture_count;
     info->replaygain = replaygain_from_tags(d->tags);
 
     static const char *const track_totals[] = { "tracktotal", "totaltracks", NULL };
@@ -257,7 +261,7 @@ const AuMediaInfo *media_info_with_title(const AuMediaInfo *info, const char *ti
         .path = av_strdup(info->path), .container = av_strdup(info->container), .codec = av_strdup(info->codec),
         .channel_layout = av_strdup(info->channel_layout), .duration = info->duration, .bit_rate = info->bit_rate,
         .sample_rate = info->sample_rate, .channels = info->channels, .bits_per_sample = info->bits_per_sample,
-        .live = info->live, .seekable = info->seekable,
+        .live = info->live, .seekable = info->seekable, .picture_count = info->picture_count,
     };
     for (int i = 0; i < info->tag_count; i++) av_dict_set(&d.tags, info->tags[i].key, info->tags[i].value, 0);
     av_dict_set(&d.tags, "title", title, 0);

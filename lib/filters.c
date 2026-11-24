@@ -559,6 +559,55 @@ int au_fb_add_limiter(AuFilterBuilder *fb, const char *name, const AuLimiter *co
     return finish(fb, add_limiter(fb, config));
 }
 
+AuDeclick au_declick_defaults(void) {
+    const AuDeclick d = { .window_ms = 55, .overlap_percent = 75, .threshold = 2, .burst = 2 };
+    return d;
+}
+
+static int add_declick(AuFilterBuilder *fb, const AuDeclick *config) {
+    const AuDeclick d = config ? *config : au_declick_defaults();
+    if (!in_range(d.window_ms, 10.0, 100.0)) return fail(fb, "declick window must be between 10 and 100 ms");
+    if (!in_range(d.overlap_percent, 50.0, 95.0)) return fail(fb, "declick overlap must be between 50 and 95 %%");
+    if (!in_range(d.threshold, 1.0, 100.0)) return fail(fb, "declick threshold must be between 1 and 100");
+    if (!in_range(d.burst, 0.0, 10.0)) return fail(fb, "declick burst must be between 0 and 10");
+    const int r = require(fb, "adeclick");
+    if (r != AU_OK) return r;
+    char t[96], w[32], o[32], th[32], b[32];
+    return appendf(fb, "%s=window=%s:overlap=%s:threshold=%s:burst=%s", tag(fb, t, "adeclick", -1),
+                   num(w, d.window_ms), num(o, d.overlap_percent), num(th, d.threshold), num(b, d.burst));
+}
+
+int au_fb_add_declick(AuFilterBuilder *fb, const char *name, const AuDeclick *config) {
+    if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
+    return finish(fb, add_declick(fb, config));
+}
+
+AuDeclip au_declip_defaults(void) {
+    const AuDeclip d = { .window_ms = 55, .overlap_percent = 75, .threshold = 10 };
+    return d;
+}
+
+static int add_declip(AuFilterBuilder *fb, const AuDeclip *config) {
+    const AuDeclip d = config ? *config : au_declip_defaults();
+    if (!in_range(d.window_ms, 10.0, 100.0)) return fail(fb, "declip window must be between 10 and 100 ms");
+    if (!in_range(d.overlap_percent, 50.0, 95.0)) return fail(fb, "declip overlap must be between 50 and 95 %%");
+    if (!in_range(d.threshold, 1.0, 100.0)) return fail(fb, "declip threshold must be between 1 and 100");
+    const int r = require(fb, "adeclip");
+    if (r != AU_OK) return r;
+    char t[96], w[32], o[32], th[32];
+    return appendf(fb, "%s=window=%s:overlap=%s:threshold=%s", tag(fb, t, "adeclip", -1),
+                   num(w, d.window_ms), num(o, d.overlap_percent), num(th, d.threshold));
+}
+
+int au_fb_add_declip(AuFilterBuilder *fb, const char *name, const AuDeclip *config) {
+    if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    const int named_ok = begin(fb, name);
+    if (named_ok != AU_OK) return finish(fb, named_ok);
+    return finish(fb, add_declip(fb, config));
+}
+
 AuCompressor au_compressor_defaults(void) {
     const AuCompressor c = { .threshold_db = -18, .ratio = 2, .attack_ms = 20, .release_ms = 250,
                              .knee_db = 6, .makeup_db = 3 };

@@ -72,6 +72,70 @@ static void test_queue_next(void) {
     CHECK(e.prepare_next >= 1);
 }
 
+// au_set_prepare_next(): the event comes that long before the end
+static double prepare_position = -1;            // guarded by tc_mutex: written on the control thread
+static void record_prepare_position(void) {
+    AuStatus s;
+    au_get_status(&s);
+    SDL_LockMutex(tc_mutex);
+    prepare_position = s.position;
+    SDL_UnlockMutex(tc_mutex);
+}
+
+static void test_prepare_next_setter(void) {
+    CHECK(au_set_prepare_next(0) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_prepare_next(-1) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_prepare_next(NAN) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_prepare_next(INFINITY) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_prepare_next(1.5) == AU_OK);
+    SDL_LockMutex(tc_mutex);
+    tc_on_prepare_next_hook = record_prepare_position;
+    SDL_UnlockMutex(tc_mutex);
+
+    au_play(fx("long_6s.flac"), NULL);           // the default 10 s would send it at the start
+    tc_sleep_ms(2500);
+    CHECK(tc_snapshot().prepare_next == 0);
+    CHECK(TC_WAIT_FIELD(prepare_next, 1, 6000));
+    SDL_LockMutex(tc_mutex);
+    const double at = prepare_position;
+    SDL_UnlockMutex(tc_mutex);
+    printf("   prepare-next at %.2f s of 6\n", at);
+    CHECK(at > 4.2 && at < 4.8);
+    CHECK(TC_WAIT_FIELD(eof, 1, 4000));
+
+    SDL_LockMutex(tc_mutex);
+    tc_on_prepare_next_hook = NULL;
+    SDL_UnlockMutex(tc_mutex);
+    CHECK(au_set_prepare_next(10) == AU_OK);    // the other tests expect the default
+}
+
+// au_set_output_format(): the device is opened again in the new format, and playback continues
+static void test_output_format_setter(void) {
+    CHECK(au_set_output_format(9, 0) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_output_format(-1, 0) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_output_format(2, 7999) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_output_format(2, 400000) == AU_ERR_INVALID_ARGUMENT);
+
+    au_play(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(500);
+    CHECK(au_set_output_format(6, 44100) == AU_OK);
+    CHECK(TC_WAIT_FIELD(device, 1, 3000));
+    AuStatus s;
+    au_get_status(&s);
+    printf("   after (6, 44100): %d channels, %d Hz, at %.2f s\n", s.channels, s.sample_rate, s.position);
+    CHECK(s.channels == 6 && s.sample_rate == 44100);
+    CHECK(au_set_output_format(6, 44100) == AU_OK); // the same: nothing to do
+    tc_sleep_ms(400);
+    CHECK(tc_snapshot().device == 1);
+    CHECK(au_set_output_format(0, 0) == AU_OK);     // back to what the device prefers
+    CHECK(TC_WAIT_FIELD(device, 2, 3000));
+    au_get_status(&s);
+    printf("   after (0, 0): %d channels, %d Hz\n", s.channels, s.sample_rate);
+    CHECK(TC_WAIT_FIELD(eof, 1, 9000));
+    const TcEvents e = tc_snapshot();
+    CHECK(e.eof_error == 0 && e.device_failed == 0);
+}
+
 static void test_skip_to_next(void) {
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(300);
@@ -201,6 +265,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_all_formats);
     RUN_TEST(test_bad_inputs);
     RUN_TEST(test_queue_next);
+    RUN_TEST(test_prepare_next_setter);
+    RUN_TEST(test_output_format_setter);
     RUN_TEST(test_skip_to_next);
     RUN_TEST(test_pause_resume);
     RUN_TEST(test_seek);

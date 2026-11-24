@@ -79,6 +79,87 @@ static void test_probe_r128(void) {
     au_media_info_release(info);
 }
 
+// Chained Ogg files (parts one after another): FFmpeg reports only the last part's length (2 s, 1 s); ffaudio adds the
+// parts up, for au_probe() and for the player
+static void test_chained_ogg_duration(void) {
+    const struct { const char *file; double seconds; } cases[] = { { "chained.ogg", 4.0 }, { "chained.opus", 3.0 } };
+    for (int i = 0; i < 2; i++) {
+        const AuMediaInfo *info = au_probe(fx(cases[i].file), NULL);
+        REQUIRE(info);
+        printf("   %s: %.3f s\n", cases[i].file, info->duration);
+        CHECK(fabs(info->duration - cases[i].seconds) < 0.03);
+        CHECK(!info->seekable);   // FFmpeg can not seek past the first part
+        au_media_info_release(info);
+    }
+    const AuMediaInfo *single = au_probe(fx("chain_a.ogg"), NULL);   // one part: FFmpeg's value, unchanged
+    REQUIRE(single);
+    CHECK(fabs(single->duration - 2.0) < 0.03 && single->seekable);
+    au_media_info_release(single);
+
+    REQUIRE(tc_init_player(0) == 0);
+    au_play(fx("chained.ogg"), NULL);
+    CHECK(TC_WAIT_FIELD(opened, 1, 5000));
+    CHECK(fabs(tc_snapshot().opened_duration - 4.0) < 0.03);
+    au_seek(3.0);                                 // ignored, like on a live stream
+    tc_sleep_ms(500);
+    CHECK(tc_snapshot().restart == 0);
+    au_shutdown();
+}
+
+// Embedded pictures: types, MIME types, sizes from the container or the image header, the description
+static void test_pictures(void) {
+    const AuMediaInfo *info = au_probe(fx("art.flac"), NULL);
+    REQUIRE(info);
+    CHECK(info->picture_count == 2);
+    au_media_info_release(info);
+
+    int err = 1;
+    const AuPicture *front = au_media_picture(fx("art.flac"), AU_PICTURE_ANY, &err);
+    REQUIRE(front);
+    CHECK(err == AU_OK && front->type == AU_PICTURE_FRONT_COVER && !strcmp(front->mime, "image/png"));
+    CHECK(front->width == 64 && front->height == 48 && !strcmp(front->description, "Front"));
+    CHECK(front->size > 8 && !memcmp(front->data, "\x89PNG", 4));
+    printf("   art.flac front: %s %dx%d, %zu bytes\n", front->mime, front->width, front->height, front->size);
+    au_picture_release(front);
+
+    const AuPicture *back = au_media_picture(fx("art.flac"), AU_PICTURE_BACK_COVER, &err);
+    REQUIRE(back);
+    CHECK(back->type == AU_PICTURE_BACK_COVER && !strcmp(back->mime, "image/jpeg"));
+    CHECK(back->width == 40 && back->height == 30 && !strcmp(back->description, ""));
+    CHECK(back->data[0] == 0xFF && back->data[1] == 0xD8);
+    au_picture_release(back);
+    CHECK(au_media_picture(fx("art.flac"), AU_PICTURE_ARTIST, &err) == NULL && err == AU_ERR_NOTHING_TO_DO);
+
+    const char *others[] = { "art.mp3", "art.m4a" };
+    for (int i = 0; i < 2; i++) {
+        info = au_probe(fx(others[i]), NULL);
+        REQUIRE(info);
+        CHECK(info->picture_count == 1);
+        au_media_info_release(info);
+        const AuPicture *p = au_media_picture(fx(others[i]), AU_PICTURE_ANY, &err);
+        REQUIRE(p);
+        printf("   %s: type %d, %s %dx%d\n", others[i], p->type, p->mime, p->width, p->height);
+        CHECK(p->type == AU_PICTURE_FRONT_COVER && !strcmp(p->mime, "image/png") && p->width == 64 && p->height == 48);
+        au_picture_release(p);
+    }
+
+    CHECK(au_media_picture(fx("s44_stereo.flac"), AU_PICTURE_ANY, &err) == NULL && err == AU_ERR_NOTHING_TO_DO);
+    CHECK(au_media_picture(fx("does_not_exist.flac"), AU_PICTURE_ANY, &err) == NULL && err == AU_ERR_FILE);
+    CHECK(au_media_picture(fx("art.flac"), 21, &err) == NULL && err == AU_ERR_INVALID_ARGUMENT);
+    au_picture_release(NULL);
+
+    // A playing track's info counts them too, and the pictures do not get in the way of playback
+    REQUIRE(tc_init_player(0) == 0);
+    const int32_t h = au_play(fx("art.flac"), NULL);
+    CHECK(TC_WAIT_FIELD(opened, 1, 5000));
+    info = au_track_info(h);
+    CHECK(info && info->picture_count == 2);
+    au_media_info_release(info);
+    CHECK(TC_WAIT_FIELD(eof, 1, 5000));
+    CHECK(tc_snapshot().eof_error == 0);
+    au_shutdown();
+}
+
 static void test_probe_untagged_and_bad(void) {
     const AuMediaInfo *info = au_probe(fx("rg_untagged.flac"), NULL);
     REQUIRE(info);
@@ -190,6 +271,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_probe_mp3);
     RUN_TEST(test_probe_r128);
     RUN_TEST(test_probe_untagged_and_bad);
+    RUN_TEST(test_chained_ogg_duration);
+    RUN_TEST(test_pictures);
     RUN_TEST(test_track_info_while_playing);
     RUN_TEST(test_non_audio_opens_no_decoder);
     return tc_finish("test_metadata");

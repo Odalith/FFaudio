@@ -313,6 +313,28 @@ static void test_tone_stereo_dynamics(void) {
     au_fb_free(fb);
 }
 
+static void test_restoration(void) {
+    AuFilterBuilder *fb = au_fb_create();
+    CHECK(au_fb_add_declick(fb, NULL, NULL) == AU_OK);
+    AuDeclip dc = au_declip_defaults();
+    dc.threshold = 5.5;
+    CHECK(au_fb_add_declip(fb, "fix", &dc) == AU_OK);
+    CHECK_STR(au_fb_peek(fb), "adeclick=window=55:overlap=75:threshold=2:burst=2,"
+                              "adeclip@fix=window=55:overlap=75:threshold=5.5");
+    CHECK(au_validate_filters(au_fb_peek(fb)) == AU_OK);
+    AuDeclick dk = au_declick_defaults();
+    dk.window_ms = 5;
+    CHECK(au_fb_add_declick(fb, NULL, &dk) == AU_ERR_INVALID_ARGUMENT);
+    dk = au_declick_defaults();
+    dk.burst = 11;
+    CHECK(au_fb_add_declick(fb, NULL, &dk) == AU_ERR_INVALID_ARGUMENT);
+    dc = au_declip_defaults();
+    dc.overlap_percent = 40;
+    CHECK(au_fb_add_declip(fb, NULL, &dc) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_fb_add_declick(NULL, NULL, NULL) == AU_ERR_INVALID_ARGUMENT);
+    au_fb_free(fb);
+}
+
 static void test_parse_locale_independent(void) {
     const char *locales[] = { "de_DE.UTF-8", "de_DE.utf8", "fr_FR.UTF-8", "nl_NL.UTF-8" };
     const char *set = NULL;
@@ -346,5 +368,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_headphones);
     RUN_TEST(test_locale_independent);
     RUN_TEST(test_raw_and_validate);
+    RUN_TEST(test_restoration);
     return tc_finish("test_filters");
 }

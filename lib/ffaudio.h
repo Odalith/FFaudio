@@ -39,7 +39,7 @@
 #include <math.h>
 
 #define FFAUDIO_VERSION_MAJOR 3
-#define FFAUDIO_VERSION_MINOR 0
+#define FFAUDIO_VERSION_MINOR 1
 #define FFAUDIO_VERSION_PATCH 0
 
 #ifdef __cplusplus
@@ -218,18 +218,17 @@ extern "C" {
     //| Configuration structs                               |
     //+-----------------------------------------------------+
 
+    // What au_init() needs. Only app_name, on_event and user_data are fixed for the player's lifetime. Every other
+    // field is the initial value of a setting that has its own setter, the same as calling that setter right after
+    // au_init(); zero (or NULL) keeps the default. New settings only get a setter.
     typedef struct AuConfig {
         const char *app_name;                // shown by the system's sound settings
-        float volume;                        // linear gain 0..1; < 0 means 1
-        int loop_count;                      // -1 for infinite, 0 for none
-        // Seconds before the end of the current track at which AU_EVENT_PREPARE_NEXT comes. 0 = 10 seconds.
-        double prepare_next_seconds;
-        // Output format overrides; 0 = use what the device prefers. SDL converts when the device differs.
-        int output_channels;                 // 1..8, e.g. 2 to always mix down to stereo
-        int output_sample_rate;              // 8000..384000 Hz
-        // The output device to open (a name from au_list_devices()); NULL = the system default, followed when it
-        // changes. au_set_device() switches later.
-        const char *device;
+        float volume;                        // au_set_volume(): linear gain 0..1; < 0 means 1
+        int loop_count;                      // au_set_loop_count(): -1 for infinite, 0 for none
+        double prepare_next_seconds;         // au_set_prepare_next(); 0 = 10 seconds
+        int output_channels;                 // au_set_output_format(): 1..8, 0 = what the device prefers
+        int output_sample_rate;              // au_set_output_format(): 8000..384000 Hz, 0 = what the device prefers
+        const char *device;                  // au_set_device(): a name from au_list_devices(), NULL = system default
         AuEventFn on_event;                  // NULL = queue events for au_poll_event()
         void *user_data;                     // passed to on_event
     } AuConfig;
@@ -266,6 +265,12 @@ extern "C" {
     // changes). Returns at once; AU_EVENT_DEVICE reports the result. A chosen device that can not be opened, or that
     // disappears later, falls back to the system default (fell_back). Choosing the device in use does nothing.
     FFAUDIO_API int au_set_device(const char *name);
+
+    // Ask for an output format: channels 1..8 (e.g. 2 to always mix down to stereo) and/or a sample rate
+    // 8000..384000 Hz; 0 = what the device prefers. SDL converts when the device differs. The device is opened again
+    // in the new format and playback continues; AU_EVENT_DEVICE reports the result. Asking for the format already
+    // asked for does nothing. Returns AU_ERR_INVALID_ARGUMENT for values out of range. Since 3.1.
+    FFAUDIO_API int au_set_output_format(int channels, int sample_rate);
 
     // The names of the output devices, *count of them; NULL when there are none. Free with au_free_devices().
     FFAUDIO_API char **au_list_devices(int *count);
@@ -330,6 +335,11 @@ extern "C" {
     // Applies to the current, the queued and future tracks. -1 = infinite, 0 = none.
     FFAUDIO_API void au_set_loop_count(int count);
 
+    // How long before the end of the current track AU_EVENT_PREPARE_NEXT comes, in seconds as heard (the crossfade
+    // into the next track is added). Default 10. Also applies to the current track when its event has not come yet.
+    // Returns AU_ERR_INVALID_ARGUMENT unless seconds is finite and > 0. Since 3.1.
+    FFAUDIO_API int au_set_prepare_next(double seconds);
+
     //+-----------------------------------------------------+
     //| Network streams                                     |
     //+-----------------------------------------------------+
@@ -373,6 +383,14 @@ extern "C" {
     // Replace the filters of one track (handle from au_play()/au_queue(), 0 = the current track).
     FFAUDIO_API int au_set_track_filters(int32_t handle, const char *filters);
 
+    // Filters applied to every track's decoded audio before the conversion to the output format: at the file's own
+    // sample rate, channel layout and sample format. For repairs that need the samples as they are stored, above
+    // all au_fb_add_declip() (resampling smooths away the flat clipped tops it looks for). They should keep the
+    // channel layout, and take no au_send_filter_command(). Applies to playing tracks right away, like the downmix.
+    // NULL or "" removes them. Returns AU_ERR_INVALID_ARGUMENT (and changes nothing) if the string does not parse.
+    // Since 3.1.
+    FFAUDIO_API int au_set_source_filters(const char *filters);
+
     // Send a runtime command to a filter, see avfilter_graph_send_command() and each filter's
     // "Commands" section, e.g. ("volume", "volume", "0.5") or ("equalizer@eq_3", "g", "-6").
     // `target` is a filter name or instance name ("all" for every filter). handle 0 = every live track.
@@ -402,6 +420,24 @@ extern "C" {
     // custom_filters is only used with AU_DOWNMIX_CUSTOM. Applies to playing tracks right away.
     // Returns AU_ERR_INVALID_ARGUMENT if the custom filters do not accept a 7.1 input.
     FFAUDIO_API int au_set_downmix(AU_DOWNMIX mode, const char *custom_filters);
+
+    // How files with fewer channels than a surround output (more than 2 channels, e.g. stereo on 5.1 speakers) are
+    // spread out. Outputs with 1 or 2 channels are not affected. Since 3.1.
+    typedef enum AU_UPMIX {
+        // Each channel goes to its own speaker; the others stay silent (a stereo file plays on front left and right)
+        AU_UPMIX_NONE = 0,
+        // FFmpeg's surround filter: mono and stereo files are spread over every speaker by where each sound comes
+        // from (centre dialogue and vocals to the centre, ambience to the surrounds, bass to the LFE). Other layouts
+        // keep AU_UPMIX_NONE.
+        AU_UPMIX_SURROUND,
+        // Your own filters on the original channels before the conversion to the output layout, e.g.
+        // "surround=chl_out=5.1:lfe=0" with options of your choice, or a "pan" matrix
+        AU_UPMIX_CUSTOM,
+    } AU_UPMIX;
+
+    // custom_filters is only used with AU_UPMIX_CUSTOM. Applies to playing tracks right away. Returns
+    // AU_ERR_INVALID_ARGUMENT if the custom filters do not accept a stereo input.
+    FFAUDIO_API int au_set_upmix(AU_UPMIX mode, const char *custom_filters);
 
     //+-----------------------------------------------------+
     //| ReplayGain                                          |
@@ -504,6 +540,8 @@ extern "C" {
         AuReplayGain replaygain;     // from the ReplayGain / R128 tags
         int tag_count;               // every tag, for display or export: container tags, then the stream's for keys
         const AuTag *tags;           // the container lacks
+        // Embedded pictures (cover art): how many there are; au_media_picture() reads one. Since 3.1.
+        int picture_count;
     } AuMediaInfo;
 
     // Read the tags and format of a file without playing it. Works without au_init() and from any thread; it blocks
@@ -523,6 +561,37 @@ extern "C" {
     // "title", "artist", "album", "album_artist", "date", "genre", "track", "disc", "composer", "comment".
     // Format-specific spellings of album_artist and date ("ALBUMARTIST", "year", ...) are also found.
     FFAUDIO_API const char *au_media_tag(const AuMediaInfo *info, const char *key);
+
+    // Picture types, as ID3v2 APIC and FLAC PICTURE number them (0..20)
+    typedef enum AU_PICTURE_TYPE {
+        AU_PICTURE_ANY = -1,         // au_media_picture(): the front cover, or else the first picture
+        AU_PICTURE_OTHER = 0,
+        AU_PICTURE_FRONT_COVER = 3,
+        AU_PICTURE_BACK_COVER = 4,
+        AU_PICTURE_LEAFLET = 5,
+        AU_PICTURE_MEDIA = 6,        // e.g. the label side of a CD
+        AU_PICTURE_ARTIST = 8,
+        AU_PICTURE_BAND_LOGO = 19,
+    } AU_PICTURE_TYPE;
+
+    // An embedded picture: one immutable block, valid until au_picture_release()
+    typedef struct AuPicture {
+        const uint8_t *data;         // the image file as stored (JPEG, PNG, ...): ready to save or decode
+        size_t size;
+        const char *mime;            // "image/jpeg", "image/png", ...; "application/octet-stream" when unknown
+        int type;                    // AU_PICTURE_TYPE (0..20); MP4 covers count as the front cover
+        int width, height;           // 0 when unknown
+        const char *description;     // "" when there is none
+    } AuPicture;
+
+    // Read an embedded picture (FLAC, ID3v2 in MP3/AIFF/WAV, MP4/M4A, Ogg/Opus METADATA_BLOCK_PICTURE, APE): the one
+    // of this type, or with AU_PICTURE_ANY the front cover or else the first. Pictures are only read when asked for,
+    // so probing stays fast. Works without au_init() and from any thread; URLs work too. NULL with *out_error (may be
+    // NULL) AU_ERR_NOTHING_TO_DO when there is no such picture, AU_ERR_FILE when the file can not be opened.
+    FFAUDIO_API const AuPicture *au_media_picture(const char *path, int type, int *out_error);
+
+    // Done with it (NULL is fine)
+    FFAUDIO_API void au_picture_release(const AuPicture *picture);
 
     //+-----------------------------------------------------+
     //| Status                                              |

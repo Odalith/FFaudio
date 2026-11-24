@@ -191,12 +191,13 @@ fail:
     return ret;
 }
 
-// Build a convert graph: abuffer (src_args) -> [downmix filters] -> aresample -> aformat -> abuffersink
-static int build_convert_graph(FilterChain *out, const char *src_args, const char *downmix_filters,
-                               const char *downmix_maxval, const bool use_soxr, const int out_rate,
-                               const char *out_layout, const int nb_threads) {
+// Build a convert graph:
+// abuffer (src_args) -> [source filters] -> [downmix/upmix filters] -> aresample -> aformat -> abuffersink
+static int build_convert_graph(FilterChain *out, const char *src_args, const char *source_filters,
+                               const char *downmix_filters, const char *downmix_maxval, const bool use_soxr,
+                               const int out_rate, const char *out_layout, const int nb_threads) {
     char args[512];
-    AVFilterContext *src = NULL, *convert = NULL, *format = NULL, *sink = NULL;
+    AVFilterContext *src = NULL, *mid = NULL, *convert = NULL, *format = NULL, *sink = NULL;
     int ret;
 
     memset(out, 0, sizeof(*out));
@@ -216,7 +217,14 @@ static int build_convert_graph(FilterChain *out, const char *src_args, const cha
                                             args, NULL, out->graph)) < 0) goto end;
 
     if ((ret = create_output_end(out->graph, &format, &sink, out_rate, out_layout)) < 0) goto end;
-    if ((ret = link_filters(out->graph, downmix_filters, src, convert)) < 0) goto end;
+    mid = src;
+    if (source_filters && source_filters[0]) {
+        // Two independent strings: chain them through a pass-through filter
+        if ((ret = avfilter_graph_create_filter(&mid, avfilter_get_by_name("anull"), "ffaudio_source_end",
+                                                NULL, NULL, out->graph)) < 0) goto end;
+        if ((ret = link_filters(out->graph, source_filters, src, mid)) < 0) goto end;
+    }
+    if ((ret = link_filters(out->graph, downmix_filters, mid, convert)) < 0) goto end;
     if ((ret = avfilter_link(convert, 0, format, 0)) < 0) goto end;
     if ((ret = avfilter_graph_config(out->graph, NULL)) < 0) goto end;
 
@@ -229,12 +237,34 @@ end:
     return ret;
 }
 
+int validate_upmix_filters(const char *filters) {
+    if (!filters || !filters[0]) return AVERROR(EINVAL);
+    FilterChain c = {0};
+    const FfLocale saved = ff_c_locale_begin(); // parsed on the caller's thread
+    const int ret = build_convert_graph(&c, "sample_rate=48000:sample_fmt=flt:time_base=1/48000:channel_layout=stereo",
+                                        NULL, filters, "1000", false, 48000, "5.1(side)", 0);
+    ff_c_locale_end(saved);
+    free_filter_chain(&c);
+    return ret;
+}
+
+int validate_source_filters(const char *filters) {
+    if (!filters || !filters[0]) return 0;
+    FilterChain c = {0};
+    const FfLocale saved = ff_c_locale_begin(); // parsed on the caller's thread
+    const int ret = build_convert_graph(&c, "sample_rate=44100:sample_fmt=s16:time_base=1/44100:channel_layout=stereo",
+                                        filters, NULL, "1000", false, 48000, "stereo", 0);
+    ff_c_locale_end(saved);
+    free_filter_chain(&c);
+    return ret;
+}
+
 int validate_downmix_filters(const char *filters) {
     if (!filters || !filters[0]) return AVERROR(EINVAL);
     FilterChain c = {0};
     const FfLocale saved = ff_c_locale_begin(); // parsed on the caller's thread
     const int ret = build_convert_graph(&c, "sample_rate=48000:sample_fmt=flt:time_base=1/48000:channel_layout=7.1",
-                                        filters, "1000", false, 48000, "stereo", 0);
+                                        NULL, filters, "1000", false, 48000, "stereo", 0);
     ff_c_locale_end(saved);
     free_filter_chain(&c);
     return ret;
@@ -253,12 +283,20 @@ int configure_convert_graph(AudioPlayer *ap, TrackState *t) {
     const int out_channels = ap->audio_target.ch_layout.nb_channels;
     const bool ready = ap->output_ready;
     const AU_DOWNMIX mode = ap->downmix;
+    const AU_UPMIX upmode = ap->upmix;
     ret = ready ? describe_layout(&ap->audio_target.ch_layout, out_layout, sizeof(out_layout)) : 0;
     if (ret >= 0 && mode == AU_DOWNMIX_CUSTOM && ap->downmix_filters && !(custom = av_strdup(ap->downmix_filters)))
+        ret = AVERROR(ENOMEM);
+    char *up_custom = NULL, *source = NULL;
+    if (ret >= 0 && upmode == AU_UPMIX_CUSTOM && ap->upmix_filters && !(up_custom = av_strdup(ap->upmix_filters)))
+        ret = AVERROR(ENOMEM);
+    if (ret >= 0 && ap->source_filters && !(source = av_strdup(ap->source_filters)))
         ret = AVERROR(ENOMEM);
     SDL_UnlockMutex(ap->format_mutex);
     if (ret < 0 || !ready || out_rate <= 0) {
         av_free(custom);
+        av_free(up_custom);
+        av_free(source);
         return ret < 0 ? ret : AVERROR(EAGAIN);
     }
 
@@ -271,27 +309,50 @@ int configure_convert_graph(AudioPlayer *ap, TrackState *t) {
     }
     if (ret < 0) {
         av_free(custom);
+        av_free(up_custom);
+        av_free(source);
         return ret;
     }
 
-    // Downmix settings only matter when the file has more channels than the output
-    const bool downmixing = t->audio_filter_src.ch_layout.nb_channels > out_channels;
+    // Downmix settings only matter when the file has more channels than the output, upmix settings when it has fewer
+    // than a surround output
+    const int src_channels = t->audio_filter_src.ch_layout.nb_channels;
+    const bool downmixing = src_channels > out_channels;
+    const bool upmixing = src_channels < out_channels && out_channels > 2;
     const char *maxval = (downmixing && mode == AU_DOWNMIX_NORMALIZED) ? "1" : "1000";
-    const char *downmix_filters = downmixing ? custom : NULL;
+    char surround[192];
+    const char *downmix_filters = NULL;   // the filters before the conversion, for either direction
+    if (downmixing) downmix_filters = custom;
+    else if (upmixing && upmode == AU_UPMIX_CUSTOM) downmix_filters = up_custom;
+    else if (upmixing && upmode == AU_UPMIX_SURROUND && src_channels <= 2) {
+        // surround takes stereo: a mono file becomes two identical channels, which it steers to the centre
+        snprintf(surround, sizeof(surround), "aformat=channel_layouts=stereo,surround=chl_in=stereo:chl_out=%s",
+                 out_layout);
+        downmix_filters = surround;
+    }
 
     // Never leave src/sink pointing into a graph that has been freed
     free_filter_chain(&t->convert);
     t->convert_rate = out_rate;
     t->convert_channels = out_channels;
-    ret = build_convert_graph(&t->convert, src_args, downmix_filters, maxval, ap->use_soxr, out_rate, out_layout,
-                              ap->filter_nbthreads);
+    ret = build_convert_graph(&t->convert, src_args, source, downmix_filters, maxval, ap->use_soxr, out_rate,
+                              out_layout, ap->filter_nbthreads);
     if (ret < 0 && downmix_filters) {
-        ff_log(AU_LOG_WARNING, "Custom downmix \"%s\" failed for '%s' (%s): using the standard downmix",
-               downmix_filters, t->filename, av_err2str(ret));
-        ret = build_convert_graph(&t->convert, src_args, NULL, "1000", ap->use_soxr, out_rate, out_layout,
+        ff_log(AU_LOG_WARNING, "%s \"%s\" failed for '%s' (%s): using the standard conversion",
+               downmixing ? "Custom downmix" : "Upmix", downmix_filters, t->filename, av_err2str(ret));
+        ret = build_convert_graph(&t->convert, src_args, source, NULL, "1000", ap->use_soxr, out_rate, out_layout,
+                                  ap->filter_nbthreads);
+    }
+    if (ret < 0 && source) {
+        // Validated against stereo: a layout or format they can not take plays without them
+        ff_log(AU_LOG_WARNING, "Source filters \"%s\" failed for '%s' (%s): playing without them",
+               source, t->filename, av_err2str(ret));
+        ret = build_convert_graph(&t->convert, src_args, NULL, NULL, "1000", ap->use_soxr, out_rate, out_layout,
                                   ap->filter_nbthreads);
     }
     av_free(custom);
+    av_free(up_custom);
+    av_free(source);
     return ret;
 }
 

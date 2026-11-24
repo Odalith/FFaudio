@@ -51,6 +51,10 @@ int ff_open_audio_input(const char *path, const char *http_headers, const AVIOIn
         *failed = FF_OPEN_STREAM_INFO;
         goto fail;
     }
+    // A chained Ogg file (parts one after another): FFmpeg's duration is its last part's
+    const int64_t chained = ff_ogg_chained_duration(ic, path);
+    if (chained != AV_NOPTS_VALUE) ic->duration = chained;
+
     const int st = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (st < 0) {
         *failed = FF_OPEN_NO_AUDIO;
