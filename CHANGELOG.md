@@ -1,5 +1,14 @@
 # Changelog
 
+## 3.1.0 (unreleased)
+
+### Fixed
+- Chained Ogg files (parts one after another, e.g. a recorded Ogg radio stream or concatenated Vorbis/Opus/FLAC
+  files) reported only their last part's duration, as FFmpeg does. ffaudio now adds the parts up, for `au_probe()`,
+  the player and `AU_EVENT_TRACK_OPENED`. FFmpeg can not seek past the first part of such a file, so it is reported
+  as not seekable (`AuMediaInfo.seekable` false) and seeks are ignored, as for live streams. Network files keep
+  FFmpeg's duration (finding the parts would need a request per page).
+
 ## 3.0.0 (2026-11-23)
 
 The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.x.

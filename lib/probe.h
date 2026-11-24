@@ -57,6 +57,13 @@ typedef enum FfOpenStep { FF_OPEN_OK, FF_OPEN_INPUT, FF_OPEN_NO_AUDIO, FF_OPEN_S
 int ff_open_audio_input(const char *path, const char *http_headers, const AVIOInterruptCB *interrupt,
                         AVFormatContext **out_ic, int *out_stream, FfOpenStep *failed);
 
+// A chained Ogg file's real duration (AV_TIME_BASE units): FFmpeg reports only its last part's. AV_NOPTS_VALUE when
+// the input is not a local, chained Ogg file of Vorbis, Opus or FLAC parts (lib/ogg_chain.c).
+int64_t ff_ogg_chained_duration(AVFormatContext *ic, const char *path);
+// Whether the input is such a chained Ogg file. FFmpeg can not seek past its first part (every part's timestamps start
+// again), so ffaudio treats it as not seekable.
+bool ff_ogg_is_chained(AVFormatContext *ic, const char *path);
+
 struct AVCodecContext;
 // An open decoder for the stream with `threads` threads. AVERROR_DECODER_NOT_FOUND when FFmpeg has none.
 int ff_open_decoder(const AVStream *st, int threads, struct AVCodecContext **out);

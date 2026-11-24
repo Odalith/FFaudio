@@ -232,6 +232,7 @@ typedef struct TrackState {
     bool network;
     double buffer_target_s, max_buffer_s;
     bool live;                          // read thread: no duration (internet radio, live HLS)
+    bool chained_ogg;                   // read thread: a chained Ogg file, which FFmpeg can not seek past its first part
     double pts_offset;                  // read thread, before the decoder starts: the container's start time (s),
                                         // taken off frame timestamps so positions count from 0
     SDL_atomic_t buffering;             // 1 = waiting for data: the mixer takes nothing, the position holds

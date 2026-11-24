@@ -174,6 +174,7 @@ int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int
     d->live = d->duration <= 0 && au_is_network_url(d->path);
     d->seekable = !d->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
                                (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
+    if (d->seekable && ff_ogg_is_chained((AVFormatContext *)ic, d->path)) d->seekable = false; // only its first part
     if (!d->codec) d->codec = av_strdup("");
     if (!d->channel_layout) d->channel_layout = av_strdup("");
 

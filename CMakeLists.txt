@@ -67,6 +67,7 @@ add_library(ffaudio
         lib/gain_scan.c
         lib/network.c
         lib/input.c
+        lib/ogg_chain.c
         lib/numbers.c
         lib/events.c
         lib/events.h

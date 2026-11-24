@@ -79,6 +79,33 @@ static void test_probe_r128(void) {
     au_media_info_release(info);
 }
 
+// Chained Ogg files (parts one after another): FFmpeg reports only the last part's length (2 s, 1 s); ffaudio adds the
+// parts up, for au_probe() and for the player
+static void test_chained_ogg_duration(void) {
+    const struct { const char *file; double seconds; } cases[] = { { "chained.ogg", 4.0 }, { "chained.opus", 3.0 } };
+    for (int i = 0; i < 2; i++) {
+        const AuMediaInfo *info = au_probe(fx(cases[i].file), NULL);
+        REQUIRE(info);
+        printf("   %s: %.3f s\n", cases[i].file, info->duration);
+        CHECK(fabs(info->duration - cases[i].seconds) < 0.03);
+        CHECK(!info->seekable);   // FFmpeg can not seek past the first part
+        au_media_info_release(info);
+    }
+    const AuMediaInfo *single = au_probe(fx("chain_a.ogg"), NULL);   // one part: FFmpeg's value, unchanged
+    REQUIRE(single);
+    CHECK(fabs(single->duration - 2.0) < 0.03 && single->seekable);
+    au_media_info_release(single);
+
+    REQUIRE(tc_init_player(0) == 0);
+    au_play(fx("chained.ogg"), NULL);
+    CHECK(TC_WAIT_FIELD(opened, 1, 5000));
+    CHECK(fabs(tc_snapshot().opened_duration - 4.0) < 0.03);
+    au_seek(3.0);                                 // ignored, like on a live stream
+    tc_sleep_ms(500);
+    CHECK(tc_snapshot().restart == 0);
+    au_shutdown();
+}
+
 static void test_probe_untagged_and_bad(void) {
     const AuMediaInfo *info = au_probe(fx("rg_untagged.flac"), NULL);
     REQUIRE(info);
@@ -190,6 +217,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_probe_mp3);
     RUN_TEST(test_probe_r128);
     RUN_TEST(test_probe_untagged_and_bad);
+    RUN_TEST(test_chained_ogg_duration);
     RUN_TEST(test_track_info_while_playing);
     RUN_TEST(test_non_audio_opens_no_decoder);
     return tc_finish("test_metadata");

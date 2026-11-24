@@ -637,6 +637,10 @@ static void process_seek_request(TrackState *t) {
         ff_log(AU_LOG_INFO, "%s: live stream, seeking is ignored", t->filename);
         seek_req = false;
     }
+    if (seek_req && t->chained_ogg) {
+        ff_log(AU_LOG_INFO, "%s: chained Ogg file, seeking is not supported", t->filename);
+        seek_req = false;
+    }
     if (!seek_req) return;
 
     if (seek_file(t, seek_pos) < 0) {
@@ -829,6 +833,7 @@ static int open_track(TrackState *t) {
         ic->pb->eof_reached = 0; // FIXME hack, ffplay maybe should not use avio_feof() to test for the end
 
     t->live = t->network && (ic->duration == AV_NOPTS_VALUE || ic->duration <= 0);
+    t->chained_ogg = ff_ogg_is_chained(ic, t->filename);
     // Positions count from the start of the file, like seeks and the duration: MPEG-TS (and so HLS) and some other
     // containers start their timestamps later
     t->pts_offset = ic->start_time != AV_NOPTS_VALUE ? ic->start_time / AV_TIME_BASE_DOUBLE : 0.0;

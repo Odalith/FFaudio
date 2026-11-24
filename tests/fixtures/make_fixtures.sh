@@ -87,6 +87,10 @@ sine live_id3.mp3      440 5 44100 2 -c:a libmp3lame -b:a 128k -write_xing 0 -me
 sine chain_a.ogg       440 2 44100 2 -c:a libvorbis -metadata title="First Part" -metadata artist="Ogg Artist"
 sine chain_b.ogg       660 2 44100 2 -c:a libvorbis -metadata title="Second Part" -metadata artist="Ogg Artist"
 cat chain_a.ogg chain_b.ogg > chained.ogg
+# The same with Opus parts (granules at 48 kHz, minus each part's pre-skip): 2 s + 1 s
+sine chain_c.opus      440 2 48000 2 -c:a libopus
+sine chain_d.opus      660 1 48000 2 -c:a libopus
+cat chain_c.opus chain_d.opus > chained.opus
 
 # Broken / non-audio inputs
 : > empty.flac
