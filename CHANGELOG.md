@@ -3,6 +3,10 @@
 ## 3.2.0 (unreleased)
 
 ### Added
+- Level meters (`ffaudio_meters.h`): `au_get_levels(window_seconds, &levels)` gives peak and RMS per channel of what is
+  being heard (the device's latency taken off): the mix after ReplayGain, fades and crossfades, before the master
+  volume and mute, silent while paused or idle. The audio callback copies the mix into a history buffer it never
+  waits on; readers on any thread copy from it and check it was not overwritten. The first call turns this on.
 - Cue sheets and chapters (`ffaudio_playlist.h`): `au_cue_read()` reads the tracks of a `.cue` file, of an audio file
   with an embedded cue sheet (the `CUESHEET` tag, or a FLAC `CUESHEET` block, read for its exact `INDEX 01`), or of an
   audio file's chapters (M4B/M4A, Matroska, MP3 `CHAP`), as an `AuCueSheet` of `AuCueTrack`s: path, start and length

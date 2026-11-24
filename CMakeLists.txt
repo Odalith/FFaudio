@@ -55,7 +55,8 @@ set(FFAUDIO_PUBLIC_HEADERS
         lib/ffaudio.h
         lib/ffaudio_filters.h
         lib/ffaudio_loudness.h
-        lib/ffaudio_playlist.h)
+        lib/ffaudio_playlist.h
+        lib/ffaudio_meters.h)
 
 add_library(ffaudio
         ${FFAUDIO_PUBLIC_HEADERS}
@@ -72,6 +73,7 @@ add_library(ffaudio
         lib/playlist.c
         lib/text_list.c
         lib/cue.c
+        lib/meters.c
         lib/picture.c
         lib/numbers.c
         lib/events.c

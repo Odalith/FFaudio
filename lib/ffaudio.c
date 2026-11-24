@@ -113,6 +113,10 @@ void ff_gain_cache_changed(const char *path) {
     SDL_UnlockMutex(lock);
 }
 
+AudioPlayer *ff_player(void) {
+    return audio_player;
+}
+
 void ff_post_track_msg(const MsgType type, const int32_t handle, const double d) {
     AudioPlayer *ap = audio_player;
     if (!ap) return;
@@ -316,6 +320,7 @@ static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
 }
 
 static void lock_mixer(AudioPlayer *ap);
+static void tap_install(AudioPlayer *ap);
 static void unlock_mixer(AudioPlayer *ap);
 
 // Ended tracks are stopped here and freed once their worker has returned (MSG_TRACK_EXITED wakes the loop): the control
@@ -717,12 +722,50 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
         }
     }
 
+    if (ap->tap_enabled) tap_install(ap); // for the new format
     note_add_owned((AuEvent){ .type = AU_EVENT_DEVICE,
                               .data.device = { .ok = true, .fell_back = fell_back, .sample_rate = m->rate,
                                                .channels = m->channels } },
                    av_strdup(ap->device_in_use ? ap->device_in_use : ""), NULL);
     update_device_running(ap);
     return AU_OK;
+}
+
+// The meter tap for the current output format (the first time a reader asks, and after every device change). Readers
+// may be copying from the old buffer: tap_mutex keeps it until they are done.
+static void tap_install(AudioPlayer *ap) {
+    const Mixer *m = &ap->mixer;
+    ap->tap_enabled = true;
+    if (m->rate <= 0 || m->channels <= 0) return;
+    SDL_LockMutex(ap->tap_mutex);
+    MeterTap *tp = &ap->tap;
+    if (tp->buf && tp->rate == m->rate && tp->channels == m->channels) {
+        SDL_UnlockMutex(ap->tap_mutex);
+        return;
+    }
+    const int64_t want = FFMAX((int64_t)m->rate / 2, 16384) + 4 * (int64_t)FFMAX(m->buf_frames, 1024);
+    uint32_t frames = 1;
+    while ((int64_t)frames < want) frames <<= 1;
+    int32_t *buf = av_calloc((size_t)frames * (size_t)m->channels, sizeof(int32_t));
+    if (!buf) ff_log(AU_LOG_ERROR, "No memory for the level meters");
+    lock_mixer(ap);
+    int32_t *old = tp->buf;
+    tp->buf = buf;
+    tp->frames = buf ? frames : 0;
+    tp->channels = m->channels;
+    tp->rate = m->rate;
+    tp->gen++;
+    ffa_store_relaxed(&tp->written, 0);
+    ffa_store_relaxed(&tp->published, 0);
+    unlock_mixer(ap);
+    SDL_UnlockMutex(ap->tap_mutex);
+    av_free(old);
+}
+
+void ff_request_tap(AudioPlayer *ap) {
+    if (SDL_AtomicGet(&ap->tap_requested) || !SDL_AtomicCAS(&ap->tap_requested, 0, 1)) return;
+    Msg *msg = msg_new(CMD_ENABLE_TAP);
+    if (msg) msg_post(ap, msg);
 }
 
 // msg->str: the device's name, NULL = the system default
@@ -1028,6 +1071,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
         case CMD_CONFIGURE_DEVICE: cmd_configure_device(ap, msg); break;
         case CMD_SET_OUTPUT_FORMAT: cmd_set_output_format(ap, msg); break;
+        case CMD_ENABLE_TAP:       tap_install(ap); break;
         case CMD_SET_PREPARE_NEXT: ap->prepare_next_seconds = msg->d; break;
         case CMD_GAIN_CACHE_CHANGED:
             for (int i = 0; i < ap->n_tracks; i++) {
@@ -1188,7 +1232,8 @@ int au_init(const AuConfig *config) {
     ap->ring_pool_mutex = SDL_CreateMutex();
     ap->started_sem = SDL_CreateSemaphore(0);
     ap->pub_mutex = SDL_CreateMutex();
-    if (!ap->pub_mutex || !ap->msg_mutex || !ap->wake_sem || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
+    ap->tap_mutex = SDL_CreateMutex();
+    if (!ap->tap_mutex || !ap->pub_mutex || !ap->msg_mutex || !ap->wake_sem || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
         !ap->ring_pool_mutex || !ap->started_sem)
         goto fail_sync;
     publish_idle_status(ap);
@@ -1258,6 +1303,7 @@ fail_sync:
     SDL_DestroyMutex(ap->ring_pool_mutex);
     SDL_DestroySemaphore(ap->started_sem);
     SDL_DestroyMutex(ap->pub_mutex);
+    SDL_DestroyMutex(ap->tap_mutex);
     av_free(ap);
     return AU_ERR_SDL;
 }
@@ -1316,6 +1362,8 @@ void au_shutdown(void) {
     SDL_DestroyMutex(ap->ring_pool_mutex);
     SDL_DestroySemaphore(ap->started_sem);
     SDL_DestroyMutex(ap->pub_mutex);
+    SDL_DestroyMutex(ap->tap_mutex);
+    av_free(ap->tap.buf); // the device is closed: nothing writes it
     av_free(ap);
 
     avformat_network_deinit();

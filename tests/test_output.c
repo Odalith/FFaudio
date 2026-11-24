@@ -4,6 +4,7 @@
  */
 #include "test_common.h"
 #include "../lib/ffaudio_playlist.h"
+#include "../lib/ffaudio_meters.h"
 #include <locale.h>
 #include <math.h>
 #ifndef _WIN32
@@ -926,6 +927,57 @@ static void test_cue_playback(void) {
     free(c.samples);
 }
 
+/* ---------- meters ---------- */
+
+static AuLevels levels_now(void) {
+    AuLevels lv;
+    CHECK(au_get_levels(0.05, &lv) == AU_OK);
+    return lv;
+}
+
+static void test_levels(void) {
+    start_capture_48k("levels");
+    AuLevels lv;
+    CHECK(au_get_levels(0, &lv) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_get_levels(0.6, &lv) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_get_levels(0.05, NULL) == AU_ERR_INVALID_ARGUMENT);
+    lv = levels_now();                          // the first call starts the meters: nothing plays yet
+    CHECK(lv.peak[0] == 0 && lv.rms[0] == 0);
+
+    au_set_volume(0.2f);                        // the meters show the music, not the volume
+    au_play(fx("sine_1k_half.wav"), NULL);
+    CHECK(TC_WAIT_FIELD(started, 1, 3000));
+    tc_sleep_ms(400);
+    lv = levels_now();
+    printf("   playing at volume 0.2: %d ch at %d Hz, window %.3f s, peak %.4f %.4f, rms %.4f %.4f\n", lv.channels,
+           lv.sample_rate, lv.window_seconds, lv.peak[0], lv.peak[1], lv.rms[0], lv.rms[1]);
+    CHECK(lv.channels == 2 && lv.sample_rate == 48000 && fabs(lv.window_seconds - 0.05) < 1e-3);
+    for (int c = 0; c < 2; c++) {
+        CHECK(fabsf(lv.peak[c] - 0.5f) < 0.005f);
+        CHECK(fabsf(lv.rms[c] - 0.35355f) < 0.005f);
+    }
+
+    au_pause(true);
+    tc_sleep_ms(400);
+    lv = levels_now();
+    printf("   paused: peak %.6f\n", lv.peak[0]);
+    CHECK(lv.peak[0] < 1e-6f);
+    au_pause(false);
+    tc_sleep_ms(400);
+    lv = levels_now();
+    printf("   resumed: peak %.4f\n", lv.peak[0]);
+    CHECK(fabsf(lv.peak[0] - 0.5f) < 0.005f);
+
+    au_stop();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    tc_sleep_ms(400);
+    lv = levels_now();
+    printf("   stopped: peak %.6f\n", lv.peak[0]);
+    CHECK(lv.peak[0] < 1e-6f);
+    Capture c = stop_capture();
+    free(c.samples);
+}
+
 /* ---------- ReplayGain ---------- */
 
 // Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
@@ -1286,6 +1338,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_lossy_ranges);
     RUN_TEST(test_resampled_ranges);
     RUN_TEST(test_cue_playback);
+    RUN_TEST(test_levels);
     RUN_TEST(test_restoration_filters);
     RUN_TEST(test_replaygain_levels);
     RUN_TEST(test_replaygain_from_first_sample);

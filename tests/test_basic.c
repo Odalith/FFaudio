@@ -2,6 +2,7 @@
  * Basic behavioural tests: playback to EOF, formats, bad inputs, queueing, pause, seek, stop, loop.
  */
 #include "test_common.h"
+#include "../lib/ffaudio_meters.h"
 #include <math.h>
 
 static void test_play_to_eof(void) {
@@ -190,6 +191,41 @@ static void test_range_time(void) {
     CHECK(tc_snapshot().eof_error == 0);
 }
 
+// Readers of the meters while the output format changes under them: the tap is remade for every format
+static SDL_atomic_t meter_stop;
+static int meter_reader(void *arg) {
+    int *reads = arg;
+    while (!SDL_AtomicGet(&meter_stop)) {
+        AuLevels lv;
+        if (au_get_levels(0.02, &lv) == AU_OK) (*reads)++;
+        if (lv.channels > 8 || lv.peak[0] > 2.0f) (*reads) = -1000000;   // garbage
+        SDL_Delay(1);
+    }
+    return 0;
+}
+
+static void test_meters_during_format_changes(void) {
+    int reads = 0;
+    SDL_AtomicSet(&meter_stop, 0);
+    SDL_Thread *th = SDL_CreateThread(meter_reader, "meter_reader", &reads);
+    REQUIRE(th);
+    au_play(fx("long_6s.flac"), NULL);
+    CHECK(TC_WAIT_FIELD(started, 1, 3000));
+    for (int i = 0; i < 20; i++) {
+        CHECK(au_set_output_format(i % 2 ? 6 : 2, i % 4 < 2 ? 48000 : 44100) == AU_OK);
+        CHECK(TC_WAIT_FIELD(device, i + 1, 3000));
+        tc_sleep_ms(30);
+    }
+    SDL_AtomicSet(&meter_stop, 1);
+    SDL_WaitThread(th, NULL);
+    printf("   %d reads while the format changed 20 times\n", reads);
+    CHECK(reads > 50);
+    au_stop();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    CHECK(au_set_output_format(0, 0) == AU_OK);
+    CHECK(TC_WAIT_FIELD(device, 21, 3000));
+}
+
 static void test_skip_to_next(void) {
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(300);
@@ -322,6 +358,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_prepare_next_setter);
     RUN_TEST(test_output_format_setter);
     RUN_TEST(test_range_time);
+    RUN_TEST(test_meters_during_format_changes);
     RUN_TEST(test_skip_to_next);
     RUN_TEST(test_pause_resume);
     RUN_TEST(test_seek);

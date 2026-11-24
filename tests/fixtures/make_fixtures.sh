@@ -119,6 +119,10 @@ ff -i cd_6s.flac -i chapters.txt -map 0:a -map_metadata 1 -map_chapters 1 -c:a f
 ff -i cd_6s.flac -i chapters.txt -map 0:a -map_metadata 1 -map_chapters 1 -c:a libmp3lame chapters.mp3
 rm -f chapters.txt
 
+# Meters and spectrum: a 1 kHz sine at half of full scale, stereo, 4 s at 48 kHz
+half="0.5*sin(2*PI*1000*t)"
+ff -f lavfi -i "aevalsrc=${half}|${half}:s=48000:d=4" -c:a pcm_f32le sine_1k_half.wav
+
 # Restoration: a 440 Hz sine (1/8) with a 0.6 click every 8000 samples, and a 1/8 sine with a 20 ms burst at 0.3
 # every 0.25 s, hard-clipped at 0.25 (like a loud master: a few percent of the samples clipped; adeclip's cost grows
 # steeply with that share)

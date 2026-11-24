@@ -410,6 +410,7 @@ typedef enum MsgType {
     CMD_SET_SOURCE_FILTERS,
     CMD_SET_PREPARE_NEXT,
     CMD_SET_OUTPUT_FORMAT,
+    CMD_ENABLE_TAP,
     CMD_SET_REPLAYGAIN,
     CMD_GAIN_CACHE_CHANGED,
     CMD_UPDATE_TRACK_FILTERS,
@@ -460,7 +461,23 @@ typedef struct StatusSnapshot {
     double speed;                   // playback speed of the audible audio
     double period;                  // seconds of audio per callback (SDL's buffer), 0 = no callback yet
     bool buffering;                 // the track waits for network data
+    int32_t tap_end;                // MeterTap.published at callback_time
+    int32_t tap_gen;                // MeterTap.gen it counts for
 } StatusSnapshot;
+
+// What the mixer plays, for level meters and the spectrum (au_get_levels(), au_spectrum_read()): the mix after
+// ReplayGain and fades, with the pause fade, before master volume and mute; zeros while paused. A history the audio
+// callback overwrites as it goes, never waiting for a reader; readers copy what they need and check it was not
+// overwritten meanwhile. buf, frames, channels, rate and gen change only on the control thread with tap_mutex and the
+// device lock held: the callback reads them under the device lock, readers under tap_mutex.
+typedef struct MeterTap {
+    int32_t *buf;                   // float bits, interleaved, frames * channels (atomics.h stores: TSan sees them)
+    uint32_t frames;                // a power of two
+    int32_t channels, rate;         // the output format it was made for (the callback writes nothing otherwise)
+    int32_t gen;                    // bumped with every new buffer
+    int32_t written;                // atomics.h: frames counted as written, before their data (wraps)
+    int32_t published;              // atomics.h: frames whose data is in (wraps)
+} MeterTap;
 
 // A float kept in an SDL_atomic_t (its bits)
 static inline void atomic_set_float(SDL_atomic_t *a, const float v) {
@@ -571,10 +588,20 @@ typedef struct AudioPlayer {
     // ---- status for getters ----
     SDL_mutex *status_mutex;            // a mutex (not a spinlock) so ThreadSanitizer can follow it
     StatusSnapshot status;
+
+    // ---- meters ----
+    MeterTap tap;
+    SDL_mutex *tap_mutex;               // readers and the control thread; never the callback. Taken before the device lock
+    SDL_atomic_t tap_requested;         // 1 once a reader asked for the tap (CMD_ENABLE_TAP is posted once)
+    bool tap_enabled;                   // control thread: the tap is kept, and remade for every output format
 } AudioPlayer;
 
 // Shared helpers implemented in ffaudio.c
 void ff_log(enum AU_LOG_LEVEL level, const char *fmt, ...);
+// Any thread: ask the control thread to start the meter tap (once)
+void ff_request_tap(struct AudioPlayer *ap);
+// The player, NULL without one; like au_get_status(), a getter may not race au_shutdown()
+struct AudioPlayer *ff_player(void);
 void ff_post_track_msg(MsgType type, int32_t handle, double d);
 // Publish a track's info (copied) or gain for au_track_info() / au_track_gain_db(); any thread
 void ff_publish_info(struct AudioPlayer *ap, int32_t handle, const AuMediaInfo *info);

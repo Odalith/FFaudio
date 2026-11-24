@@ -431,6 +431,29 @@ static inline float pause_gain_at(const Mixer *m, const int64_t k) {
 }
 
 // Volume (with its 10 ms ramp), the pause fade, clamping and the device format, in one pass over the mix
+// Copy n mixed frames (NULL = silence) into the meter tap at a pause gain going from p0 to p1. Never waits.
+static void tap_put(AudioPlayer *ap, const float *src, const int n, const float p0, const float p1) {
+    MeterTap *tp = &ap->tap;
+    if (!tp->buf || n <= 0 || tp->channels != ap->mixer.channels || tp->rate != ap->mixer.rate) return;
+    const uint32_t w = (uint32_t)ffa_load_relaxed(&tp->written);
+    // Counted first: a reader that sees any of the new data then sees this too, and knows what was overwritten
+    ffa_store_relaxed(&tp->written, (int32_t)(w + (uint32_t)n));
+    const int ch = tp->channels;
+    const uint32_t mask = tp->frames - 1;
+    const float dp = (p1 - p0) / (float)n;
+    for (int i = 0; i < n; i++) {
+        const float g = p0 + dp * (float)i;
+        int32_t *dst = tp->buf + (size_t)((w + (uint32_t)i) & mask) * ch;
+        for (int c = 0; c < ch; c++) {
+            const float v = src ? src[(size_t)i * ch + c] * g : 0.0f;
+            int32_t bits;
+            memcpy(&bits, &v, sizeof(bits));
+            ffa_store_release(&dst[c], bits);
+        }
+    }
+    ffa_store_release(&tp->published, (int32_t)(w + (uint32_t)n));
+}
+
 static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
     Mixer *m = &ap->mixer;
     const float target = SDL_AtomicGet(&ap->muted) ? 0.0f : atomic_get_float(&ap->volume);
@@ -445,10 +468,12 @@ static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
         if (v0 != target) n = FFMIN(n, FFMAX(1, (int)ceilf(fabsf(target - v0) / step)));
         if (m->pause_fade.active) n = (int)FFMIN((int64_t)n, FFMAX(1, m->pause_fade.len - m->pause_fade.pos));
         const float vstep = v0 < target ? step : -step;
-        const float g0 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, 1) * pause_gain_at(m, 0);
-        const float g1 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, n + 1) * pause_gain_at(m, n);
+        const float p0 = pause_gain_at(m, 0), p1 = pause_gain_at(m, n);
+        const float g0 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, 1) * p0;
+        const float g1 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, n + 1) * p1;
         write_block(m, out + (size_t)b * frame_bytes, m->mix_buf + (size_t)b * m->channels, n, g0,
                     (g1 - g0) / (float)n, &dither);
+        tap_put(ap, m->mix_buf + (size_t)b * m->channels, n, p0, p1); // the meters: before volume and mute
 
         m->vol_gain = ramp_at(v0, v0 == target ? 0.0f : vstep, target, n);
         if (m->pause_fade.active) {
@@ -481,6 +506,8 @@ static void publish_status(AudioPlayer *ap, const bool advancing, const int fram
     s.speed = t ? t->play_speed : 1.0;
     s.period = m->rate > 0 ? (double)frames / m->rate : 0;
     s.buffering = t && SDL_AtomicGet(&t->buffering) != 0;
+    s.tap_end = ffa_load_relaxed(&ap->tap.published);
+    s.tap_gen = ap->tap.gen;
     // Never waits: while a getter holds the lock (a copy of a few bytes), this period's status is skipped and the
     // next one, a period later, is published instead
     if (SDL_TryLockMutex(ap->status_mutex) == 0) {
@@ -520,6 +547,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
         else {
             // Paused and faded out: silence, without dither noise
             memset(stream + (size_t)done * frame_bytes, m->format == AUDIO_U8 ? 0x80 : 0, (size_t)n * frame_bytes);
+            tap_put(ap, NULL, n, 0.0f, 0.0f); // the meters keep time with the device
         }
         done += n;
     }
