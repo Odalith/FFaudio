@@ -43,7 +43,9 @@ typedef struct MediaDraft {
 char *text_to_utf8(const char *s);
 
 // Describe the audio stream `stream_index` of an opened (and probed) input. < 0 on failure (nothing to free).
-int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, int stream_index, const char *path);
+// chained_ogg: from ff_open_audio_input() (such a file is not seekable past its first part)
+int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, int stream_index, const char *path,
+                             bool chained_ogg);
 void media_draft_free(MediaDraft *d);
 
 // The immutable block (one allocation, a reference held by the caller); NULL when out of memory

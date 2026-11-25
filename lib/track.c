@@ -962,7 +962,8 @@ static int open_track(TrackState *t) {
     AVFormatContext *ic = NULL;
     int st_index = -1;
     FfOpenStep failed;
-    int ret = ff_open_audio_input(t->filename, t->http_headers, &interrupt, &ic, &st_index, &failed);
+    bool chained = false;
+    int ret = ff_open_audio_input(t->filename, t->http_headers, &interrupt, &ic, &st_index, &chained, &failed);
     if (ret < 0) {
         if (!SDL_AtomicGet(&t->abort_request)) {
             if (failed == FF_OPEN_NO_AUDIO)
@@ -980,7 +981,7 @@ static int open_track(TrackState *t) {
         ic->pb->eof_reached = 0; // FIXME hack, ffplay maybe should not use avio_feof() to test for the end
 
     t->live = t->network && (ic->duration == AV_NOPTS_VALUE || ic->duration <= 0);
-    t->chained_ogg = ff_ogg_is_chained(ic, t->filename);
+    t->chained_ogg = chained;
     // Positions count from the start of the file, like seeks and the duration: MPEG-TS (and so HLS) and some other
     // containers start their timestamps later
     t->pts_offset = ic->start_time != AV_NOPTS_VALUE ? ic->start_time / AV_TIME_BASE_DOUBLE : 0.0;
@@ -989,7 +990,7 @@ static int open_track(TrackState *t) {
     // at the right level
     MediaDraft draft;
     const AuMediaInfo *info = NULL;
-    if (media_draft_from_context(&draft, ic, st_index, t->filename) >= 0) {
+    if (media_draft_from_context(&draft, ic, st_index, t->filename, chained) >= 0) {
         if (t->network) t->icy = add_icy_headers(ic, &draft);
         info = media_info_freeze(&draft);
         media_draft_free(&draft);

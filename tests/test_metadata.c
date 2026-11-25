@@ -95,6 +95,13 @@ static void test_chained_ogg_duration(void) {
     REQUIRE(single);
     CHECK(fabs(single->duration - 2.0) < 0.03 && single->seekable);
     au_media_info_release(single);
+    // Two streams at once whose last pages are the longer one's: not chained (it was taken for chained, and its seeks
+    // were ignored)
+    const AuMediaInfo *muxed = au_probe(fx("muxed.ogg"), NULL);
+    REQUIRE(muxed);
+    printf("   muxed.ogg: %.3f s, seekable %d\n", muxed->duration, muxed->seekable);
+    CHECK(muxed->seekable);
+    au_media_info_release(muxed);
 
     REQUIRE(tc_init_player(0) == 0);
     au_play(fx("chained.ogg"), NULL);
@@ -103,6 +110,13 @@ static void test_chained_ogg_duration(void) {
     au_seek(3.0);                                 // ignored, like on a live stream
     tc_sleep_ms(500);
     CHECK(tc_snapshot().restart == 0);
+    au_stop();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    tc_reset_events();
+    au_play(fx("muxed.ogg"), NULL);
+    CHECK(TC_WAIT_FIELD(started, 1, 5000));
+    au_seek(1.0);
+    CHECK(TC_WAIT_FIELD(restart, 1, 3000));        // a real seek
     au_shutdown();
 }
 

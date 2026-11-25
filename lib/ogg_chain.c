@@ -72,7 +72,23 @@ static int granule_rate(const uint8_t *p, const int n, int64_t *preskip) {
     return 0;
 }
 
-// A local, seekable Ogg input whose first and last pages belong to different streams (pb position restored)
+// Whether the second page begins a stream too. Every stream of a part starts with its BOS page before any other page,
+// so then several streams start together: the file is multiplexed (its last page may well be of another stream).
+static bool second_page_starts_stream(AVIOContext *pb) {
+    uint8_t h[PAGE_HEADER], seg[255];
+    if (avio_seek(pb, 0, SEEK_SET) < 0 || avio_read(pb, h, PAGE_HEADER) != PAGE_HEADER || memcmp(h, "OggS", 4))
+        return false;
+    const int nseg = h[26];
+    if (avio_read(pb, seg, nseg) != nseg) return false;
+    int64_t next = PAGE_HEADER + nseg;
+    for (int i = 0; i < nseg; i++) next += seg[i];
+    if (avio_seek(pb, next, SEEK_SET) < 0 || avio_read(pb, h, PAGE_HEADER) != PAGE_HEADER || memcmp(h, "OggS", 4))
+        return false;
+    return (h[5] & 0x02) != 0;
+}
+
+// A local, seekable Ogg input whose first and last pages belong to different streams, without several streams at
+// once (pb position restored)
 static bool chained(AVFormatContext *ic, const char *path, int64_t *size) {
     AVIOContext *pb = ic->pb;
     if (!pb || !ic->iformat || strcmp(ic->iformat->name, "ogg") || au_is_network_url(path)) return false;
@@ -81,18 +97,13 @@ static bool chained(AVFormatContext *ic, const char *path, int64_t *size) {
     if (*size <= PAGE_HEADER) return false;
     const int64_t saved = avio_tell(pb);
     const uint32_t first = page_serial_at(pb, 0), last = last_page_serial(pb, *size);
+    const bool result = first && last && first != last && !second_page_starts_stream(pb);
     avio_seek(pb, saved, SEEK_SET);
-    return first && last && first != last;
+    return result;
 }
 
-bool ff_ogg_is_chained(AVFormatContext *ic, const char *path) {
-    int64_t size;
-    return chained(ic, path, &size);
-}
-
-int64_t ff_ogg_chained_duration(AVFormatContext *ic, const char *path) {
-    int64_t size = 0;
-    if (!chained(ic, path, &size)) return AV_NOPTS_VALUE;
+// The parts' lengths added up (pb position restored); AV_NOPTS_VALUE when a part is not understood
+static int64_t chained_duration(AVFormatContext *ic, const int64_t size) {
     AVIOContext *pb = ic->pb;
     const int64_t saved = avio_tell(pb);
     int64_t total = AV_NOPTS_VALUE;
@@ -143,4 +154,12 @@ int64_t ff_ogg_chained_duration(AVFormatContext *ic, const char *path) {
 end:
     avio_seek(pb, saved, SEEK_SET);
     return total;
+}
+
+bool ff_ogg_chain_info(AVFormatContext *ic, const char *path, int64_t *duration) {
+    int64_t size = 0;
+    *duration = AV_NOPTS_VALUE;
+    if (!chained(ic, path, &size)) return false;
+    *duration = chained_duration(ic, size);
+    return true;
 }

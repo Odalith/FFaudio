@@ -483,7 +483,7 @@ static int measure_file(const AuLoudnessConfig *cfg, const AVIOInterruptCB *inte
     memset(m, 0, sizeof(*m));
     int st_index = -1;
     FfOpenStep failed;
-    if ((ret = ff_open_audio_input(filename, NULL, interrupt, &ic, &st_index, &failed)) < 0) {
+    if ((ret = ff_open_audio_input(filename, NULL, interrupt, &ic, &st_index, NULL, &failed)) < 0) {
         if (ret == AVERROR(ENOMEM)) result = AU_ERR_NO_MEMORY;
         goto end;
     }

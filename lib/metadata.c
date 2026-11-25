@@ -140,7 +140,8 @@ void media_draft_free(MediaDraft *d) {
     av_dict_free(&d->tags);
 }
 
-int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int stream_index, const char *path) {
+int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int stream_index, const char *path,
+                             const bool chained_ogg) {
     memset(d, 0, sizeof(*d));
     d->path = av_strdup(path ? path : "");
     d->container = av_strdup(ic->iformat && ic->iformat->name ? ic->iformat->name : "");
@@ -174,7 +175,7 @@ int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int
     d->live = d->duration <= 0 && au_is_network_url(d->path);
     d->seekable = !d->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
                                (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
-    if (d->seekable && ff_ogg_is_chained((AVFormatContext *)ic, d->path)) d->seekable = false; // only its first part
+    if (chained_ogg) d->seekable = false; // only its first part
     for (unsigned int i = 0; i < ic->nb_streams; i++)
         if (ic->streams[i]->disposition & AV_DISPOSITION_ATTACHED_PIC) d->picture_count++;
     if (!d->codec) d->codec = av_strdup("");
@@ -285,11 +286,12 @@ const AuMediaInfo *au_probe(const char *filename, int *out_error) {
         return NULL;
     }
     int st = -1;
+    bool chained = false;
     FfOpenStep failed;
-    if ((ret = ff_open_audio_input(filename, NULL, NULL, &ic, &st, &failed)) < 0) goto end;
+    if ((ret = ff_open_audio_input(filename, NULL, NULL, &ic, &st, &chained, &failed)) < 0) goto end;
 
     MediaDraft d;
-    if ((ret = media_draft_from_context(&d, ic, st, filename)) < 0) goto end;
+    if ((ret = media_draft_from_context(&d, ic, st, filename, chained)) < 0) goto end;
     info = media_info_freeze(&d);
     media_draft_free(&d);
     ret = info ? 0 : AVERROR(ENOMEM);

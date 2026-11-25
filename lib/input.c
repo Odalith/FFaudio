@@ -24,12 +24,9 @@
 #include "network.h"
 #include "libavcodec/avcodec.h"
 
-int ff_open_audio_input(const char *path, const char *http_headers, const AVIOInterruptCB *interrupt,
-                        AVFormatContext **out_ic, int *out_stream, FfOpenStep *failed) {
+int ff_open_input(const char *path, const char *http_headers, const AVIOInterruptCB *interrupt,
+                  AVFormatContext **out_ic) {
     *out_ic = NULL;
-    *out_stream = -1;
-    *failed = FF_OPEN_INPUT;
-
     AVFormatContext *ic = avformat_alloc_context();
     if (!ic) return AVERROR(ENOMEM);
     if (interrupt && interrupt->callback) ic->interrupt_callback = *interrupt;
@@ -37,10 +34,24 @@ int ff_open_audio_input(const char *path, const char *http_headers, const AVIOIn
     AVDictionary *opts = NULL;
     av_dict_set(&opts, "scan_all_pmts", "1", 0); // MPEG-TS: every program, also those announced late
     network_input_options(&opts, path, http_headers);
-    int ret = avformat_open_input(&ic, path, NULL, &opts); // probed: never chosen by the file's name; frees ic on failure
+    const int ret = avformat_open_input(&ic, path, NULL, &opts); // probed, never chosen by the name; frees ic on failure
     av_dict_free(&opts);
     if (ret < 0) return ret;
     network_after_open(ic, path);
+    *out_ic = ic;
+    return 0;
+}
+
+int ff_open_audio_input(const char *path, const char *http_headers, const AVIOInterruptCB *interrupt,
+                        AVFormatContext **out_ic, int *out_stream, bool *out_chained, FfOpenStep *failed) {
+    *out_ic = NULL;
+    *out_stream = -1;
+    if (out_chained) *out_chained = false;
+    *failed = FF_OPEN_INPUT;
+
+    AVFormatContext *ic = NULL;
+    int ret = ff_open_input(path, http_headers, interrupt, &ic);
+    if (ret < 0) return ret;
 
     if (ff_input_lacks_audio(ic)) {
         *failed = FF_OPEN_NO_AUDIO;
@@ -51,9 +62,11 @@ int ff_open_audio_input(const char *path, const char *http_headers, const AVIOIn
         *failed = FF_OPEN_STREAM_INFO;
         goto fail;
     }
-    // A chained Ogg file (parts one after another): FFmpeg's duration is its last part's
-    const int64_t chained = ff_ogg_chained_duration(ic, path);
-    if (chained != AV_NOPTS_VALUE) ic->duration = chained;
+    // A chained Ogg file (parts one after another): FFmpeg's duration is its last part's. Looked at once here (it
+    // reads the file's last 64 KB), the callers get the answer
+    int64_t chained_duration;
+    const bool chained = ff_ogg_chain_info(ic, path, &chained_duration);
+    if (chained_duration != AV_NOPTS_VALUE) ic->duration = chained_duration;
 
     const int st = av_find_best_stream(ic, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
     if (st < 0) {
@@ -67,6 +80,7 @@ int ff_open_audio_input(const char *path, const char *http_headers, const AVIOIn
     *failed = FF_OPEN_OK;
     *out_ic = ic;
     *out_stream = st;
+    if (out_chained) *out_chained = chained;
     return 0;
 
 fail:

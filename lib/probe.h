@@ -49,20 +49,27 @@ static inline bool ff_input_lacks_audio(const AVFormatContext *ic) {
 
 typedef enum FfOpenStep { FF_OPEN_OK, FF_OPEN_INPUT, FF_OPEN_NO_AUDIO, FF_OPEN_STREAM_INFO } FfOpenStep;
 
+// Open a file or URL and read only its header (lib/input.c): the protocol whitelist, the network settings and request
+// headers (NULL for none), the interrupt callback (NULL for none), reconnects once open. No stream info is read. On
+// failure *out_ic is NULL and the result an AVERROR.
+int ff_open_input(const char *path, const char *http_headers, const AVIOInterruptCB *interrupt,
+                  AVFormatContext **out_ic);
+
 // Open a file or URL for its audio, the same way everywhere (lib/input.c): the protocol whitelist, the network
 // settings and request headers (NULL for none), the interrupt callback (NULL for none), every MPEG-TS program,
 // the stream info, and the best audio stream, with every other stream discarded. On success *out_ic is open and
 // *out_stream is that stream's index; on failure *out_ic is NULL, the result is an AVERROR and *failed says which
-// step failed. Logs nothing: the callers word their own messages.
+// step failed. *out_chained (may be NULL): a chained Ogg file (ff_ogg_chain_info(); ic->duration is then the real
+// one). Logs nothing: the callers word their own messages.
 int ff_open_audio_input(const char *path, const char *http_headers, const AVIOInterruptCB *interrupt,
-                        AVFormatContext **out_ic, int *out_stream, FfOpenStep *failed);
+                        AVFormatContext **out_ic, int *out_stream, bool *out_chained, FfOpenStep *failed);
 
-// A chained Ogg file's real duration (AV_TIME_BASE units): FFmpeg reports only its last part's. AV_NOPTS_VALUE when
-// the input is not a local, chained Ogg file of Vorbis, Opus or FLAC parts (lib/ogg_chain.c).
-int64_t ff_ogg_chained_duration(AVFormatContext *ic, const char *path);
-// Whether the input is such a chained Ogg file. FFmpeg can not seek past its first part (every part's timestamps start
-// again), so ffaudio treats it as not seekable.
-bool ff_ogg_is_chained(AVFormatContext *ic, const char *path);
+// Whether the input is a local Ogg file of parts one after another (chained: "cat a.ogg b.ogg", a recorded radio
+// stream). FFmpeg can not seek past its first part (every part's timestamps start again), so ffaudio treats it as not
+// seekable. *duration: its real duration (AV_TIME_BASE units; FFmpeg reports only the last part's), or AV_NOPTS_VALUE
+// when it is not chained or its parts are not all Vorbis, Opus or FLAC (lib/ogg_chain.c). An Ogg file with several
+// streams at once (multiplexed: Vorbis and Theora, Opus and a Skeleton) is not chained.
+bool ff_ogg_chain_info(AVFormatContext *ic, const char *path, int64_t *duration);
 
 struct AVCodecContext;
 // An open decoder for the stream with `threads` threads. AVERROR_DECODER_NOT_FOUND when FFmpeg has none.
