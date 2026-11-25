@@ -1,6 +1,6 @@
 # Changelog
 
-## 4.0.0 (unreleased)
+## 4.0.0 (2026-11-25)
 
 A major release that settles the API: [docs/migrating-3-to-4.md](docs/migrating-3-to-4.md) lists every change with
 its replacement. The soname is `libffaudio.so.4`.
