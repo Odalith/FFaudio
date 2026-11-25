@@ -30,7 +30,7 @@
  *   AuSpectrum *sp = au_spectrum_create(2048);   // once
  *   float mags[2048 / 2 + 1], bands[32];
  *   int rate;
- *   if (au_spectrum_read(sp, -1, mags, &rate) == AU_OK)
+ *   if (au_spectrum_read(sp, -1, mags, 2048 / 2 + 1, &rate) == AU_OK)
  *       au_spectrum_bands(mags, 2048, rate, 30, 16000, bands, 32);
  *
  * The first call turns the meters on (until then, a few ms, they read silence); after that they cost a copy of the
@@ -65,11 +65,14 @@ extern "C" {
     typedef struct AuSpectrum AuSpectrum;
     FFAUDIO_API AuSpectrum *au_spectrum_create(int fft_size);
 
-    // fft_size / 2 + 1 magnitudes into `magnitudes`, bin k at k * sample_rate / fft_size Hz; linear, scaled so a
-    // full-scale sine reads 1.0. channel -1 = all channels (their power averaged, so nothing cancels out), else one
-    // (0 = front left). *sample_rate (may be NULL) is the output rate. Zeros when nothing plays or while paused.
-    // AU_ERR_NOT_INITIALIZED without a player, AU_ERR_INVALID_ARGUMENT for a channel the output does not have.
-    FFAUDIO_API int au_spectrum_read(AuSpectrum *spectrum, int channel, float *magnitudes, int *sample_rate);
+    // fft_size / 2 + 1 magnitudes into `magnitudes`, which has room for `capacity` floats (at least that many), bin k
+    // at k * sample_rate / fft_size Hz; linear, scaled so a full-scale sine reads 1.0. channel -1 = all channels
+    // (their power averaged, so nothing cancels out), else one (0 = front left). *sample_rate (may be NULL) is the
+    // output rate. Zeros when nothing plays or while paused. AU_ERR_NOT_INITIALIZED without a player,
+    // AU_ERR_INVALID_ARGUMENT for a capacity below fft_size / 2 + 1 (nothing is written then) or a channel the output
+    // does not have. (No capacity before 4.0.)
+    FFAUDIO_API int au_spectrum_read(AuSpectrum *spectrum, int channel, float *magnitudes, int capacity,
+                                     int *sample_rate);
 
     // Group magnitudes into n_bands log-spaced bands from f_min to f_max Hz (f_max is capped at sample_rate / 2): each
     // band is the largest magnitude in it; a band narrower than a bin takes the nearest bin. For bar visualizers.

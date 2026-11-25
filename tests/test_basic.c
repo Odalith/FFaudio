@@ -272,7 +272,7 @@ static int meter_reader(void *arg) {
         if (au_get_levels(0.02, &lv) == AU_OK) (*reads)++;
         if (lv.channels > 8 || lv.peak[0] > 2.0f) (*reads) = -1000000;   // garbage
         int rate;
-        if (sp && au_spectrum_read(sp, -1, mags, &rate) == AU_OK && mags[20] > 2.0f) (*reads) = -1000000;
+        if (sp && au_spectrum_read(sp, -1, mags, 513, &rate) == AU_OK && mags[20] > 2.0f) (*reads) = -1000000;
         SDL_Delay(1);
     }
     au_spectrum_free(sp);

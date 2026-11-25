@@ -179,9 +179,9 @@ void au_spectrum_free(AuSpectrum *s) {
     av_free(s);
 }
 
-int au_spectrum_read(AuSpectrum *s, const int channel, float *magnitudes, int *sample_rate) {
+int au_spectrum_read(AuSpectrum *s, const int channel, float *magnitudes, const int capacity, int *sample_rate) {
     CHAOS("au_spectrum_read");
-    if (!s || !magnitudes) return AU_ERR_INVALID_ARGUMENT;
+    if (!s || !magnitudes || capacity < s->n / 2 + 1) return AU_ERR_INVALID_ARGUMENT;
     const int bins = s->n / 2 + 1;
     memset(magnitudes, 0, (size_t)bins * sizeof(float));
     if (sample_rate) *sample_rate = 0;

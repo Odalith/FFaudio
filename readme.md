@@ -497,7 +497,7 @@ for (int c = 0; c < lv.channels; c++)
 AuSpectrum *sp = au_spectrum_create(2048);      // once per visualizer
 float mags[2048 / 2 + 1], bars[32];
 int rate;
-au_spectrum_read(sp, -1, mags, &rate);           // all channels; bin k is k * rate / 2048 Hz
+au_spectrum_read(sp, -1, mags, 2048 / 2 + 1, &rate);   // all channels; bin k is k * rate / 2048 Hz
 au_spectrum_bands(mags, 2048, rate, 30, 16000, bars, 32);   // 32 log-spaced bars
 au_spectrum_free(sp);
 ```

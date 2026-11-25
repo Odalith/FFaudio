@@ -1025,16 +1025,20 @@ static void test_spectrum(void) {
     REQUIRE(sp);
     static float mags[2048 / 2 + 1], one[2048 / 2 + 1], bands[32];
     int rate = 0;
-    CHECK(au_spectrum_read(sp, 0, mags, &rate) == AU_ERR_NOT_INITIALIZED);   // no player
+    const int cap = 2048 / 2 + 1;
+    CHECK(au_spectrum_read(sp, 0, mags, cap, &rate) == AU_ERR_NOT_INITIALIZED);   // no player
 
     start_capture_48k("spectrum");
-    CHECK(au_spectrum_read(sp, 9, mags, &rate) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_spectrum_read(sp, 9, mags, cap, &rate) == AU_ERR_INVALID_ARGUMENT);
+    mags[cap - 2] = 7.0f;
+    CHECK(au_spectrum_read(sp, -1, mags, cap - 1, &rate) == AU_ERR_INVALID_ARGUMENT);   // too small for 2048
+    CHECK(mags[cap - 2] == 7.0f);                                                       // and untouched
     au_set_volume(0.2f);
     au_play(fx("sine_1k_half.wav"), NULL);
     CHECK(TC_WAIT_FIELD(started, 1, 3000));
     tc_sleep_ms(400);
-    CHECK(au_spectrum_read(sp, -1, mags, &rate) == AU_OK);
-    CHECK(au_spectrum_read(sp, 0, one, NULL) == AU_OK);
+    CHECK(au_spectrum_read(sp, -1, mags, cap, &rate) == AU_OK);
+    CHECK(au_spectrum_read(sp, 0, one, cap, NULL) == AU_OK);
     int peak = 0;
     for (int k = 1; k <= 1024; k++)
         if (mags[k] > mags[peak]) peak = k;
@@ -1056,7 +1060,7 @@ static void test_spectrum(void) {
 
     au_pause(true);
     tc_sleep_ms(400);
-    CHECK(au_spectrum_read(sp, -1, mags, &rate) == AU_OK);
+    CHECK(au_spectrum_read(sp, -1, mags, cap, &rate) == AU_OK);
     float most = 0;
     for (int k = 0; k <= 1024; k++) most = fmaxf(most, mags[k]);
     printf("   paused: largest bin %.6f\n", most);
