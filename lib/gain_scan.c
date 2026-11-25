@@ -317,6 +317,7 @@ static void start_workers(void) {
             workers[i].exited = false;
         }
         if (workers[i].thread) continue;
+        workers[i].exited = false;
         workers[i].thread = SDL_CreateThread(worker_main, "ffa_gain_scan", (void *)(intptr_t)i);
     }
     SDL_CondBroadcast(wake);
@@ -431,8 +432,9 @@ static int worker_main(void *arg) {
         // joins it later, at once)
         while (!head && !SDL_AtomicGet(&stopping) && index < wanted_workers())
             SDL_CondWait(wake, lock);
-        if (SDL_AtomicGet(&stopping) || index >= wanted_workers()) {
-            workers[index].exited = true;
+        if (SDL_AtomicGet(&stopping)) break;   // au_gain_scan_stop() has taken the slot and joins this thread
+        if (index >= wanted_workers()) {
+            workers[index].exited = true;  // the slot is still this thread's: start_workers() joins it
             break;
         }
 
