@@ -176,7 +176,8 @@ Seeks always cut.
 
 ### 4. Filters
 Filters run after the input has been converted to the output format, so they always see float samples at the
-device's rate and channel count (`AuStatus.sample_rate`, `.channels`).
+device's rate and channel count (`AuStatus.sample_rate`, `.channels`). Where they sit among the other stages:
+[Audio processing chain](#audio-processing-chain).
 
 ```c
 #include <ffaudio_filters.h>
@@ -541,6 +542,40 @@ au_set_upmix(AU_UPMIX_NONE, NULL);              // back to the default
 au_shutdown();   // not from on_event; au_init() may be called again afterwards
 ```
 
+## Audio processing chain
+What happens to the audio of a track, in order, and which setting acts where. Everything after the decoder is 32-bit
+float, so nothing clips before the last step.
+
+```
+file / stream
+  → demuxer → decoder                      the file's own rate, channel layout and sample format
+  → range and seek trim                    au_play_options_set_range(), au_seek(): cut to the exact sample
+  → source filters                         au_set_source_filters(), at the file's own format (e.g. declip)
+  → downmix / upmix                        au_set_downmix(), au_set_upmix(): to the output's channel count
+  → resampler → float                      to the output rate (soxr when available), au_set_output_format()
+  → speed                                  au_set_speed() (atempo, or tape-style resampling)
+  → the track's filters                    au_play_options_set_filters(), au_set_track_filters()
+  → global filters                         au_set_filters(): the ffaudio_filters.h helpers (EQ, limiter, ...)
+  → ring buffer                            about 0.5 s per track, filled by the track's own thread
+── mixer (the SDL audio callback) ──────
+  → ReplayGain gain                        au_set_replaygain(), au_play_options_set_replaygain(), the cache
+                                           (prevent_clipping lowers it so the tagged peak stays at full scale)
+  → fades and crossfades                   au_set_crossfade(), au_play_options_set_fade_in()
+  → the tracks summed                      during a crossfade, the outgoing and the incoming track
+  → pause fade                             au_pause(), with AuCrossfade.on_pause
+  → level meters, spectrum                 au_get_levels(), au_spectrum_read(): what follows is not in them
+  → volume, mute                           au_set_volume() (0..2), au_set_muted(); 10 ms ramps
+  → clamp to full scale, dither            to the device's sample format (TPDF dither for integer formats)
+  → SDL → output device                    au_set_device(); SDL converts if the device differs
+```
+
+So:
+- Filters (an equalizer, a limiter) see each track before ReplayGain, fades and the volume: a filter's level depends
+  on the file, not on the volume knob, and a limiter in the filters does not catch what ReplayGain or a volume above
+  1 add later. Those are clipped at full scale by the last step.
+- Source filters see the samples as stored; every later filter sees the output's rate and channels.
+- The meters show the music after ReplayGain and fades (silent while paused), before the volume knob.
+
 ## Events and threads
 - `on_event` runs on ffaudio's control thread, one event at a time, never on the audio callback. Without it, events
   are queued for `au_poll_event()` / `au_wait_event()` (4096 at most; when the queue is full, log events are dropped
@@ -612,7 +647,7 @@ happen in order are in [docs/threading.md](docs/threading.md), the reference for
 one thread.
 ```
  app ──au_*()──▶ control thread ──creates/destroys──▶ tracks (one thread each; streams also a reader)
-                  │  ▲ events                            │ demux → decode → convert graph → user graph
+                  │  ▲ events                            │ demux → decode → convert → speed → user graph
                   ▼  │                                   ▼
             mixer slots (current / next / outgoing) ◀── lock-free ring of float frames (~0.5 s per track)
                   │
