@@ -33,6 +33,7 @@
 #include "libavutil/intreadwrite.h"
 #include "libavutil/mem.h"
 #include "network.h"
+#include "probe.h"
 #include "numbers.h"
 #include "text_list.h"
 
@@ -518,11 +519,7 @@ const AuCueSheet *au_cue_read(const char *path_or_url, int *out_error) {
 
     // An audio file: only its header is read
     AVFormatContext *ic = NULL;
-    AVDictionary *opts = NULL;
-    network_input_options(&opts, path_or_url, NULL);
-    const int r = avformat_open_input(&ic, path_or_url, NULL, &opts);
-    av_dict_free(&opts);
-    if (r < 0) { *err = AU_ERR_FILE; return NULL; }
+    if (ff_open_input(path_or_url, NULL, NULL, &ic) < 0) { *err = AU_ERR_FILE; return NULL; }
 
     const AuCueSheet *sheet = NULL;
     const AVDictionaryEntry *tag = av_dict_get(ic->metadata, "cuesheet", NULL, 0);

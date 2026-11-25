@@ -3,7 +3,7 @@
 # third-party libraries they need that a plain system does not have, and every license.
 #
 # Usage: scripts/package.sh <archive-name> <deps-prefix> <ffaudio-install-dir> <out-dir>
-#   e.g. scripts/package.sh ffaudio-2.0.0-linux-x86_64 deps/prefix stage dist
+#   e.g. scripts/package.sh ffaudio-4.0.0-linux-x86_64 deps/prefix stage dist
 #
 # Linux: libraries go to lib/; ffaudio, FFmpeg and soxr are linked with RUNPATH $ORIGIN (FFAUDIO_RELOCATABLE,
 #        build-deps.sh), copied system libraries get it with patchelf when they need other bundled libraries.
@@ -39,6 +39,13 @@ rm -rf "$root/lib/cmake/soxr" "$root/share/ffmpeg" "$root/share/doc" 2>/dev/null
 for pc in "$root"/lib/pkgconfig/*.pc; do
     sed -i 's|^prefix=.*|prefix=${pcfiledir}/../..|' "$pc"
 done
+
+# The Python bindings and the player (source; the player needs Textual: pip install -r player/requirements.txt)
+mkdir -p "$root/python" "$root/player"
+cp -a "$src/bindings/python/ffaudio" "$src/bindings/python/README.md" "$root/python/"
+cp -a "$src/player/ffaudio_player" "$src/player/run.py" "$src/player/requirements.txt" "$src/player/README.md" \
+    "$root/player/"
+find "$root/python" "$root/player" -name __pycache__ -type d -prune -exec rm -rf {} +
 
 mkdir -p "$root/share/licenses/ffaudio"
 cp "$src/license.txt" "$root/share/licenses/ffaudio/"
@@ -164,7 +171,11 @@ fi
     echo "https://github.com/Odalith/ffAudio"
     echo
     echo "Contents"
-    echo "  include/            ffaudio.h, ffaudio_filters.h, ffaudio_loudness.h (and FFmpeg's headers)"
+    echo "  include/ffaudio/    ffaudio.h, ffaudio_filters.h, ffaudio_loudness.h, ffaudio_meters.h, ffaudio_playlist.h"
+    echo "  include/            FFmpeg's headers"
+    echo "  python/ffaudio/     Python bindings (ctypes, no compiler needed): finds the library next to it"
+    echo "  player/             a terminal music player built on them: pip install -r player/requirements.txt,"
+    echo "                      then python3 player/run.py ~/Music  (player/README.md)"
     if [ "$os" = linux ]; then
         echo "  lib/                libffaudio.so and the libraries it needs (RUNPATH \$ORIGIN)"
         echo "  lib/pkgconfig       pkg-config files: PKG_CONFIG_PATH=<here>/lib/pkgconfig pkg-config --cflags --libs ffaudio"

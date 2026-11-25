@@ -14,6 +14,7 @@
 
 #include "SDL2/SDL.h"
 #include "../lib/ffaudio.h"
+#include "../lib/ffaudio_loudness.h"
 
 /* ---------- assertions ---------- */
 
@@ -78,6 +79,9 @@ typedef struct TcEvents {
     int log_error;
     int32_t last_eof_handle;
     int32_t last_started_handle;
+    int32_t last_prepare_handle;       // AU_EVENT_PREPARE_NEXT's handle (the track that nears its end)
+    int32_t last_end_error;            // data.ended.error of the last AU_EVENT_TRACK_ENDED
+    char last_end_message[256];        // ... and its message ("" for none)
     double last_duration;
 } TcEvents;
 
@@ -123,6 +127,9 @@ static void tc_on_ended(const AuEvent *e) {
     if (error) tc_ev.eof_error++;
     if (skip) tc_ev.eof_skip++;
     tc_ev.last_eof_handle = e->handle;
+    tc_ev.last_end_error = e->data.ended.error;
+    snprintf(tc_ev.last_end_message, sizeof(tc_ev.last_end_message), "%s",
+             e->data.ended.message ? e->data.ended.message : "");
     SDL_CondBroadcast(tc_cond);
     void (*eof_hook)(bool, bool, int32_t) = tc_on_eof_hook;
     SDL_UnlockMutex(tc_mutex);
@@ -161,6 +168,9 @@ static void tc_event_cb(const AuEvent *e, void *ud) {
             break;
         case AU_EVENT_PREPARE_NEXT: {
             if (tc_verbose) fprintf(stderr, "PREPARE_NEXT current=%d\n", e->handle);
+            SDL_LockMutex(tc_mutex);
+            tc_ev.last_prepare_handle = e->handle;
+            SDL_UnlockMutex(tc_mutex);
             tc_bump(&tc_ev.prepare_next);
             SDL_LockMutex(tc_mutex);
             void (*prep_hook)(void) = tc_on_prepare_next_hook;
@@ -259,18 +269,16 @@ static void tc_sleep_ms(uint32_t ms) { SDL_Delay(ms); }
 static int tc_output_channels = 0;
 static int tc_output_rate = 0;
 
-// Start a player; it opens the system default device (AU_EVENT_DEVICE)
+// Start a player with the tests' settings, and open the system default device in the format asked for (one
+// AU_EVENT_DEVICE)
 static int tc_initialize(int loop_count, double prepare_next_seconds) {
-    const AuConfig config = {
-        .app_name = "ffaudio-tests",
-        .output_channels = tc_output_channels,
-        .output_sample_rate = tc_output_rate,
-        .volume = 0.5f,
-        .loop_count = loop_count,
-        .prepare_next_seconds = prepare_next_seconds,
-        .on_event = tc_event_cb,
-    };
-    return au_init(&config);
+    const int ret = au_init("ffaudio-tests", tc_event_cb, NULL);
+    if (ret != AU_OK) return ret;
+    au_set_volume(0.5f);
+    au_set_loop_count(loop_count);
+    if (prepare_next_seconds > 0) au_set_prepare_next(prepare_next_seconds);
+    if (au_set_output_format(tc_output_channels, tc_output_rate) != AU_OK) return AU_ERR_INVALID_ARGUMENT;
+    return au_open_device();
 }
 
 // A player with its device open: waits for the first AU_EVENT_DEVICE (the tests count from a known state)
@@ -283,6 +291,28 @@ static int tc_init_player_cfg(int loop_count, double prepare_next_seconds) {
 
 static int tc_init_player(int loop_count) {
     return tc_init_player_cfg(loop_count, 0);
+}
+
+// A play-options object with a range (0, 0 = the whole file) and filters (NULL = none). au_play() and au_queue()
+// copy it: tc_play()/tc_queue() free it right after the call.
+static AuPlayOptions *tc_options(double start_seconds, double length_seconds, const char *filters) {
+    AuPlayOptions *o = au_play_options_create();
+    REQUIRE(o);
+    REQUIRE(au_play_options_set_range(o, start_seconds, length_seconds) == AU_OK);
+    REQUIRE(au_play_options_set_filters(o, filters) == AU_OK);
+    return o;
+}
+
+static int32_t tc_play(const char *path, AuPlayOptions *options) {
+    const int32_t h = au_play(path, options);
+    au_play_options_free(options);
+    return h;
+}
+
+static int32_t tc_queue(const char *path, AuPlayOptions *options) {
+    const int32_t h = au_queue(path, options);
+    au_play_options_free(options);
+    return h;
 }
 
 static void tc_setup(int argc, char **argv) {
@@ -306,6 +336,12 @@ static void tc_setup(int argc, char **argv) {
 }
 
 static int tc_finish(const char *name) {
+    // Nothing may call back into the harness any more: scan workers outlive the player, and call on_cached
+    au_gain_scan_stop();
+    SDL_DestroyCond(tc_cond);
+    SDL_DestroyMutex(tc_mutex);
+    tc_cond = NULL;
+    tc_mutex = NULL;
     if (tc_failures) {
         fprintf(stderr, "%s: %d check(s) failed\n", name, tc_failures);
         return 1;

@@ -30,7 +30,7 @@
 #define FF_NETWORK_PROTOCOLS "http,https,tls,tcp,crypto,httpproxy"
 
 // The current au_set_network() settings with defaults filled in. user_agent points into `ua` (size ua_size).
-AuNetworkConfig network_config(char *ua, size_t ua_size); // ua may be NULL: user_agent is then NULL
+AuNetworkSettings network_config(char *ua, size_t ua_size); // ua may be NULL: user_agent is then NULL
 
 // Options for avformat_open_input(&ic, path, ...): the protocol whitelist, and for URLs the timeouts, user agent
 // and extra request headers (may be NULL)

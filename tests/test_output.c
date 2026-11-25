@@ -231,10 +231,8 @@ static void test_volume_ramp(void) {
 // volume=0.5 halves the level: compare against the same file without the filter
 static void check_user_filter(const char *name) {
     start_capture(name);
-    const AuPlayConfig plain = {0};
-    const AuPlayConfig halved = { .filters = "volume=0.5" };
-    au_play(fx("join_a.flac"), &plain);
-    au_queue(fx("join_b.flac"), &halved);
+    tc_play(fx("join_a.flac"), au_play_options_create());   // all defaults: the same as NULL
+    tc_queue(fx("join_b.flac"), tc_options(0, 0, "volume=0.5"));
     wait_until_idle(2, 6000);
     Capture c = stop_capture();
 
@@ -362,9 +360,10 @@ static void test_per_track_fade_override(void) {
     start_capture("override");
     // No crossfade configured, but the queued track asks for a 0.4 s fade in
     const AuFade fade = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER };
-    const AuPlayConfig cfg = { .fade_in = &fade };
+    AuPlayOptions *o = au_play_options_create();
+    REQUIRE(au_play_options_set_fade_in(o, &fade) == AU_OK);
     au_play(fx("join_a.flac"), NULL);
-    au_queue(fx("join_b.flac"), &cfg);
+    tc_queue(fx("join_b.flac"), o);
     wait_until_idle(2, 6000);
     const double s = transition_seconds("override", NULL, NULL);
     CHECK(fabs(s - 1.6) < 0.005);
@@ -404,10 +403,10 @@ static float window_peak(const Capture *c, size_t first, double from_s, double t
 
 // Pausing fades out with the curve run backwards, curve(1 - t), as a crossfade's fade-out does: halfway through an
 // equal-power fade the level is cos(45 deg) = 0.71 of what it was (it used to be 1 - sin(45 deg) = 0.29)
-static void test_pause_fade_curve(void) {
+static float pause_fade_halfway(const AuFade pause) {
     start_capture("pausecurve");
-    const AuCrossfade xf = { .on_pause = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER } };
-    au_set_crossfade(&xf);
+    const AuCrossfade xf = { .on_pause = pause };
+    CHECK(au_set_crossfade(&xf) == AU_OK);
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(1000);
     au_pause(true);
@@ -421,7 +420,49 @@ static void test_pause_fade_curve(void) {
     const double mid_s = (double)(last - first) / c.rate - 0.2;
     const float ratio = window_peak(&c, first, mid_s - 0.003, mid_s + 0.003) / steady;
     printf("   pause fade: level %.3f of steady halfway\n", ratio);
-    CHECK(fabsf(ratio - 0.707f) < 0.05f);
+    free(c.samples);
+    return ratio;
+}
+
+// Volume goes up to 2 (+6 dB): the level doubles, nothing holds it at full scale
+static void test_volume_above_unity(void) {
+    start_capture("volume2");
+    CHECK(au_set_volume(1.0f) == AU_OK);
+    au_play(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(800);
+    CHECK(au_set_volume(2.0f) == AU_OK);
+    CHECK(tc_status().volume == 2.0f);
+    tc_sleep_ms(1000);
+    au_stop();
+    wait_until_idle(1, 3000);
+    Capture c = stop_capture();
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const float at1 = window_peak(&c, first, 0.2, 0.6), at2 = window_peak(&c, first, 1.2, 1.6);
+    printf("   volume 1: peak %.3f, volume 2: peak %.3f (x%.3f)\n", at1, at2, at2 / at1);
+    CHECK(at1 > 0.05f && fabsf(at2 / at1 - 2.0f) < 0.02f);
+    free(c.samples);
+}
+
+static void test_pause_fade_curve(void) {
+    CHECK(fabsf(pause_fade_halfway((AuFade){ .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER }) - 0.707f) < 0.05f);
+}
+
+// A fade given without a curve is equal power (3.x: linear, a 3 dB dip in a crossfade), and an unknown curve is
+// refused instead of becoming linear
+static void test_default_curve_is_equal_power(void) {
+    CHECK(fabsf(pause_fade_halfway((AuFade){ .seconds = 0.4 }) - 0.707f) < 0.05f);
+    CHECK(fabsf(pause_fade_halfway((AuFade){ .seconds = 0.4, .curve = AU_FADE_LINEAR }) - 0.5f) < 0.05f);
+
+    start_capture("badcurve");
+    const AuCrossfade bad = { .on_skip = { .seconds = 1, .curve = (AU_FADE_CURVE)17 } };
+    CHECK(au_set_crossfade(&bad) == AU_ERR_INVALID_ARGUMENT);
+    const AuCrossfade no_fn = { .on_stop = { .seconds = 1, .curve = AU_FADE_CUSTOM } };
+    CHECK(au_set_crossfade(&no_fn) == AU_ERR_INVALID_ARGUMENT);
+    const AuCrossfade nan = { .on_play = { .seconds = NAN } };
+    CHECK(au_set_crossfade(&nan) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_crossfade(NULL) == AU_OK);
+    Capture c = stop_capture();
     free(c.samples);
 }
 
@@ -604,8 +645,7 @@ static void test_upmix(void) {
 static Capture capture_with_filters(const char *name, const char *file, const char *filters) {
     start_capture(name);
     au_set_volume(1.0f);
-    const AuPlayConfig pc = { .filters = filters };
-    au_play(fx(file), &pc);
+    tc_play(fx(file), tc_options(0, 0, filters));
     wait_until_idle(1, 4000);
     return stop_capture();
 }
@@ -718,15 +758,18 @@ static bool counter_exact(const Capture *c, const long first, const long last, c
     return true;
 }
 
-// Consecutive ranges of one file, each queued when the one before asks for its successor
+// Consecutive ranges of one file, each queued when the one before asks for its successor. One options object serves
+// them all, as an application playing a cue sheet would use it: the main thread plays the first range, then hands
+// it to on_event (under tc_mutex), which queues the others.
 static const char *range_file;
 static const double *range_bounds; // n + 1 boundaries in seconds; the last 0 = to the end of the file
 static int range_count, range_next;
+static AuPlayOptions *range_options;
 
-static AuPlayConfig range_config(const int i) {
+static AuPlayOptions *range_config(const int i) {
     const double start = range_bounds[i], end = range_bounds[i + 1];
-    const AuPlayConfig pc = { .start_seconds = start, .length_seconds = end > 0 ? end - start : 0 };
-    return pc;
+    REQUIRE(au_play_options_set_range(range_options, start, end > 0 ? end - start : 0) == AU_OK);
+    return range_options;
 }
 
 static void queue_next_range(void) {
@@ -734,8 +777,7 @@ static void queue_next_range(void) {
     const int i = range_next < range_count ? range_next++ : -1;
     SDL_UnlockMutex(tc_mutex);
     if (i < 0) return;
-    const AuPlayConfig pc = range_config(i);
-    au_queue(fx(range_file), &pc);
+    au_queue(fx(range_file), range_config(i));
 }
 
 static void start_capture_48k(const char *name) {
@@ -746,6 +788,7 @@ static void start_capture_48k(const char *name) {
 
 static Capture play_ranges(const char *name, const char *file, const double *bounds, const int n) {
     start_capture_48k(name);
+    REQUIRE(range_options = au_play_options_create());
     SDL_LockMutex(tc_mutex);
     range_file = file;
     range_bounds = bounds;
@@ -753,11 +796,13 @@ static Capture play_ranges(const char *name, const char *file, const double *bou
     range_next = 1;
     tc_on_prepare_next_hook = queue_next_range;
     SDL_UnlockMutex(tc_mutex);
-    const AuPlayConfig first = range_config(0);
-    au_play(fx(file), &first);
+    // The object is on_event's from the moment au_play() posts the track: no event of it can come earlier
+    au_play(fx(file), range_config(0));
     wait_until_idle(n, 10000);
     SDL_LockMutex(tc_mutex);
     tc_on_prepare_next_hook = NULL;
+    au_play_options_free(range_options);
+    range_options = NULL;
     SDL_UnlockMutex(tc_mutex);
     return stop_capture();
 }
@@ -778,8 +823,7 @@ static void test_exact_ranges(void) {
 static void test_exact_range_loop(void) {
     start_capture_48k("range_loop");
     au_set_loop_count(2);                       // three times in all
-    const AuPlayConfig pc = { .start_seconds = 1.0 / 3.0, .length_seconds = 0.25 };
-    au_play(fx("counter_48k.flac"), &pc);
+    tc_play(fx("counter_48k.flac"), tc_options(1.0 / 3.0, 0.25, NULL));
     wait_until_idle(1, 6000);
     Capture c = stop_capture();
     CHECK(counter_exact(&c, 16001, 28000, 3, "range 1/3 + 0.25 looped twice"));
@@ -788,7 +832,7 @@ static void test_exact_range_loop(void) {
 }
 
 // Plays `pc` of the counter, seeks to `to` after 0.3 s, and checks: a run from first_k, then exactly from_k..last_k
-static void check_exact_seek(const char *what, const AuPlayConfig *pc, const double to, const long first_k,
+static void check_exact_seek(const char *what, const AuPlayOptions *pc, const double to, const long first_k,
                              const long from_k, const long last_k) {
     start_capture_48k("seek");
     au_play(fx("counter_48k.wav"), pc);
@@ -816,8 +860,9 @@ static void check_exact_seek(const char *what, const AuPlayConfig *pc, const dou
 static void test_exact_seek(void) {
     check_exact_seek("seek to 1.5 s", NULL, 1.5, 1, 72001, 192000);
     // In a range, seconds count from its start: 0.5 s + 1.0 s is sample 72000
-    const AuPlayConfig pc = { .start_seconds = 0.5, .length_seconds = 2.0 };
-    check_exact_seek("range 0.5 + 2, seek to 1 s", &pc, 1.0, 24001, 72001, 120000);
+    AuPlayOptions *pc = tc_options(0.5, 2.0, NULL);
+    check_exact_seek("range 0.5 + 2, seek to 1 s", pc, 1.0, 24001, 72001, 120000);
+    au_play_options_free(pc);
 }
 
 // Lossy files: ranges and seeks start from the decoder's preroll, so they match playing the whole file to within the
@@ -869,8 +914,7 @@ static void test_lossy_ranges(void) {
         audible_range(&w, &fw, &lw);
 
         start_capture_48k("lossy_range");
-        const AuPlayConfig pc = { .start_seconds = 1.5 };
-        au_play(fx(files[f]), &pc);
+        tc_play(fx(files[f]), tc_options(1.5, 0, NULL));
         wait_until_idle(1, 8000);
         Capture r = stop_capture();
         size_t fr, lr;
@@ -1001,16 +1045,20 @@ static void test_spectrum(void) {
     REQUIRE(sp);
     static float mags[2048 / 2 + 1], one[2048 / 2 + 1], bands[32];
     int rate = 0;
-    CHECK(au_spectrum_read(sp, 0, mags, &rate) == AU_ERR_NOT_INITIALIZED);   // no player
+    const int cap = 2048 / 2 + 1;
+    CHECK(au_spectrum_read(sp, 0, mags, cap, &rate) == AU_ERR_NOT_INITIALIZED);   // no player
 
     start_capture_48k("spectrum");
-    CHECK(au_spectrum_read(sp, 9, mags, &rate) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_spectrum_read(sp, 9, mags, cap, &rate) == AU_ERR_INVALID_ARGUMENT);
+    mags[cap - 2] = 7.0f;
+    CHECK(au_spectrum_read(sp, -1, mags, cap - 1, &rate) == AU_ERR_INVALID_ARGUMENT);   // too small for 2048
+    CHECK(mags[cap - 2] == 7.0f);                                                       // and untouched
     au_set_volume(0.2f);
     au_play(fx("sine_1k_half.wav"), NULL);
     CHECK(TC_WAIT_FIELD(started, 1, 3000));
     tc_sleep_ms(400);
-    CHECK(au_spectrum_read(sp, -1, mags, &rate) == AU_OK);
-    CHECK(au_spectrum_read(sp, 0, one, NULL) == AU_OK);
+    CHECK(au_spectrum_read(sp, -1, mags, cap, &rate) == AU_OK);
+    CHECK(au_spectrum_read(sp, 0, one, cap, NULL) == AU_OK);
     int peak = 0;
     for (int k = 1; k <= 1024; k++)
         if (mags[k] > mags[peak]) peak = k;
@@ -1032,7 +1080,7 @@ static void test_spectrum(void) {
 
     au_pause(true);
     tc_sleep_ms(400);
-    CHECK(au_spectrum_read(sp, -1, mags, &rate) == AU_OK);
+    CHECK(au_spectrum_read(sp, -1, mags, cap, &rate) == AU_OK);
     float most = 0;
     for (int k = 0; k <= 1024; k++) most = fmaxf(most, mags[k]);
     printf("   paused: largest bin %.6f\n", most);
@@ -1047,12 +1095,16 @@ static void test_spectrum(void) {
 /* ---------- ReplayGain ---------- */
 
 // Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
-static float replaygain_level(const char *file, const AuReplayGainConfig *cfg, const AuReplayGain *override) {
+static float replaygain_level(const char *file, const AuReplayGainSettings *cfg, const AuReplayGain *override) {
     start_capture("replaygain");
     au_set_volume(1.0f);
     if (cfg) CHECK(au_set_replaygain(cfg) == AU_OK);
-    const AuPlayConfig pc = { .replaygain = override };
-    au_play(fx(file), override ? &pc : NULL);
+    AuPlayOptions *o = NULL;
+    if (override) {
+        REQUIRE(o = au_play_options_create());
+        REQUIRE(au_play_options_set_replaygain(o, override) == AU_OK);
+    }
+    tc_play(fx(file), o);
     wait_until_idle(1, 4000);
     Capture c = stop_capture();
     const float db = channel_peak_db(&c, 0);
@@ -1066,11 +1118,11 @@ static float replaygain_level(const char *file, const AuReplayGainConfig *cfg, c
     CHECK(fabsf(a_ - e_) < (tol)); } while (0)
 
 static void test_replaygain_levels(void) {
-    const AuReplayGainConfig track = { .mode = AU_REPLAYGAIN_TRACK };
-    const AuReplayGainConfig album = { .mode = AU_REPLAYGAIN_ALBUM };
-    const AuReplayGainConfig preamp = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 2 };
-    const AuReplayGainConfig fallback = { .mode = AU_REPLAYGAIN_TRACK, .fallback_gain_db = -6 };
-    const AuReplayGainConfig safe = { .mode = AU_REPLAYGAIN_TRACK, .prevent_clipping = true };
+    const AuReplayGainSettings track = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings album = { .mode = AU_REPLAYGAIN_ALBUM };
+    const AuReplayGainSettings preamp = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 2 };
+    const AuReplayGainSettings fallback = { .mode = AU_REPLAYGAIN_TRACK, .fallback_gain_db = -6 };
+    const AuReplayGainSettings safe = { .mode = AU_REPLAYGAIN_TRACK, .prevent_clipping = true };
 
     CHECK_LEVEL(replaygain_level("rg_tagged.flac", NULL, NULL), SINE_DB, 0.1f);            // off by default
     CHECK_LEVEL(replaygain_level("rg_tagged.flac", &track, NULL), SINE_DB - 6, 0.1f);
@@ -1119,7 +1171,7 @@ static void test_gain_change_after_unchanged_late_value(void) {
     CHECK(au_gain_cache_set_file("") == AU_OK); // memory only
     start_capture("late_unchanged");
     au_set_volume(1.0f);
-    const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK }; // no tags, nothing cached: the fallback, 0 dB
+    const AuReplayGainSettings cfg = { .mode = AU_REPLAYGAIN_TRACK }; // no tags, nothing cached: the fallback, 0 dB
     CHECK(au_set_replaygain(&cfg) == AU_OK);
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(800);
@@ -1127,7 +1179,7 @@ static void test_gain_change_after_unchanged_late_value(void) {
     same.track_gain_db = 0;
     CHECK(au_gain_cache_set(fx("long_6s.flac"), &same) == AU_OK);
     tc_sleep_ms(300);
-    const AuReplayGainConfig quieter = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = -6 };
+    const AuReplayGainSettings quieter = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = -6 };
     CHECK(au_set_replaygain(&quieter) == AU_OK);
     tc_sleep_ms(1500);
     au_stop();
@@ -1190,7 +1242,7 @@ static void test_replaygain_from_first_sample(void) {
 
     start_capture("replaygain_first_sample");
     au_set_volume(1.0f);
-    const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings cfg = { .mode = AU_REPLAYGAIN_TRACK };
     CHECK(au_set_replaygain(&cfg) == AU_OK);
     SDL_Thread *writer = SDL_CreateThread(feed_fifo, "fifo", src);
     au_play(fifo_path, NULL);
@@ -1216,7 +1268,7 @@ static void test_replaygain_live_change(void) {
     au_set_volume(1.0f);
     au_play(fx("rg_long.flac"), NULL);
     tc_sleep_ms(1000);
-    const AuReplayGainConfig track = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings track = { .mode = AU_REPLAYGAIN_TRACK };
     CHECK(au_set_replaygain(&track) == AU_OK);
     wait_until_idle(1, 5000);
     Capture c = stop_capture();
@@ -1282,7 +1334,7 @@ static void test_speed(void) {
     CHECK(fabs(r.seconds - 2.0) < 0.1);
     CHECK(fabs(r.frequency - 440) < 5);
 
-    CHECK(au_init(NULL) != AU_OK); // (no player: the setter below must refuse)
+    au_shutdown(); // no player: the setter must refuse
     CHECK(au_set_speed(2.0, true) == AU_ERR_NOT_INITIALIZED);
 }
 
@@ -1399,10 +1451,12 @@ static void test_limiter_and_named_command(void) {
 
 static void test_bad_filter_fails_cleanly(void) {
     start_capture("badfilter");
-    const AuPlayConfig bad = { .filters = "this_filter_does_not_exist=1" };
-    au_play(fx("join_a.flac"), &bad);
+    // Refused at once now; 3.x took it, and the track failed when its graph was built
+    AuPlayOptions *o = tc_options(0, 0, "volume=0.5");
+    CHECK(au_play_options_set_filters(o, "this_filter_does_not_exist=1") == AU_ERR_INVALID_ARGUMENT);
+    tc_play(fx("join_a.flac"), o);                      // still with volume=0.5
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
-    CHECK(tc_snapshot().eof_error == 1);
+    CHECK(tc_snapshot().eof_error == 0);
     Capture c = stop_capture();
     free(c.samples);
 }
@@ -1414,6 +1468,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_crossfade_at_end);
     RUN_TEST(test_fade_out_on_stop);
     RUN_TEST(test_volume_ramp);
+    RUN_TEST(test_volume_above_unity);
     RUN_TEST(test_user_filter);
     RUN_TEST(test_user_filter_comma_locale);
     RUN_TEST(test_crossfade_on_skip);
@@ -1421,6 +1476,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_crossfade_into_slow_open);
     RUN_TEST(test_pause_fade);
     RUN_TEST(test_pause_fade_curve);
+    RUN_TEST(test_default_curve_is_equal_power);
     RUN_TEST(test_per_track_fade_override);
     RUN_TEST(test_short_tracks_stay_gapless);
     RUN_TEST(test_custom_curve);

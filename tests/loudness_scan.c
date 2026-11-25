@@ -47,7 +47,7 @@ static void print_row(const bool csv, const char *name, const AuLoudness *l) {
 }
 
 int main(int argc, char **argv) {
-    AuLoudnessConfig config = {0};
+    AuLoudnessOptions config = {0};
     bool csv = false;
     int first = 1;
     for (; first < argc && argv[first][0] == '-'; first++) {

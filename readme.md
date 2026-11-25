@@ -1,7 +1,8 @@
 <img width="1815" height="150" alt="banner" src="https://github.com/user-attachments/assets/46466334-645f-4585-a24c-55f315cc892c" />
 
-⚠️ This project is in beta since 2.0.0. 3.0.0 changes the API (events, nothing that waits, plain structs, new
-names); [docs/api-3.0.md](docs/api-3.0.md) maps every 2.x function to its replacement.
+⚠️ This project is in beta since 2.0.0. 4.0.0 changes the API again (`au_init()` with plain parameters, a reusable
+options object per track, `int` results everywhere, fixed-size events): [docs/migrating-3-to-4.md](docs/migrating-3-to-4.md)
+lists every change, [docs/migrating-2-to-3.md](docs/migrating-2-to-3.md) maps 2.x to 3.0.
 
 ### FFaudio is a music playback library for C99, built on FFmpeg & SDL2.
 It started as a heavily modified FFplay, so credit for the original design goes to the FFmpeg team and contributors.
@@ -34,7 +35,7 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers for
   graphic and parametric EQ (AutoEq / EqualizerAPO profiles), bass/treble, balance, width, mono, channel swap,
   crossfeed, bs2b, compressor and limiter, and click and clipping repair for damaged sources
-- Volume with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
+- Volume up to 200 % with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
 - Playback speed 0.25x to 4x, keeping the pitch or tape-style, changeable while playing without gaps
 - Events for track open/start/end, prepare-next, restarts (seek/loop), duration, buffering, "now playing", device
   changes and logs: to a callback, or queued for polling on the application's own thread
@@ -43,33 +44,37 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - Surround files up to 7.1 play on multichannel outputs with SDL's speaker order, or are mixed down at full level
   (like mpv), normalized (never clips), or with your own filters (e.g. `sofalizer` for headphones); mono and stereo
   files can be spread over every speaker of a surround output
-- Safe to drive from any thread, including from its own event callback: no function ever waits for the player
+- Safe to drive from any thread, including from its own event callback: no function waits for the player's threads
+  (except `au_shutdown()`, which stops them)
 - Linux tested; Windows builds with MSYS2 (see CI); macOS, Android and iOS untested
 - LGPL-2.1
 
 ## Downloads
 [Releases](https://github.com/Odalith/ffAudio/releases) have ready-built archives for Linux x86_64 and Windows
 x86_64 (MinGW/UCRT). Each contains ffaudio, an LGPL build of FFmpeg trimmed for audio playback (every audio decoder,
-demuxer and audio filter; no encoders, video or network code), soxr and bs2b, with headers, pkg-config and CMake
+demuxer and audio filter, and http/https for streams; no encoders or video), soxr and bs2b, with headers, pkg-config and CMake
 files (`find_package(ffaudio)`). The Windows archive also has SDL2; on Linux SDL2 comes from the system. The FFmpeg
 and soxr sources are attached to each release, and `scripts/build-deps.sh` rebuilds them.
 
 ## Building
-Requires CMake ≥ 3.20, a C99 compiler, SDL2 ≥ 2.24 and FFmpeg ≥ 6.0 (libavcodec, libavformat, libavfilter,
-libswresample, libavutil) with pkg-config.
+Requires CMake ≥ 3.20, GCC or Clang (MinGW on Windows), SDL2 ≥ 2.24 and FFmpeg ≥ 6.0 (libavcodec, libavformat,
+libavfilter, libswresample, libavutil) with pkg-config. ffaudio is a shared library only. Applications may use any
+compiler, MSVC included: the headers are plain C, also valid C++.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # needs the ffmpeg CLI to generate test files
+ctest --test-dir build --output-on-failure   # makes the test files first (needs the ffmpeg CLI and bash)
 cmake --install build                        # installs headers, the library, ffaudio.pc and CMake targets
 ```
 
-Options: `-DBUILD_SHARED_LIBS=OFF` for a static library, `-DFFAUDIO_SANITIZER=address|thread|undefined`,
-`-DFFAUDIO_BUILD_TESTS=OFF`, `-DFFAUDIO_BUILD_MANUAL_PLAYER=OFF`, `-DFFAUDIO_RELOCATABLE=ON` (Linux/macOS: find bundled
-libraries next to libffaudio, for archives like the release ones).
+Options: `-DFFAUDIO_SANITIZER=address|thread|undefined`, `-DFFAUDIO_BUILD_TESTS=OFF`, `-DFFAUDIO_BUILD_TOOLS=OFF`
+(manual player, loudness_scan, soak), `-DFFAUDIO_INSTALL=OFF`, `-DFFAUDIO_RELOCATABLE=ON` (Linux/macOS: find bundled
+libraries next to libffaudio, for archives like the release ones). Tests, tools and install rules are on by default
+only when ffaudio is the top-level project.
 
-Consumers: `pkg-config --cflags --libs ffaudio`, or `find_package` the installed `ffaudio::ffaudio` target.
+Consumers: `pkg-config --cflags --libs ffaudio`, or `find_package(ffaudio)` and link `ffaudio::ffaudio`; a project
+that builds ffaudio with `add_subdirectory()` links the same `ffaudio::ffaudio`.
 
 ## Usage
 
@@ -96,18 +101,18 @@ static void on_event(const AuEvent *e, void *user) {
     }
 }
 
-const AuConfig config = {
-    .app_name = "My Player",
-    .on_event = on_event,    // or NULL, and take events with au_poll_event() on a thread of your choice
-};
-au_init(&config);            // also opens the output device; AU_EVENT_DEVICE says how it went
+// The name the system's sound settings show; on_event (or NULL, and take events with au_poll_event() on a thread of
+// your choice); user data for on_event
+au_init("My Player", on_event, NULL);
 
-// Every setting has a setter, usable any time after au_init()
-au_set_volume(0.8f);         // linear gain 0..1
+// Every setting has a setter, usable any time after au_init(), also before anything plays
+au_set_volume(0.8f);         // linear gain 0..2: 1 = 100 %, above that loud parts can clip
 au_set_device(NULL);         // or a name from au_list_devices(); NULL = the system default, followed when it changes
+au_open_device();            // optional: open it now rather than with the first track; AU_EVENT_DEVICE says how it went
 ```
-`AuConfig` only needs what is fixed for the player's lifetime (`app_name`, `on_event`, `user_data`). Its other fields
-are initial values for settings that have setters, kept for 3.0 programs.
+`au_init()` takes only what is fixed for the player's lifetime. The output device opens when the first track is played
+or queued, with the device and format chosen until then (or at `au_open_device()`), so choosing them never opens it
+twice.
 Everything the player reports is an `AuEvent`: a type, the track's handle and per-type data (`data.ended`,
 `data.restarted`, `data.device`, ...). Without `on_event`, events wait in a queue for `au_poll_event()` (or
 `au_wait_event()` on a thread of its own), which suits UI loops and languages that want them on their own thread.
@@ -116,8 +121,10 @@ Everything the player reports is an `AuEvent`: a type, the track's handle and pe
 ```c
 int32_t handle = au_play("/music/song.flac", NULL);
 
-const AuPlayConfig cfg = { .start_seconds = 30, .length_seconds = 60 };
-au_queue("/music/next.mp3", &cfg);    // starts gaplessly when song.flac ends; plays 0:30 to 1:30 as a 60 s track
+AuPlayOptions *opts = au_play_options_create();   // reusable: au_play() and au_queue() copy it
+au_play_options_set_range(opts, 30, 60);
+au_queue("/music/next.mp3", opts);    // starts gaplessly when song.flac ends; plays 0:30 to 1:30 as a 60 s track
+au_play_options_free(opts);
 
 au_pause(true);
 au_seek(90);                          // seconds; au_seek_fraction(0.5) jumps to the middle
@@ -159,8 +166,9 @@ au_set_crossfade(&xf);   // NULL = gapless + hard cuts
 
 // One track can ask for something else, e.g. no crossfade inside a live album:
 const AuFade none = { 0 };
-const AuPlayConfig gapless = { .fade_in = &none };
-au_queue("/music/live/track2.flac", &gapless);
+AuPlayOptions *gapless = au_play_options_create();
+au_play_options_set_fade_in(gapless, &none);
+au_queue("/music/live/track2.flac", gapless);
 ```
 Curves: linear, equal power, s-curve, logarithmic, exponential, or your own `AuFadeCurveFn`.
 Tracks shorter than `min_track_seconds` (default: twice the fade) and tracks of unknown length play gapless.
@@ -168,7 +176,8 @@ Seeks always cut.
 
 ### 4. Filters
 Filters run after the input has been converted to the output format, so they always see float samples at the
-device's rate and channel count (`AuStatus.sample_rate`, `.channels`).
+device's rate and channel count (`AuStatus.sample_rate`, `.channels`). Where they sit among the other stages:
+[Audio processing chain](#audio-processing-chain).
 
 ```c
 #include <ffaudio_filters.h>
@@ -181,14 +190,13 @@ eq.preamp_db = -3.0;                        // headroom for the boost
 au_fb_add_equalizer(fb, "eq", &eq);         // named: each band can be changed while playing
 au_fb_add_crossfeed(fb, NULL, NULL);        // no name, default settings
 
-char *filters = au_fb_build(fb);
-au_set_filters(filters);                    // every track, changes apply while playing
-au_free(filters);
+au_set_filters(au_fb_peek(fb));             // every track, changes apply while playing; the string is copied
 au_fb_free(fb);
 
 // Per track
-const AuPlayConfig cfg = { .filters = "atempo=1.1" };
-au_play("/music/song.flac", &cfg);
+AuPlayOptions *opts = au_play_options_create();
+au_play_options_set_filters(opts, "atempo=1.1");   // AU_ERR_INVALID_ARGUMENT for a graph FFmpeg refuses
+au_play("/music/song.flac", opts);
 
 // Runtime parameter changes without rebuilding the graph
 au_send_filter_command(0, "equalizer@eq_9", "g", "-4");   // band 9 to -4 dB
@@ -243,15 +251,16 @@ core per track.
 URLs work wherever paths do: files on web and music servers (seekable when the server supports range requests),
 Icecast/SHOUTcast internet radio and HLS (`.m3u8`).
 ```c
-const AuNetworkConfig net = { .user_agent = "myplayer/1.0", .timeout_seconds = 15 };
+const AuNetworkSettings net = { .user_agent = "myplayer/1.0", .timeout_seconds = 15 };
 au_set_network(&net);                                   // optional; also applies to au_probe() and analysis
 
 au_play("https://radio.example.com/stream.mp3", NULL);
 
-const AuPlayConfig cfg = { .http_headers = "Authorization: Bearer abc123" };
-au_queue("https://music.example.com/rest/stream?id=42", &cfg);
+AuPlayOptions *server = au_play_options_create();   // keep it for every track of that server
+au_play_options_set_http_headers(server, "Authorization: Bearer abc123");
+au_queue("https://music.example.com/rest/stream?id=42", server);
 ```
-Network tracks buffer before they start (`AuNetworkConfig.buffer_seconds`, default 2 s) and read ahead up to
+Network tracks buffer before they start (`AuNetworkSettings.buffer_seconds`, default 2 s) and read ahead up to
 `max_buffer_seconds` (10 s). When the network falls behind, the track waits for a full buffer again instead of
 stuttering: its position holds, and it fades back in. `AU_EVENT_BUFFERING` (`data.buffering.active`,
 `.buffered_seconds`) reports both, for a "buffering..." display. Live streams (internet radio, live HLS) have no
@@ -264,7 +273,7 @@ headers as tags. Latin-1 titles from old servers are converted to UTF-8. A dropp
 Local paths may only open local files and URLs only network protocols, so a playlist can not make FFmpeg read
 local files. A server that stops answering ends the track with an error after the timeout; stopping or skipping
 a track that is still connecting interrupts it. Network files are not measured for ReplayGain unless
-`AuNetworkConfig.measure_streams` is set (it downloads the whole file). The release archives use the system's
+`AuGainScanSettings.measure_streams` is set (it downloads the whole file). The release archives use the system's
 GnuTLS for https on Linux and Windows' own TLS.
 
 ### Playlist files
@@ -275,10 +284,10 @@ int err;
 const AuPlaylistFile *pl = au_playlist_read("/music/road trip.m3u8", &err);  // or a station's .pls URL
 if (pl) {
     for (int i = 0; i < pl->count; i++) {
-        const AuPlaylistEntry *e = &pl->entries[i];
+        const AuPlaylistEntry *e = pl->entries[i];
         printf("%s (%s, %.0f s)\n", e->path, e->title, e->duration);       // title "", duration -1 when not given
     }
-    au_play(pl->entries[0].path, NULL);
+    au_play(pl->entries[0]->path, NULL);
     au_playlist_file_release(pl);
 }
 ```
@@ -297,24 +306,24 @@ chapters all list tracks inside one file. `au_cue_read()` reads any of them; eac
 
 static const AuCueSheet *album;
 static int next_track;
+static AuPlayOptions *opts;   // one object for every track
 
-static AuPlayConfig track_config(const AuCueTrack *t) {
-    const AuPlayConfig pc = { .start_seconds = t->start_seconds, .length_seconds = t->length_seconds,
-                              .replaygain = &t->replaygain };   // the sheet's REM REPLAYGAIN_* values, if any
-    return pc;
+static const AuPlayOptions *track_options(const AuCueTrack *t) {
+    au_play_options_set_range(opts, t->start_seconds, t->length_seconds);
+    au_play_options_set_replaygain(opts, &t->replaygain);   // the sheet's REM REPLAYGAIN_* values, if any
+    return opts;
 }
 
 // in on_event, case AU_EVENT_PREPARE_NEXT:
 if (next_track < album->count) {
     const AuCueTrack *t = album->tracks[next_track++];
-    const AuPlayConfig pc = track_config(t);
-    au_queue(t->path, &pc);
+    au_queue(t->path, track_options(t));
 }
 
+opts = au_play_options_create();
 album = au_cue_read("/music/Album/album.cue", NULL);   // or the .flac / .m4b itself
 const AuCueTrack *first = album->tracks[next_track++];
-const AuPlayConfig pc = track_config(first);
-au_play(first->path, &pc);
+au_play(first->path, track_options(first));            // on_event uses opts only once this has posted the track
 printf("%d. %s - %s\n", first->number, first->performer, first->title);
 // au_cue_release(album) once nothing uses its strings any more (the ReplayGain values are copied by au_play())
 ```
@@ -326,7 +335,7 @@ Matroska, MP3 `CHAP` frames). A sheet written for a `.wav` that was later encode
 
 ### 5. ReplayGain and metadata
 ```c
-const AuReplayGainConfig rg = {
+const AuReplayGainSettings rg = {
     .mode = AU_REPLAYGAIN_ALBUM,    // or AU_REPLAYGAIN_TRACK; each falls back to the other gain
     .preamp_db = 0.0,               // added to tagged gains
     .fallback_gain_db = -6.0,       // files without tags
@@ -338,8 +347,9 @@ au_set_replaygain(&rg);             // applies to playing tracks with a short ra
 AuReplayGain mine = AU_REPLAYGAIN_NONE;
 mine.track_gain_db = -7.3f;
 mine.track_peak = 0.97f;
-const AuPlayConfig cfg = { .replaygain = &mine };
-au_play("/music/song.flac", &cfg);
+AuPlayOptions *opts = au_play_options_create();
+au_play_options_set_replaygain(opts, &mine);
+au_play("/music/song.flac", opts);
 
 // Tags and format without playing (no au_init() needed)
 const AuMediaInfo *info = au_probe("/music/song.flac", NULL);
@@ -386,7 +396,7 @@ Tag names are FFmpeg's normalized ones (`title`, `artist`, `album`, `album_artis
 ### 6. Measuring loudness
 Files without ReplayGain/R128 tags (most libraries) can be measured with `ffaudio_loudness.h`. It is separate from
 playback: no `au_init()` needed, it can run in background threads while music plays, and it only reads files. Store
-the results in your own database and hand them back with `AuPlayConfig.replaygain`.
+the results in your own database and hand them back with `au_play_options_set_replaygain()`.
 ```c
 #include <ffaudio_loudness.h>
 
@@ -406,19 +416,20 @@ au_loudness_meter_free(all);
 //         .replaygain_gain_db (re -18 LUFS), .r128_gain_db / .r128_gain_q78 (re -23 LUFS)
 
 AuReplayGain rg = au_loudness_to_replaygain(&track[0], &album);   // save it with the track...
-const AuPlayConfig cfg = { .replaygain = &rg };                    // ...and use it when playing
-au_play(album_files[0], &cfg);
+AuPlayOptions *opts = au_play_options_create();                   // ...and use it when playing
+au_play_options_set_replaygain(opts, &rg);
+au_play(album_files[0], opts);
 ```
 The measurement follows ITU-R BS.1770-4 / EBU R128 (K-weighting at any sample rate, 400 ms gating blocks with
 the -70 LUFS absolute and -10 LU relative gates, EBU Tech 3342 loudness range, 4x oversampled true peak,
 surround channels weighted +1.5 dB) and agrees with FFmpeg's `ebur128` filter. A progress callback in
-`AuLoudnessConfig` reports the position and can cancel a measurement; `skip_true_peak` makes it faster. It runs at a
+`AuLoudnessOptions` reports the position and can cancel a measurement; `skip_true_peak` makes it faster. It runs at a
 few hundred times real time per thread. Meters merge exactly, in any order, so an album's tracks can be measured in
 parallel. `au_loudness_analyze()` measures a single file in one call. `tests/loudness_scan.c` is a small command-line
 example (`loudness_scan [-t] [-c] files...`).
 
 #### ReplayGain cache
-Instead of passing `AuPlayConfig.replaygain` every time, put the values in ffaudio's ReplayGain cache: a
+Instead of passing `au_play_options_set_replaygain()` every time, put the values in ffaudio's ReplayGain cache: a
 persistent key-value store from path to `AuReplayGain`, kept per user and shared by every program that uses
 ffaudio, so values measured once are there in every later run.
 
@@ -440,13 +451,13 @@ ffaudio never tracks, checks or modifies the media files: paths are plain string
 to the application (`au_gain_cache_foreach()` + `au_gain_cache_remove()` to drop entries for deleted files).
 
 When a track starts, its path is looked up and a cached entry is used instead of the file's tags
-(order: `AuPlayConfig.replaygain` > cache > tags). Setting or removing an entry also updates tracks that are
+(order: `au_play_options_set_replaygain()` > cache > tags). Setting or removing an entry also updates tracks that are
 already queued or playing, so a value may arrive after the track was queued.
 
 #### Measuring in the background
 ffaudio fills the cache itself on low-priority worker threads; the application only says what is coming:
 ```c
-const AuReplayGainConfig rg = {
+const AuReplayGainSettings rg = {
     .mode = AU_REPLAYGAIN_TRACK,
     .fallback_gain_db = -6,
     .measure_missing = true,       // a starting track with no value at all is measured right away
@@ -457,10 +468,10 @@ au_set_replaygain(&rg);
 // in on_event, case AU_EVENT_TRACK_STARTED:
 //   keep the next part of the playlist measured; cached, queued and running paths are skipped,
 //   so re-sending the window every time is cheap
-au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
+au_gain_scan_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
 
 // A whole album, so album gains are stored as well
-au_gain_cache_request_album(album_paths, n, AU_SCAN_PREFETCH);
+au_gain_scan_request_album(album_paths, n, AU_SCAN_PREFETCH);
 ```
 - **Prefetch** covers the normal flow and skips within the window: the values are in the cache before the
   tracks start.
@@ -468,9 +479,9 @@ au_gain_cache_request_album(album_paths, n, AU_SCAN_PREFETCH);
   the front of the queue and holds its start until the value is there, at most `measure_wait_seconds`. Most songs
   are measured in well under that. If the wait runs out, the track starts at `fallback_gain_db` and the measured
   value is faded in over 2 s instead of jumping.
-- `AU_SCAN_URGENT` puts requests before everything else (newest first); `au_gain_cache_cancel_requests()` drops
-  the application's queued requests when the playlist changes; `au_gain_cache_pending()` reports progress.
-- `au_gain_scan_configure()` sets the number of worker threads (default 2) and an optional `on_cached`
+- `AU_SCAN_URGENT` puts requests before everything else (newest first); `au_gain_scan_cancel()` drops
+  the application's queued requests when the playlist changes; `au_gain_scan_pending()` reports progress.
+- `au_set_gain_scan()` sets the number of worker threads (default 2) and an optional `on_cached`
   callback, which runs on a worker thread. `au_gain_scan_stop()` stops them; they start again on demand.
 - `au_gain_cache_scan()` is the synchronous version for tools and batch jobs.
 
@@ -490,7 +501,7 @@ for (int c = 0; c < lv.channels; c++)
 AuSpectrum *sp = au_spectrum_create(2048);      // once per visualizer
 float mags[2048 / 2 + 1], bars[32];
 int rate;
-au_spectrum_read(sp, -1, mags, &rate);           // all channels; bin k is k * rate / 2048 Hz
+au_spectrum_read(sp, -1, mags, 2048 / 2 + 1, &rate);   // all channels; bin k is k * rate / 2048 Hz
 au_spectrum_bands(mags, 2048, rate, 30, 16000, bars, 32);   // 32 log-spaced bars
 au_spectrum_free(sp);
 ```
@@ -531,20 +542,75 @@ au_set_upmix(AU_UPMIX_NONE, NULL);              // back to the default
 au_shutdown();   // not from on_event; au_init() may be called again afterwards
 ```
 
+## Python bindings and a player
+`bindings/python` has bindings for every public header (ctypes, nothing to compile; [its README](bindings/python/README.md)):
+```python
+import ffaudio
+ffaudio.init("My Player")
+ffaudio.play("/music/song.flac")
+match ffaudio.wait_event(5.0):
+    case ffaudio.TrackEnded(error=err, message=msg) if err:
+        print("could not play:", msg)
+```
+`player/` is a terminal music player built on them with Textual. It has a queue with playlists, cue sheets and
+streams, gapless playback and crossfades, ReplayGain with a loudness target, a live graphic EQ and headphone
+correction, level meters and a spectrum, and cover art. It is a complete program and an example of ffaudio in use
+([its README](player/README.md)). Both ship with each release:
+`pip install -r player/requirements.txt`, then `python3 player/run.py ~/Music`.
+
+## Audio processing chain
+What happens to the audio of a track, in order, and which setting acts where. Everything after the decoder is 32-bit
+float, so nothing clips before the last step.
+
+```
+file / stream
+  → demuxer → decoder                      the file's own rate, channel layout and sample format
+  → range and seek trim                    au_play_options_set_range(), au_seek(): cut to the exact sample
+  → source filters                         au_set_source_filters(), at the file's own format (e.g. declip)
+  → downmix / upmix                        au_set_downmix(), au_set_upmix(): to the output's channel count
+  → resampler → float                      to the output rate (soxr when available), au_set_output_format()
+  → speed                                  au_set_speed() (atempo, or tape-style resampling)
+  → the track's filters                    au_play_options_set_filters(), au_set_track_filters()
+  → global filters                         au_set_filters(): the ffaudio_filters.h helpers (EQ, limiter, ...)
+  → ring buffer                            about 0.5 s per track, filled by the track's own thread
+── mixer (the SDL audio callback) ──────
+  → ReplayGain gain                        au_set_replaygain(), au_play_options_set_replaygain(), the cache
+                                           (prevent_clipping lowers it so the tagged peak stays at full scale)
+  → fades and crossfades                   au_set_crossfade(), au_play_options_set_fade_in()
+  → the tracks summed                      during a crossfade, the outgoing and the incoming track
+  → pause fade                             au_pause(), with AuCrossfade.on_pause
+  → level meters, spectrum                 au_get_levels(), au_spectrum_read(): what follows is not in them
+  → volume, mute                           au_set_volume() (0..2), au_set_muted(); 10 ms ramps
+  → clamp to full scale, dither            to the device's sample format (TPDF dither for integer formats)
+  → SDL → output device                    au_set_device(); SDL converts if the device differs
+```
+
+So:
+- Filters (an equalizer, a limiter) see each track before ReplayGain, fades and the volume: a filter's level depends
+  on the file, not on the volume knob, and a limiter in the filters does not catch what ReplayGain or a volume above
+  1 add later. Those are clipped at full scale by the last step.
+- Source filters see the samples as stored; every later filter sees the output's rate and channels.
+- The meters show the music after ReplayGain and fades (silent while paused), before the volume knob.
+
 ## Events and threads
-- `on_event` runs on ffaudio's control thread, one event at a time, never on the audio thread. Without it, events
+- `on_event` runs on ffaudio's control thread, one event at a time, never on the audio callback. Without it, events
   are queued for `au_poll_event()` / `au_wait_event()` (4096 at most; when the queue is full, log events are dropped
   first and `AU_EVENT_OVERFLOW` says how many).
 - No `au_*` function waits for the control thread, so every one may be called from `on_event` (except
-  `au_shutdown()`); what it changes comes as later events.
+  `au_shutdown()`, which returns `AU_ERR_WRONG_THREAD` there); what it changes comes as later events.
+- Some calls do slow work on the calling thread: they open or read files (`au_probe()`, `au_media_picture()`,
+  `au_cue_read()`, `au_playlist_read()`), or measure them (`au_loudness_*()`, `au_gain_cache_scan()`). Called from
+  `on_event` they hold up the control thread and with it every other event; call them from a thread of your own.
 - `AU_EVENT_TRACK_ENDED` comes exactly once for every handle returned by `au_play()` / `au_queue()`.
 - Custom fade curves (`AuFadeCurveFn`) are sampled on the control thread when the fade is set up, never on the
-  audio thread.
-- Moving from 2.x: [docs/api-3.0.md](docs/api-3.0.md) has the full list of renamed and replaced functions.
+  audio callback.
+- Moving from 3.x: [docs/migrating-3-to-4.md](docs/migrating-3-to-4.md) lists every change of 4.0.
+- Moving from 2.x: [docs/migrating-2-to-3.md](docs/migrating-2-to-3.md) has the full list of renamed and replaced
+  functions (then the 3-to-4 list).
 
 ## Memory use
 Free what ffaudio returns with ffaudio's functions (`au_media_info_release()`, `au_free_devices()`,
-`au_loudness_meter_free()`, `au_fb_free()`, `au_free()`, ...), never with your own `free()`: on Windows a program
+`au_loudness_meter_free()`, `au_fb_free()`, ...), never with your own `free()`: on Windows a program
 and a DLL can use different C runtimes, and freeing across them corrupts the heap.
 
 On Linux, a process using ffaudio can appear to grow for a while and then level off. That growth is not a leak.
@@ -561,7 +627,7 @@ stayed at a few MB, while the process' RSS rose to about 145 MB in the first hou
 off at 300-350 MB). A plain player, with one track and no background measurement, needs less.
 AddressSanitizer runs of the same test found no leaks.
 
-Network streams are where glibc's defaults cost the most. They read ahead (`AuNetworkConfig.max_buffer_seconds`,
+Network streams are where glibc's defaults cost the most. They read ahead (`AuNetworkSettings.max_buffer_seconds`,
 10 s; a hi-res stream over HTTP is several MB per 10 s), and when a program frees blocks that large, glibc raises
 its thresholds for giving memory back (the "dynamic mmap threshold"), so its pools keep more and more. With a third
 of the tracks streamed over HTTP, 2-hour soak runs with the same seed gave:
@@ -597,7 +663,7 @@ happen in order are in [docs/threading.md](docs/threading.md), the reference for
 one thread.
 ```
  app ──au_*()──▶ control thread ──creates/destroys──▶ tracks (one thread each; streams also a reader)
-                  │  ▲ events                            │ demux → decode → convert graph → user graph
+                  │  ▲ events                            │ demux → decode → convert → speed → user graph
                   ▼  │                                   ▼
             mixer slots (current / next / outgoing) ◀── lock-free ring of float frames (~0.5 s per track)
                   │
@@ -635,14 +701,28 @@ one thread.
 - `test_metadata`: tags, track/disc numbers and ReplayGain/R128 parsing in several formats
 - `test_output`: captures the mixed output and checks gapless joins sample by sample, crossfade lengths,
   fades, volume ramps and live filter changes
+- `test_network`: streams from a local HTTP server: playing, probing and seeking, errors and timeouts, headers,
+  protocol whitelists, live streams, stalls and reconnects, ICY and Ogg titles, playlists over HTTP, measuring
+- `test_playlist`: M3U/M3U8/PLS parsing, paths and URLs resolved against the playlist, HLS, legacy encodings
+- `test_cue`: cue sheets, embedded sheets and chapters
+- `test_races` (chaos builds only): one test per race in docs/threading.md's history, each forcing its delay
 
 `golden_render <fixture-dir> <out.f32> [reference.f32]` (not a CTest) renders a fixed queue of tracks
 without anything depending on timing, so a render from before a change can be compared with one after it.
 
+`scripts/dev/` has the development workflow:
+- `build_all.sh` builds release, ASan, TSan and chaos trees.
+- `run_all.sh` runs every suite against a given SDL2 build and the system's SDL.
+- `chaos_campaign.sh` runs the suites under chaos delays (see docs/threading.md).
+- `golden.sh <git-ref>` compares the golden render with that of an earlier version.
+- `rt_lint.sh` checks the audio callback's code against the real-time rules.
+- `check_symbols.sh` compares the exported functions with `abi/ffaudio.symbols`.
+- `lock_scan.py` lists nested lock acquisitions.
+
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
-`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir | sheet.cue | audio file> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]`
-plays a folder on real hardware for listening tests (Linux and Windows), or the tracks of a cue sheet (or of an audio file with one inside,
-or with chapters). `scripts/make_cue_album.sh <album-dir> <out-dir> [rate]` makes a test album for that from an
+`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player` plays a folder, a cue sheet (or an audio
+file with one inside, or with chapters) or a URL on real hardware for listening tests (Linux and Windows); started
+without arguments it prints its options. `scripts/make_cue_album.sh <album-dir> <out-dir> [rate]` makes a test album for that from an
 album's tracks: one FLAC image (tracks at another sample rate are resampled) and its `album.cue`; the album's files are
 only read.
 

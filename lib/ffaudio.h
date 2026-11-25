@@ -21,9 +21,7 @@
 #ifndef FFAUDIO_H
 #define FFAUDIO_H
 
-#if defined(FFAUDIO_STATIC)
-    #define FFAUDIO_API
-#elif defined(_WIN32)
+#if defined(_WIN32)
     #if defined(FFAUDIO_BUILDING)
         #define FFAUDIO_API __declspec(dllexport)
     #else
@@ -38,8 +36,8 @@
 #include <stdint.h>
 #include <math.h>
 
-#define FFAUDIO_VERSION_MAJOR 3
-#define FFAUDIO_VERSION_MINOR 2
+#define FFAUDIO_VERSION_MAJOR 4
+#define FFAUDIO_VERSION_MINOR 0
 #define FFAUDIO_VERSION_PATCH 0
 
 #ifdef __cplusplus
@@ -57,9 +55,12 @@ extern "C" {
         AU_ERR_DEVICE = -6,
         AU_ERR_WRONG_THREAD = -7,
         AU_ERR_NOTHING_TO_DO = -8,
-        AU_ERR_FILE = -9,              // a file could not be opened or decoded
+        AU_ERR_FILE = -9,              // a file could not be read (missing, no permission, an I/O or network error)
         AU_ERR_CANCELLED = -10,
-        AU_ERR_UNSUPPORTED = -11,       // not available in this build (e.g. an FFmpeg filter that was not compiled in)
+        // not available in this build (e.g. an FFmpeg filter that was not compiled in), or no audio that can be played
+        // in the file (not a media file, no audio stream, a codec this FFmpeg does not have)
+        AU_ERR_UNSUPPORTED = -11,
+        AU_ERR_NOT_SAVED = -12,        // done in memory, but the ReplayGain cache file could not be written. Since 4.0.
     } AU_RESULT;
 
     typedef enum AU_LOG_LEVEL {
@@ -72,8 +73,8 @@ extern "C" {
     //+-----------------------------------------------------+
     //| Events                                              |
     //+-----------------------------------------------------+
-    // Everything the player reports comes as an AuEvent: to AuConfig.on_event on ffaudio's control thread, or, when
-    // on_event is NULL, queued for au_poll_event() / au_wait_event() on a thread of the application's choosing.
+    // Everything the player reports comes as an AuEvent: to the on_event given to au_init(), on ffaudio's control
+    // thread, or, without one, queued for au_poll_event() / au_wait_event() on a thread of the application's choosing.
     // No function waits for the control thread, so every function may be called from on_event (except
     // au_shutdown()); what such a call changes is reported by later events.
 
@@ -111,7 +112,10 @@ extern "C" {
             struct { bool ok; bool fell_back; const char *name; int32_t sample_rate, channels; } device;
             // duration: seconds, -1 = unknown; live: a stream with no end (no duration, no seeking)
             struct { double duration; bool live, seekable; } opened;
-            struct { AU_END reason; } ended;
+            // error (AU_END_ERROR only, otherwise AU_OK): why, as an AU_RESULT (AU_ERR_FILE, AU_ERR_UNSUPPORTED,
+            // AU_ERR_DEVICE, AU_ERR_NO_MEMORY, ...); message: the text that was logged for it (NULL without an error).
+            // Since 4.0.
+            struct { AU_END reason; int32_t error; const char *message; } ended;
             // position in seconds; from_loop: a loop started (loops_remaining after it), otherwise a seek
             struct { double position; bool from_loop; int32_t loops_remaining; } restarted;
             struct { double seconds; } duration;
@@ -120,15 +124,17 @@ extern "C" {
             // Icecast "Artist - Title" is split at " - "; artist is NULL when there is none
             struct { const char *title, *artist; } metadata;
             struct { int32_t dropped; } overflow;
+            // Fixes the size of AuEvent (72 bytes) for the major version, so events may carry more in 4.x
+            uint8_t padding[64];
         } data;
     } AuEvent;
 
     // Strings in the event are valid until the callback returns
     typedef void (*AuEventFn)(const AuEvent *event, void *user_data);
 
-    // The oldest queued event, when AuConfig.on_event is NULL. false = none. Its strings are valid until the next
-    // au_poll_event() / au_wait_event() call or au_shutdown(). The queue holds 4096 events; when it is full, log events are dropped
-    // first, then the oldest, and the next poll returns AU_EVENT_OVERFLOW with the number dropped.
+    // The oldest queued event, when au_init() had no on_event. false = none. Its strings are valid until the next
+    // au_poll_event() / au_wait_event() call or au_shutdown(). The queue holds 4096 events; when it is full, log events
+    // are dropped first, then the oldest, and the next poll returns AU_EVENT_OVERFLOW with the number dropped.
     FFAUDIO_API bool au_poll_event(AuEvent *out);
 
     // au_poll_event() that waits up to timeout_seconds (< 0 = no limit) for an event, for a thread that only handles
@@ -139,19 +145,22 @@ extern "C" {
     //| Fades and crossfades                                |
     //+-----------------------------------------------------+
 
+    // A zeroed AuFade has the default curve, equal power. (Before 4.0 the zero value was linear, and other values
+    // than these fell back to linear; they are refused now.)
     typedef enum AU_FADE_CURVE {
-        AU_FADE_LINEAR = 0,       // gain changes linearly; a crossfade dips ~3 dB in the middle
-        AU_FADE_EQUAL_POWER,      // sin/cos; constant loudness for uncorrelated material (default choice)
-        AU_FADE_S_CURVE,          // smoothstep; gentle start and end
-        AU_FADE_LOGARITHMIC,      // fast rise, slow finish
-        AU_FADE_EXPONENTIAL,      // slow rise, fast finish
-        AU_FADE_CUSTOM,           // use AuFade.custom
+        AU_FADE_EQUAL_POWER = 0,  // sin/cos; constant loudness for uncorrelated material. The default
+        AU_FADE_LINEAR = 1,       // gain changes linearly; a crossfade dips ~3 dB in the middle
+        AU_FADE_S_CURVE = 2,      // smoothstep; gentle start and end
+        AU_FADE_LOGARITHMIC = 3,  // fast rise, slow finish
+        AU_FADE_EXPONENTIAL = 4,  // slow rise, fast finish
+        AU_FADE_CUSTOM = 5,       // use AuFade.custom (which must be set)
     } AU_FADE_CURVE;
 
     // t goes 0 -> 1 over the fade; return the gain (0..1) of the track fading IN.
     // The track fading out uses curve(1 - t). Called on ffaudio's control thread while the fade is set up
-    // (au_set_crossfade(), or the track with AuPlayConfig.fade_in being queued): the curve is sampled at 257
-    // points, which are used from then on, so custom_user only has to live until that call has been processed.
+    // (au_set_crossfade(), or the track with its own fade-in, au_play_options_set_fade_in(), being queued): the curve
+    // is sampled at 257 points, which are used from then on, so custom_user only has to live until that call has been
+    // processed.
     typedef float (*AuFadeCurveFn)(float t, void *custom_user);
 
     // How a fade happens. seconds <= 0 means no fade (cut, or gapless at a natural track end).
@@ -185,14 +194,20 @@ extern "C" {
     // NAN marks a missing value: isnan(rg.album_gain_db)
     typedef struct AuReplayGain {
         float track_gain_db;
-        float track_peak;            // linear sample peak, 1.0 = full scale
+        // linear, 1.0 = full scale: the true peak when ffaudio measured it (the sample peak with skip_true_peak), the
+        // tag's value (normally a sample peak) when it came from tags
+        float track_peak;
         float album_gain_db;
-        float album_peak;
+        float album_peak;            // as track_peak
         bool from_r128;              // the gains came from R128_TRACK_GAIN / R128_ALBUM_GAIN
     } AuReplayGain;
 
-    // No values at all
+    // No values at all (a C compound literal; C++ has no compound literals, so it gets a temporary)
+#ifdef __cplusplus
+    #define AU_REPLAYGAIN_NONE (AuReplayGain{ NAN, NAN, NAN, NAN, false })
+#else
     #define AU_REPLAYGAIN_NONE ((AuReplayGain){ NAN, NAN, NAN, NAN, false })
+#endif
 
     typedef enum AU_REPLAYGAIN_MODE {
         AU_REPLAYGAIN_OFF = 0,
@@ -200,82 +215,91 @@ extern "C" {
         AU_REPLAYGAIN_ALBUM,         // album gain; track gain if the track has none
     } AU_REPLAYGAIN_MODE;
 
-    typedef struct AuReplayGainConfig {
+    typedef struct AuReplayGainSettings {
         AU_REPLAYGAIN_MODE mode;
         double preamp_db;            // added to tagged gains, -15..+15 dB
         double fallback_gain_db;     // used for files without ReplayGain/R128 tags, -30..+15 dB (e.g. -6)
         bool prevent_clipping;       // lower the gain so the tagged peak does not exceed full scale
-        // Measure a starting track that has no value (no AuPlayConfig.replaygain, no cache entry, no
+        // Measure a starting track that has no value (no au_play_options_set_replaygain(), no cache entry, no
         // ReplayGain/R128 tags) with the background queue and store it in the ReplayGain cache
         // (ffaudio_loudness.h). Off by default because it writes to the per-user cache file.
         bool measure_missing;
         // How long such a track waits for its measurement before it starts at fallback_gain_db; the value is
         // then faded in over 2 s when it arrives. 0 = 0.5 s, < 0 = do not wait. At most 10.
         double measure_wait_seconds;
-    } AuReplayGainConfig;
+    } AuReplayGainSettings;
 
     //+-----------------------------------------------------+
-    //| Configuration structs                               |
+    //| Options for one track                               |
     //+-----------------------------------------------------+
 
-    // What au_init() needs. Only app_name, on_event and user_data are fixed for the player's lifetime. Every other
-    // field is the initial value of a setting that has its own setter, the same as calling that setter right after
-    // au_init(); zero (or NULL) keeps the default. New settings only get a setter.
-    typedef struct AuConfig {
-        const char *app_name;                // shown by the system's sound settings
-        float volume;                        // au_set_volume(): linear gain 0..1; < 0 means 1
-        int loop_count;                      // au_set_loop_count(): -1 for infinite, 0 for none
-        double prepare_next_seconds;         // au_set_prepare_next(); 0 = 10 seconds
-        int output_channels;                 // au_set_output_format(): 1..8, 0 = what the device prefers
-        int output_sample_rate;              // au_set_output_format(): 8000..384000 Hz, 0 = what the device prefers
-        const char *device;                  // au_set_device(): a name from au_list_devices(), NULL = system default
-        AuEventFn on_event;                  // NULL = queue events for au_poll_event()
-        void *user_data;                     // passed to on_event
-    } AuConfig;
+    // The options of a track to play, for au_play() and au_queue(), which copy them: one object can serve many tracks
+    // (the same headers for a whole server, a new range for each track of a cue sheet) and be freed at any time.
+    // An object is used by one thread at a time. Each setter returns AU_OK, or AU_ERR_INVALID_ARGUMENT (also for a
+    // NULL object) or AU_ERR_NO_MEMORY, and leaves the object unchanged on error. Since 4.0 (AuPlayConfig before).
+    typedef struct AuPlayOptions AuPlayOptions;
 
-    typedef struct AuPlayConfig {
-        // A range of the file to play as the track, exact to the sample at the file's rate: consecutive ranges of one
-        // file (cue sheet tracks) join with nothing missing or doubled. The track's position, duration, seeks and
-        // events then count from the range's start. Since 3.2 exact and in range time (before: packet-exact, and
-        // positions in file time).
-        double start_seconds;                // start this far into the file; 0 = from the start
-        double length_seconds;               // play this long, then end the track; 0 = to the end
-        // This track's own filter graph (NULL = none), after the conversion to the output format (float, the device's
-        // sample rate and channel layout: AuStatus.sample_rate / .channels) and before the mixer. A new graph is
-        // built for each track. Filters: https://ffmpeg.org/ffmpeg-filters.html
-        const char *filters;
-        // NULL = the AuCrossfade setting. Overrides the fade into this track (on_play for au_play(), on_track_end
-        // or on_skip for au_queue()).
-        const AuFade *fade_in;
-        // NULL = the ReplayGain cache, then the file's tags. Values from your own library database.
-        const AuReplayGain *replaygain;
-        // Network streams only: extra HTTP request headers, one "Name: value" per line, e.g.
-        // "Authorization: Bearer abc\nX-Client: myplayer". For servers that want a token in a header.
-        const char *http_headers;
-    } AuPlayConfig;
+    // A new object with every option at its default; NULL without memory
+    FFAUDIO_API AuPlayOptions *au_play_options_create(void);
+    // NULL is fine
+    FFAUDIO_API void au_play_options_free(AuPlayOptions *options);
+
+    // A range of the file to play as the track: start this far into the file (0 = from the start), play this long and
+    // then end the track (0 = to the end). Both finite and >= 0. Exact to the sample at the file's rate: consecutive
+    // ranges of one file (cue sheet tracks) join with nothing missing or doubled. The track's position, duration,
+    // seeks and events then count from the range's start.
+    FFAUDIO_API int au_play_options_set_range(AuPlayOptions *options, double start_seconds, double length_seconds);
+
+    // This track's own filter graph (NULL or "" = none), after the conversion to the output format (float, the
+    // device's sample rate and channel layout: AuStatus.sample_rate / .channels) and before the mixer. A new graph is
+    // built for each track. Checked like au_validate_filters(). Filters: https://ffmpeg.org/ffmpeg-filters.html
+    FFAUDIO_API int au_play_options_set_filters(AuPlayOptions *options, const char *filters);
+
+    // The fade into this track (copied), instead of the AuCrossfade setting (on_play for au_play(), on_track_end or
+    // on_skip for au_queue()). NULL = the AuCrossfade setting. A fade needs finite seconds and a known curve.
+    FFAUDIO_API int au_play_options_set_fade_in(AuPlayOptions *options, const AuFade *fade);
+
+    // ReplayGain values from your own library database (copied). NULL = the ReplayGain cache, then the file's tags.
+    FFAUDIO_API int au_play_options_set_replaygain(AuPlayOptions *options, const AuReplayGain *replaygain);
+
+    // Network streams only: extra HTTP request headers, one "Name: value" per line, e.g.
+    // "Authorization: Bearer abc\nX-Client: myplayer", for servers that want a token in a header. NULL = none.
+    FFAUDIO_API int au_play_options_set_http_headers(AuPlayOptions *options, const char *headers);
 
     //+-----------------------------------------------------+
     //| Lifetime                                            |
     //+-----------------------------------------------------+
 
-    // Start the player and open the output device (AuConfig.device); AU_EVENT_DEVICE reports the result. Tracks
-    // can be started right away: they wait for the device. Until au_shutdown(), FFmpeg's own error messages come as
-    // AU_EVENT_LOG warnings instead of going to stderr (it sets av_log_set_callback(); an application that wants
-    // FFmpeg's messages itself sets its own callback after au_init()). Since 3.2.
-    FFAUDIO_API int au_init(const AuConfig *config);
+    // Start the player. Only what is fixed for its lifetime is given here: app_name (shown by the system's sound
+    // settings; may be NULL), on_event (NULL = events are queued for au_poll_event()) and user_data (passed to
+    // on_event). Every setting has its own setter, usable right after au_init(), before anything plays: volume 1,
+    // no looping, prepare-next 10 s, the system default device in the format it prefers until they are called.
+    // No output device is opened yet: that happens when the first track is played or queued, with the settings made
+    // until then, or earlier with au_open_device(); AU_EVENT_DEVICE reports it. Until au_shutdown(), FFmpeg's own
+    // error messages come as AU_EVENT_LOG warnings instead of going to stderr (it sets av_log_set_callback(); an
+    // application that wants FFmpeg's messages itself sets its own callback after au_init()).
+    FFAUDIO_API int au_init(const char *app_name, AuEventFn on_event, void *user_data);
 
-    // Stops playback and frees everything. Not from on_event. au_init() may be called again afterwards.
-    FFAUDIO_API void au_shutdown(void);
+    // Open the output device now, with the device and format chosen so far, instead of when the first track plays
+    // (which then starts without waiting for it). AU_EVENT_DEVICE reports the result. Nothing happens when a device is
+    // open already. Since 4.0.
+    FFAUDIO_API int au_open_device(void);
 
-    // Switch the output device: a name from au_list_devices(), or NULL for the system default (followed when it
-    // changes). Returns at once; AU_EVENT_DEVICE reports the result. A chosen device that can not be opened, or that
-    // disappears later, falls back to the system default (fell_back). Choosing the device in use does nothing.
+    // Stops playback and frees everything; au_init() may be called again afterwards. AU_ERR_WRONG_THREAD from on_event
+    // (it would wait for the thread making the call), AU_ERR_NOT_INITIALIZED without a player.
+    FFAUDIO_API int au_shutdown(void);
+
+    // Choose the output device: a name from au_list_devices(), or NULL for the system default (followed when it
+    // changes). Before a device is open this only records the choice; an open device is switched at once. Returns at
+    // once; AU_EVENT_DEVICE reports the result of an open. A chosen device that can not be opened, or that disappears
+    // later, falls back to the system default (fell_back). Choosing the device in use does nothing.
     FFAUDIO_API int au_set_device(const char *name);
 
     // Ask for an output format: channels 1..8 (e.g. 2 to always mix down to stereo) and/or a sample rate
-    // 8000..384000 Hz; 0 = what the device prefers. SDL converts when the device differs. The device is opened again
-    // in the new format and playback continues; AU_EVENT_DEVICE reports the result. Asking for the format already
-    // asked for does nothing. Returns AU_ERR_INVALID_ARGUMENT for values out of range. Since 3.1.
+    // 8000..384000 Hz; 0 = what the device prefers. SDL converts when the device differs. Before a device is open
+    // this only records the choice; an open device is opened again in the new format and playback continues, and
+    // AU_EVENT_DEVICE reports the result. Asking for the format already asked for does nothing. Returns
+    // AU_ERR_INVALID_ARGUMENT for values out of range. Since 3.1.
     FFAUDIO_API int au_set_output_format(int channels, int sample_rate);
 
     // The names of the output devices, *count of them; NULL when there are none. Free with au_free_devices().
@@ -295,37 +319,40 @@ extern "C" {
     //| Playback                                            |
     //+-----------------------------------------------------+
     // These return at once: the change is queued and done in order on the control thread; events report what follows.
+    // Each returns AU_OK, or AU_ERR_NOT_INITIALIZED without a player, AU_ERR_INVALID_ARGUMENT for a value out of
+    // range (nothing changes then) or AU_ERR_NO_MEMORY.
 
-    // Play a file or URL, replacing the current track (a track queued with au_queue() stays queued). config may be
-    // NULL. Returns the track's handle (> 0) at once, or a negative AU_RESULT; a file that can not be opened ends
-    // with AU_END_ERROR.
-    FFAUDIO_API int32_t au_play(const char *path, const AuPlayConfig *config);
+    // Play a file or URL, replacing the current track (a track queued with au_queue() stays queued). options may be
+    // NULL (defaults); they are copied. Returns the track's handle (> 0) at once, or a negative AU_RESULT; a file
+    // that can not be opened ends with AU_END_ERROR.
+    FFAUDIO_API int32_t au_play(const char *path, const AuPlayOptions *options);
 
     // Queue a file to play after the current one (gapless, or crossfaded per AuCrossfade.on_track_end), replacing
     // a queued one. If nothing is playing it starts right away. Returns the handle (> 0) or a negative AU_RESULT.
-    FFAUDIO_API int32_t au_queue(const char *path, const AuPlayConfig *config);
+    FFAUDIO_API int32_t au_queue(const char *path, const AuPlayOptions *options);
 
     // End the current track now and start the queued one (crossfaded per AuCrossfade.on_skip). Without a queued
     // track this stops playback.
-    FFAUDIO_API void au_skip(void);
+    FFAUDIO_API int au_skip(void);
 
     // Remove the queued track
-    FFAUDIO_API void au_clear_queue(void);
+    FFAUDIO_API int au_clear_queue(void);
 
     // Stop everything (fades out per AuCrossfade.on_stop) and clear the queue
-    FFAUDIO_API void au_stop(void);
+    FFAUDIO_API int au_stop(void);
 
     // Pause (fading out per AuCrossfade.on_pause) or resume
-    FFAUDIO_API void au_pause(bool paused);
+    FFAUDIO_API int au_pause(bool paused);
 
-    // Seek the current track to this many seconds from its start (of its range, AuPlayConfig.start_seconds), exact to
-    // the sample. A position past the end ends the track (or loops it).
-    FFAUDIO_API void au_seek(double seconds);
+    // Seek the current track to this many seconds (>= 0) from its start (of its range, au_play_options_set_range()),
+    // exact to the sample. A position past the end ends the track (or loops it).
+    FFAUDIO_API int au_seek(double seconds);
 
     // Seek the current track to this fraction (0..1) of its duration; also before the duration is known
-    FFAUDIO_API void au_seek_fraction(double fraction);
+    FFAUDIO_API int au_seek_fraction(double fraction);
 
     // Set when and how fades and crossfades happen. NULL disables them all (gapless + hard cuts).
+    // AU_ERR_INVALID_ARGUMENT, and nothing changes, when a fade's seconds are not finite or its curve is unknown.
     FFAUDIO_API int au_set_crossfade(const AuCrossfade *config);
 
     // Playback speed for all tracks, 0.25..4 (1 = normal). keep_pitch: change the tempo only (atempo); false:
@@ -334,13 +361,15 @@ extern "C" {
     // prepare_next_seconds stay in wall clock time.
     FFAUDIO_API int au_set_speed(double speed, bool keep_pitch);
 
-    // Linear gain 0..1 for everything played
-    FFAUDIO_API void au_set_volume(float gain);
+    // Linear gain 0..2 for everything played: 1 = as decoded (100 %), 2 = +6 dB. Above 1 loud parts can clip at the
+    // device; that is the caller's choice. The volume comes last, after the filters (so a limiter there does not
+    // catch it) and after ReplayGain. AU_ERR_INVALID_ARGUMENT for anything else. (0..1 before 4.0.)
+    FFAUDIO_API int au_set_volume(float gain);
 
-    FFAUDIO_API void au_set_muted(bool muted);
+    FFAUDIO_API int au_set_muted(bool muted);
 
-    // Applies to the current, the queued and future tracks. -1 = infinite, 0 = none.
-    FFAUDIO_API void au_set_loop_count(int count);
+    // Applies to the current, the queued and future tracks. -1 = infinite, 0 = none (AU_ERR_INVALID_ARGUMENT below -1).
+    FFAUDIO_API int au_set_loop_count(int count);
 
     // How long before the end of the current track AU_EVENT_PREPARE_NEXT comes, in seconds as heard (the crossfade
     // into the next track is added). Default 10. Also applies to the current track when its event has not come yet.
@@ -356,21 +385,18 @@ extern "C" {
     // crypto, httpproxy): a playlist can not make FFmpeg read local files or other protocols. Opening a URL takes
     // a moment; stopping or skipping a track that is still connecting interrupts it.
 
-    typedef struct AuNetworkConfig {
+    typedef struct AuNetworkSettings {
         const char *user_agent;       // NULL = "ffaudio/<version>"
         double timeout_seconds;       // connecting and every read; 0 = 10 s. A dead server ends the track with an error
         double buffer_seconds;        // live streams: audio buffered before starting and after a stall; 0 = 2 s
         double max_buffer_seconds;    // most audio read ahead from the network; 0 = 10 s. More rides out longer
                                       // stalls, but costs memory (on Linux glibc keeps it afterwards, per thread)
         int reconnect_attempts;       // after a dropped connection, with growing delays; 0 = 5, -1 = never
-        // Measure network files for ReplayGain (AuReplayGainConfig.measure_missing, au_gain_cache_request()).
-        // false (default): they are skipped, since measuring downloads the whole file
-        bool measure_streams;
-    } AuNetworkConfig;
+    } AuNetworkSettings;
 
     // Settings for every network stream (player, au_probe(), loudness analysis); NULL restores the defaults. Can be
     // called at any time, also before au_init(); tracks that are already open keep their settings.
-    FFAUDIO_API int au_set_network(const AuNetworkConfig *config);
+    FFAUDIO_API int au_set_network(const AuNetworkSettings *config);
 
     // true for http(s):// and other URLs with a scheme other than file://
     FFAUDIO_API bool au_is_network_url(const char *path);
@@ -383,7 +409,7 @@ extern "C" {
     // helpers that build common strings (equalizer, crossfeed, bs2b, gain).
     // Changes take effect within about half a second (the audio already decoded plays out first).
 
-    // Filters applied to every track, after the track's own (AuPlayConfig.filters). NULL or "" removes them.
+    // Filters applied to every track, after the track's own (au_play_options_set_filters()). NULL or "" removes them.
     // Returns AU_ERR_INVALID_ARGUMENT (and changes nothing) if the string does not parse.
     FFAUDIO_API int au_set_filters(const char *filters);
 
@@ -452,7 +478,7 @@ extern "C" {
 
     // Apply ReplayGain/R128 tags automatically. NULL = off (the default). Applies to playing tracks
     // right away (with a short ramp) and to every later track.
-    FFAUDIO_API int au_set_replaygain(const AuReplayGainConfig *config);
+    FFAUDIO_API int au_set_replaygain(const AuReplayGainSettings *config);
 
     // The ReplayGain gain ffaudio applies to a track (handle 0 = the current track), in dB. Never waits.
     // AU_ERR_NOTHING_TO_DO when the track is unknown, has ended, or is not open yet (AU_EVENT_TRACK_OPENED).
@@ -474,7 +500,7 @@ extern "C" {
     // Media files are never touched.
     //
     // When a track starts, ffaudio looks up its path (exactly as passed to au_play()/au_queue()) and
-    // uses a cached entry instead of the file's tags. Order: AuPlayConfig.replaygain > cache > file tags.
+    // uses a cached entry instead of the file's tags. Order: au_play_options_set_replaygain() > cache > file tags.
     // Setting or removing an entry also updates tracks that are already queued or playing (with a short ramp),
     // so values can arrive after the track was queued:
     //
@@ -497,37 +523,41 @@ extern "C" {
     FFAUDIO_API int au_gain_cache_reload(void);
 
     // Store (or replace) the values for a path. Returns AU_ERR_INVALID_ARGUMENT for a NULL/empty path or rg, and
-    // AU_ERR_FILE when the entry is in memory but could not be written to the cache file.
+    // AU_ERR_NOT_SAVED when the entry is in memory but could not be written to the cache file (AU_ERR_FILE before 4.0).
     FFAUDIO_API int au_gain_cache_set(const char *path, const AuReplayGain *rg);
 
     // true and *out filled (out may be NULL) when the path is cached
     FFAUDIO_API bool au_gain_cache_get(const char *path, AuReplayGain *out);
 
-    // true when an entry was removed
-    FFAUDIO_API bool au_gain_cache_remove(const char *path);
+    // AU_OK when an entry was removed, AU_ERR_NOTHING_TO_DO when there was none, AU_ERR_INVALID_ARGUMENT for a
+    // NULL/empty path, AU_ERR_NOT_SAVED when it is gone from memory but the cache file could not be written.
+    // (A bool before 4.0.)
+    FFAUDIO_API int au_gain_cache_remove(const char *path);
 
-    // Remove every entry, also from the cache file
-    FFAUDIO_API void au_gain_cache_clear(void);
+    // Remove every entry, also from the cache file: AU_OK, or AU_ERR_NOT_SAVED when the file could not be written
+    FFAUDIO_API int au_gain_cache_clear(void);
 
     FFAUDIO_API int au_gain_cache_count(void);
 
     // Visit every entry (a snapshot, so the callback may call au_gain_cache_* functions). Return false from the
     // callback to stop (e.g. to export the cache or drop entries for files that no longer exist).
     // Returns the number of entries visited.
-    typedef bool (*AuGainCacheVisitor)(const char *path, const AuReplayGain *rg, void *user);
-    FFAUDIO_API int au_gain_cache_foreach(AuGainCacheVisitor visitor, void *user);
+    typedef bool (*AuGainCacheVisitorFn)(const char *path, const AuReplayGain *rg, void *user);
+    FFAUDIO_API int au_gain_cache_foreach(AuGainCacheVisitorFn visitor, void *user);
 
     //+-----------------------------------------------------+
     //| Metadata                                            |
     //+-----------------------------------------------------+
 
+    // A finished key/value pair: AuMediaInfo.tags is an array of them, and AuTag never gains fields
     typedef struct AuTag {
         const char *key;
         const char *value;
     } AuTag;
 
     // Everything about a file, in one immutable block: it never changes after it was made, and every pointer in it
-    // stays valid until au_media_info_release(). Strings are UTF-8 and never NULL ("" when unknown).
+    // stays valid until au_media_info_release(). Strings are UTF-8 and never NULL ("" when unknown); tags stored in
+    // another encoding (WAV and AIFF chunks) are read as Windows-1252.
     typedef struct AuMediaInfo {
         const char *path;            // as given to au_probe() / au_play()
         const char *container;       // e.g. "flac", "mp3", "ogg", "mov,mp4,m4a,3gp,3g2,mj2"
@@ -611,7 +641,7 @@ extern "C" {
         bool buffering;                // the audible track waits for network data (its position holds)
         // The settings as last set, also before the control thread has applied them
         bool paused, muted;
-        float volume;
+        float volume;                  // 0..2, 1 = 100 %
         double speed;
         bool keep_pitch;
         int loop_count;
@@ -627,9 +657,9 @@ extern "C" {
     // "major.minor.patch"
     FFAUDIO_API const char *au_get_version(void);
 
-    // Free memory ffaudio returns without a dedicated free function, such as au_fb_build() strings. Like
-    // au_free_devices(), it frees with ffaudio's own C runtime (see there).
-    FFAUDIO_API void au_free(void *ptr);
+    // What an AU_RESULT means, in English ("invalid argument", ...): static text, never NULL ("unknown result" for
+    // other values). Since 4.0.
+    FFAUDIO_API const char *au_result_string(int result);
 
 #ifdef __cplusplus
 } // extern "C"

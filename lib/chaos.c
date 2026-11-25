@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <SDL.h>
 #include "once.h"
 #ifdef _WIN32
@@ -31,17 +32,40 @@
 #else
 #include <time.h>
 #endif
-#ifdef _MSC_VER
-#define CHAOS_TLS __declspec(thread)
-#else
-#define CHAOS_TLS _Thread_local
-#endif
+#define CHAOS_TLS _Thread_local // GCC and Clang (MinGW too): ffaudio is not built with MSVC
 
 static unsigned chaos_seed = 1, chaos_percent = 0, chaos_max_us = 2000;
 static FfOnce chaos_once = FF_ONCE_INIT;
 static CHAOS_TLS uint64_t rng_state;
 
+// Points named in FFAUDIO_CHAOS_AT="name=us|name=us" (point names contain commas): they sleep exactly that long every
+// time (tests/test_races.c)
+#define MAX_FORCED 16
+typedef struct Forced {
+    char name[96];
+    unsigned us;
+} Forced;
+static Forced forced[MAX_FORCED];
+static int n_forced = 0;
+
+static void parse_forced(const char *e) {
+    while (e && *e && n_forced < MAX_FORCED) {
+        const char *end = strchr(e, '|');
+        const size_t len = end ? (size_t)(end - e) : strlen(e);
+        const char *eq = memchr(e, '=', len);
+        if (eq && eq > e && (size_t)(eq - e) < sizeof(forced[0].name)) {
+            Forced *f = &forced[n_forced++];
+            memcpy(f->name, e, (size_t)(eq - e));
+            f->name[eq - e] = '\0';
+            f->us = (unsigned)strtoul(eq + 1, NULL, 10);
+            fprintf(stderr, "[ffaudio chaos] '%s' always sleeps %u us\n", f->name, f->us);
+        }
+        e = end ? end + 1 : NULL;
+    }
+}
+
 static void chaos_init(void) {
+    parse_forced(getenv("FFAUDIO_CHAOS_AT"));
     const char *e = getenv("FFAUDIO_CHAOS");
     if (!e || !e[0]) return;
     unsigned seed = 1, percent = 10, max_us = 2000;
@@ -77,6 +101,12 @@ static void sleep_us(const unsigned us) {
 
 void ff_chaos_point(const char *where, const int realtime) {
     ff_once(&chaos_once, chaos_init);
+    for (int i = 0; i < n_forced; i++) {
+        if (!strcmp(forced[i].name, where)) {
+            sleep_us(forced[i].us); // also in the callback: underruns are expected then
+            return;
+        }
+    }
     if (!chaos_percent) return;
     const uint32_t r = next_random(where);
     if (r % 100 >= chaos_percent) return;

@@ -165,13 +165,6 @@ void au_fb_clear(AuFilterBuilder *fb) {
     fb->name[0] = '\0';
 }
 
-char *au_fb_build(const AuFilterBuilder *fb) {
-    if (!fb || !fb->bp.len) return NULL;
-    char *s = malloc(fb->bp.len + 1); // au_free() frees it, with ffaudio's C runtime
-    if (s) memcpy(s, fb->bp.str, fb->bp.len + 1);
-    return s;
-}
-
 const char *au_fb_peek(const AuFilterBuilder *fb) {
     return (fb && fb->bp.len) ? fb->bp.str : "";
 }
@@ -180,12 +173,9 @@ const char *au_fb_last_error(const AuFilterBuilder *fb) {
     return fb ? fb->error : "no builder";
 }
 
-void au_free(void *ptr) {
-    free(ptr);
-}
-
 int au_fb_add(AuFilterBuilder *fb, const char *filter) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    fb->error[0] = '\0'; // au_fb_last_error() is about this call only
     if (!filter || !filter[0]) return finish(fb, fail(fb, "empty filter"));
     return finish(fb, append(fb, filter));
 }
@@ -195,8 +185,10 @@ bool au_filter_available(const char *name) {
 }
 
 // The start of every au_fb_add_*() call with a name: check it and use it for the filters of this call (finish()
-// clears it). NULL or "" = no name.
+// clears it). NULL or "" = no name. It also clears the last error: au_fb_last_error() is about this call only, also
+// when it succeeds without adding anything (default settings).
 static int begin(AuFilterBuilder *fb, const char *name) {
+    fb->error[0] = '\0';
     fb->name[0] = '\0';
     if (!name || !name[0]) return AU_OK;
     const size_t n = strlen(name);
@@ -236,7 +228,8 @@ AuEqualizer au_equalizer_defaults(void) {
 }
 
 static int add_equalizer(AuFilterBuilder *fb, const AuEqualizer *eq) {
-    if (!eq) return fail(fb, "no equalizer settings");
+    const AuEqualizer defaults = au_equalizer_defaults();
+    if (!eq) eq = &defaults;
     if (!in_range(eq->preamp_db, -30.0, 30.0)) return fail(fb, "preamp must be between -30 and +30 dB");
     const int r = require(fb, "equalizer");
     if (r != AU_OK) return r;
@@ -303,7 +296,8 @@ static bool peq_band_ok(const AuPeqBand *b, char *err, const size_t size) {
 }
 
 static int add_parametric_eq(AuFilterBuilder *fb, const AuParametricEq *eq) {
-    if (!eq) return fail(fb, "no equalizer settings");
+    const AuParametricEq none = {0}; // the default: no bands, no preamp
+    if (!eq) eq = &none;
     if (eq->band_count < 0 || eq->band_count > AU_PEQ_MAX_BANDS)
         return fail(fb, "band_count must be between 0 and %d", AU_PEQ_MAX_BANDS);
     if (!in_range(eq->preamp_db, -30.0, 30.0)) return fail(fb, "preamp must be between -30 and +30 dB");
@@ -511,7 +505,8 @@ AuStereo au_stereo_defaults(void) {
 }
 
 static int add_stereo(AuFilterBuilder *fb, const AuStereo *st) {
-    if (!st) return fail(fb, "no stereo settings");
+    const AuStereo defaults = au_stereo_defaults();
+    if (!st) st = &defaults;
     if (!in_range(st->balance, -1.0, 1.0)) return fail(fb, "balance must be between -1 and 1");
     if (!in_range(st->width, 0.0, 4.0)) return fail(fb, "width must be between 0 (mono) and 4");
     const bool mono = st->width < MONO_WIDTH;

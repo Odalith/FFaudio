@@ -21,15 +21,17 @@
  *
  *   manual_player <music-dir | sheet.cue | audio file | URL> [-u URL]... [-x crossfade-seconds] [-f "filter string"]
  *                 [-n count] [-s] [-c channels]
- *                 [-d full|norm|"filters"] [-r track|album] [-g] [-G cache-file]
+ *                 [-d full|norm|"filters"] [-r track|album] [-R preamp-dB] [-g] [-G cache-file]
  *                 [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]
  *
+ *   -R  ReplayGain pre-amp, -15..15 dB; default +4, which plays at -14 LUFS like Spotify's "Normal" (0 = the
+ *       ReplayGain 2.0 reference, -18 LUFS)
  *   -g  use the ReplayGain cache (track mode unless -r is given); files it does not know are measured and
  *       stored, in the background for queued tracks. -G uses another cache file (implies -g)
  *   -e  equalizer: bass, treble, v-shape, vocal, or 10 gains in dB for 31 Hz..16 kHz (e.g. 4,3,0,0,0,0,0,0,2,3)
  *   -X  headphone crossfeed;  -b  bs2b with the default, Chu Moy or Jan Meier profile (both need stereo output)
  *   -P  parametric EQ from an EqualizerAPO / AutoEq ParametricEQ.txt file (headphone correction)
- *   -L  limiter at -1 dBFS;  -C  compressor: gentle (levelling) or night (low-volume listening)
+ *   -L  limiter at -1 dBFS (always on while the equalizer boosts a band);  -C  compressor: gentle (levelling) or night (low-volume listening)
  *
  * Plays the files under <music-dir> (shuffled with -s; cover art, playlists and other non-audio files are skipped),
  * queueing the next one from on_prepare_next. A .cue sheet, or an audio file with an embedded cue sheet or chapters,
@@ -281,7 +283,7 @@ static bool use_cache = false;
 // described by the entry of the same index here (NULL when playing a folder)
 typedef struct CueEntry {
     int number;
-    double start, length;            // AuPlayConfig.start_seconds / .length_seconds (0 = to the end)
+    double start, length;            // au_play_options_set_range() (0 = to the end)
     char *title, *performer;
     AuReplayGain replaygain;         // the sheet's REM REPLAYGAIN_* values
 } CueEntry;
@@ -302,21 +304,25 @@ static bool take_next(size_t *index) {
 
 static void prefetch_upcoming(void);
 
-static AuPlayConfig play_config(const size_t index) {
-    AuPlayConfig cfg = { .filters = filter };
+// The options to play entry `index` with (NULL without memory: then defaults); free with au_play_options_free()
+static AuPlayOptions *play_options(const size_t index) {
+    AuPlayOptions *o = au_play_options_create();
+    if (!o) return NULL;
+    if (au_play_options_set_filters(o, filter) != AU_OK) fprintf(stderr, "invalid filters: %s\n", filter);
     if (cue_entries) {
         const CueEntry *e = &cue_entries[index];
-        cfg.start_seconds = e->start;
-        cfg.length_seconds = e->length;
-        if (!isnan(e->replaygain.track_gain_db) || !isnan(e->replaygain.album_gain_db)) cfg.replaygain = &e->replaygain;
+        au_play_options_set_range(o, e->start, e->length);
+        if (!isnan(e->replaygain.track_gain_db) || !isnan(e->replaygain.album_gain_db))
+            au_play_options_set_replaygain(o, &e->replaygain);
     }
-    return cfg;
+    return o;
 }
 
 // Play (or queue) entry `index`; returns the handle
 static int32_t start_entry(const size_t index, const bool queue) {
-    const AuPlayConfig cfg = play_config(index);
-    const int32_t h = queue ? au_queue(files[index], &cfg) : au_play(files[index], &cfg);
+    AuPlayOptions *o = play_options(index);
+    const int32_t h = queue ? au_queue(files[index], o) : au_play(files[index], o);
+    au_play_options_free(o);
     if (h > 0) {
         lock(&files_lock);
         handle_map[handle_map_next].handle = h;
@@ -447,7 +453,7 @@ static void prefetch_upcoming(void) {
     for (size_t i = next_index; i < file_count && i < max_tracks && n < PREFETCH_COUNT; i++)
         upcoming[n++] = files[i];
     unlock(&files_lock);
-    au_gain_cache_request(upcoming, n, AU_SCAN_PREFETCH);
+    au_gain_scan_request(upcoming, n, AU_SCAN_PREFETCH);
 }
 
 static void queue_next_file(void) {
@@ -536,14 +542,15 @@ static void apply_effects(void) {
         if (au_fb_add_parametric_eq(fb, NULL, &peq) != AU_OK) printf("  parametric eq: %s\n", au_fb_last_error(fb));
         ADD_DESC(" peq(%d bands)", peq.band_count);
     }
+    bool eq_boosts = false;
     if (eq_index > 0) {
         AuEqualizer eq = au_equalizer_defaults();
-        double max_gain = 0;
         for (int i = 0; i < AU_EQ_BANDS; i++) {
             eq.gain_db[i] = eq_presets[eq_index].gain_db[i];
-            if (eq.gain_db[i] > max_gain) max_gain = eq.gain_db[i];
+            if (eq.gain_db[i] > 0) eq_boosts = true;
         }
-        eq.preamp_db = -max_gain; // headroom for the boosts
+        // No pre-amp: lowering everything by the largest boost made every preset quieter than no EQ at all. The
+        // limiter below catches the peaks a boost pushes over full scale instead.
         if (au_fb_add_equalizer(fb, NULL, &eq) != AU_OK)
             printf("  equalizer: %s\n", au_fb_last_error(fb));
         ADD_DESC(" eq=%s", eq_presets[eq_index].name);
@@ -581,9 +588,9 @@ static void apply_effects(void) {
         if (au_fb_add_compressor(fb, NULL, &c) != AU_OK) printf("  compressor: %s\n", au_fb_last_error(fb));
         ADD_DESC(" compressor=%s", compressor_names[compressor_mode]);
     }
-    if (limiter_on) {
+    if (limiter_on || eq_boosts) {
         if (au_fb_add_limiter(fb, NULL, NULL) != AU_OK) printf("  limiter: %s\n", au_fb_last_error(fb));
-        ADD_DESC(" limiter(-1 dB)");
+        ADD_DESC(limiter_on ? " limiter(-1 dB)" : " limiter(-1 dB, for the EQ boost)");
     }
 
     const char *filters = au_fb_peek(fb);
@@ -744,7 +751,7 @@ int main(int argc, char **argv) {
     }
 #endif
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <music-dir | sheet.cue | audio file | URL> [-u URL]... [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]\n", argv[0]);
+        fprintf(stderr, "usage: %s <music-dir | sheet.cue | audio file | URL> [-u URL]... [-x crossfade-seconds] [-f filter] [-n count] [-s] [-c channels] [-d full|norm|\"downmix filters\"] [-r track|album] [-R preamp-dB] [-g] [-G cache-file] [-e preset|g1,...,g10] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]\n", argv[0]);
         return 1;
     }
     double crossfade = 0;
@@ -752,6 +759,7 @@ int main(int argc, char **argv) {
     int channels = 0;
     const char *downmix = NULL;
     const char *replaygain = NULL;
+    double rg_preamp = 4.0;   // -14 LUFS, Spotify's "Normal"; ReplayGain's own reference is -18
     const char *cache_file = NULL;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "-x") && i + 1 < argc) crossfade = atof(argv[++i]);
@@ -761,6 +769,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-c") && i + 1 < argc) channels = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) downmix = argv[++i];
         else if (!strcmp(argv[i], "-r") && i + 1 < argc) replaygain = argv[++i];
+        else if (!strcmp(argv[i], "-R") && i + 1 < argc) rg_preamp = atof(argv[++i]);
         else if (!strcmp(argv[i], "-g")) use_cache = true;
         else if (!strcmp(argv[i], "-G") && i + 1 < argc) { cache_file = argv[++i]; use_cache = true; }
         else if (!strcmp(argv[i], "-e") && i + 1 < argc) {
@@ -808,13 +817,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    const AuConfig config = {
-        .app_name = "ffaudio manual player",
-        .volume = 0.6f,
-        .output_channels = channels,
-        .on_event = on_event,
-    };
-    if (au_init(&config) != AU_OK) return 1;
+    if (au_init("ffaudio manual player", on_event, NULL) != AU_OK) return 1;
+    au_set_volume(0.6f);
+    if (channels) au_set_output_format(channels, 0);
+    au_open_device(); // show the device at start
 
     int n = 0;
     char **devs = au_list_devices(&n);
@@ -822,14 +828,16 @@ int main(int argc, char **argv) {
     au_free_devices(devs, n);
 
     if (replaygain) {
-        const AuReplayGainConfig rg = {
+        const AuReplayGainSettings rg = {
             .mode = !strcmp(replaygain, "album") ? AU_REPLAYGAIN_ALBUM : AU_REPLAYGAIN_TRACK,
+            .preamp_db = rg_preamp,
             .fallback_gain_db = -6.0,
             .prevent_clipping = true,
             .measure_missing = use_cache,   // -g: tracks without a value are measured (waits up to 500 ms)
         };
-        au_set_replaygain(&rg);
-        printf("ReplayGain: %s mode, -6 dB for untagged files\n", rg.mode == AU_REPLAYGAIN_ALBUM ? "album" : "track");
+        if (au_set_replaygain(&rg) != AU_OK) { fprintf(stderr, "-R: the pre-amp must be -15..15 dB\n"); return 1; }
+        printf("ReplayGain: %s mode, pre-amp %+.1f dB (%.0f LUFS), -6 dB for untagged files\n",
+               rg.mode == AU_REPLAYGAIN_ALBUM ? "album" : "track", rg_preamp, -18.0 + rg_preamp);
     }
 
     if (use_cache) {
@@ -839,8 +847,8 @@ int main(int argc, char **argv) {
         au_gain_cache_get_file(where, sizeof(where));
         printf("ReplayGain cache: %s (%d entries); uncached files are measured in the background\n",
                where[0] ? where : "memory only", au_gain_cache_count());
-        const AuGainScanConfig scan = { .on_cached = on_cached };
-        au_gain_scan_configure(&scan);
+        const AuGainScanSettings scan = { .on_cached = on_cached };
+        au_set_gain_scan(&scan);
     }
 
     if (downmix) {
@@ -909,7 +917,7 @@ int main(int argc, char **argv) {
                 break;
             case '+':
             case '=': {
-                const float v = fminf(1.0f, status().volume + 0.05f);
+                const float v = fminf(2.0f, status().volume + 0.05f);
                 au_set_volume(v);
                 printf("  volume %.0f%%\n", v * 100);
                 break;

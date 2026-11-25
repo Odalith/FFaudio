@@ -80,7 +80,7 @@ AuReplayGain replaygain_from_tags(const AVDictionary *tags) {
     return rg;
 }
 
-double replaygain_gain_db(const AuReplayGainConfig *cfg, const AuReplayGain *rg) {
+double replaygain_gain_db(const AuReplayGainSettings *cfg, const AuReplayGain *rg) {
     if (!cfg || cfg->mode == AU_REPLAYGAIN_OFF) return 0.0;
 
     const bool album = cfg->mode == AU_REPLAYGAIN_ALBUM;
@@ -106,30 +106,77 @@ double replaygain_gain_db(const AuReplayGainConfig *cfg, const AuReplayGain *rg)
 //| AuMediaInfo                                         |
 //+-----------------------------------------------------+
 
+// Strict UTF-8: no overlong forms, no surrogates (U+D800..DFFF), nothing above U+10FFFF
 static bool valid_utf8(const unsigned char *s) {
     while (*s) {
-        int n = *s < 0x80 ? 0 : (*s & 0xE0) == 0xC0 ? 1 : (*s & 0xF0) == 0xE0 ? 2 : (*s & 0xF8) == 0xF0 ? 3 : -1;
-        if (n < 0 || (n == 1 && *s < 0xC2)) return false;
-        s++;
-        while (n-- > 0) {
-            if ((*s & 0xC0) != 0x80) return false;
-            s++;
-        }
+        const unsigned char c = *s;
+        if (c < 0x80) { s++; continue; }
+        int n;
+        unsigned char lo = 0x80, hi = 0xBF;          // allowed range of the second byte
+        if (c >= 0xC2 && c <= 0xDF) n = 1;
+        else if (c == 0xE0) { n = 2; lo = 0xA0; }
+        else if (c == 0xED) { n = 2; hi = 0x9F; }
+        else if (c >= 0xE1 && c <= 0xEF) n = 2;
+        else if (c == 0xF0) { n = 3; lo = 0x90; }
+        else if (c == 0xF4) { n = 3; hi = 0x8F; }
+        else if (c >= 0xF1 && c <= 0xF3) n = 3;
+        else return false;
+        if (s[1] < lo || s[1] > hi) return false;
+        for (int i = 2; i <= n; i++)
+            if ((s[i] & 0xC0) != 0x80) return false;
+        s += n + 1;
     }
     return true;
 }
 
+// Windows-1252's characters for 0x80..0x9F, where Latin-1 has control codes; the five it leaves undefined stay those
+// controls (as WHATWG reads it). 0xA0..0xFF are the same in both.
+static const uint16_t cp1252_high[32] = {
+    0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D,
+    0x017D, 0x008F, 0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A,
+    0x0153, 0x009D, 0x017E, 0x0178,
+};
+
 char *text_to_utf8(const char *s) {
     if (!s) return NULL;
     if (valid_utf8((const unsigned char *)s)) return av_strdup(s);
-    char *out = av_malloc(strlen(s) * 2 + 1), *o = out;
+    char *out = av_malloc(strlen(s) * 3 + 1), *o = out;
     if (!out) return NULL;
     for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
-        if (*p < 0x80) *o++ = (char)*p;
-        else { *o++ = (char)(0xC0 | (*p >> 6)); *o++ = (char)(0x80 | (*p & 0x3F)); }
+        const unsigned cp = *p >= 0x80 && *p <= 0x9F ? cp1252_high[*p - 0x80] : *p;
+        if (cp < 0x80) *o++ = (char)cp;
+        else if (cp < 0x800) {
+            *o++ = (char)(0xC0 | (cp >> 6));
+            *o++ = (char)(0x80 | (cp & 0x3F));
+        }
+        else {
+            *o++ = (char)(0xE0 | (cp >> 12));
+            *o++ = (char)(0x80 | ((cp >> 6) & 0x3F));
+            *o++ = (char)(0x80 | (cp & 0x3F));
+        }
     }
     *o = '\0';
     return out;
+}
+
+// Tag values that are not UTF-8 (WAV INFO and AIFF chunks, broken files) read as Windows-1252, like other text
+static void tags_to_utf8(AVDictionary **tags) {
+    const AVDictionaryEntry *e = NULL;
+    bool all_valid = true;
+    while (all_valid && (e = av_dict_get(*tags, "", e, AV_DICT_IGNORE_SUFFIX)))
+        all_valid = valid_utf8((const unsigned char *)e->value);
+    if (all_valid) return;
+    AVDictionary *fixed = NULL;
+    e = NULL;
+    while ((e = av_dict_get(*tags, "", e, AV_DICT_IGNORE_SUFFIX))) {
+        char *v = text_to_utf8(e->value);
+        if (!v || av_dict_set(&fixed, e->key, v, AV_DICT_DONT_STRDUP_VAL | AV_DICT_MULTIKEY) < 0) {
+            av_dict_free(&fixed);
+            return; // out of memory: keep them as they are
+        }
+    }
+    av_dict_free(tags);
+    *tags = fixed;
 }
 
 void media_draft_free(MediaDraft *d) {
@@ -140,7 +187,8 @@ void media_draft_free(MediaDraft *d) {
     av_dict_free(&d->tags);
 }
 
-int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int stream_index, const char *path) {
+int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int stream_index, const char *path,
+                             const bool chained_ogg) {
     memset(d, 0, sizeof(*d));
     d->path = av_strdup(path ? path : "");
     d->container = av_strdup(ic->iformat && ic->iformat->name ? ic->iformat->name : "");
@@ -168,13 +216,14 @@ int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int
         if (av_channel_layout_describe(&par->ch_layout, layout, sizeof(layout)) >= 0)
             d->channel_layout = av_strdup(layout);
     }
+    tags_to_utf8(&d->tags);   // AuMediaInfo promises UTF-8
     // After the stream's duration has filled in a missing one. Live = a network stream without an end, as the player
     // treats it; a local file of unknown length still ends. HLS seeks through its playlist, everything else needs a
     // seekable byte stream.
     d->live = d->duration <= 0 && au_is_network_url(d->path);
     d->seekable = !d->live && (!ic->pb || (ic->pb->seekable & AVIO_SEEKABLE_NORMAL) ||
                                (ic->iformat && ic->iformat->name && !strcmp(ic->iformat->name, "hls")));
-    if (d->seekable && ff_ogg_is_chained((AVFormatContext *)ic, d->path)) d->seekable = false; // only its first part
+    if (chained_ogg) d->seekable = false; // only its first part
     for (unsigned int i = 0; i < ic->nb_streams; i++)
         if (ic->streams[i]->disposition & AV_DISPOSITION_ATTACHED_PIC) d->picture_count++;
     if (!d->codec) d->codec = av_strdup("");
@@ -189,7 +238,7 @@ int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int
 
 // The block behind an AuMediaInfo: the reference count, the struct, the tag array, then every string
 typedef struct MediaBlock {
-    SDL_atomic_t refs;
+    FfAtomic refs;
     AuMediaInfo info;
 } MediaBlock;
 
@@ -217,7 +266,7 @@ const AuMediaInfo *media_info_freeze(const MediaDraft *d) {
     const size_t head = sizeof(MediaBlock) + (size_t)n_tags * sizeof(AuTag);
     MediaBlock *b = av_malloc(head + chars);
     if (!b) return NULL;
-    SDL_AtomicSet(&b->refs, 1);
+    ffa_store(&b->refs, 1);
     AuMediaInfo *info = &b->info;
     AuTag *tags = (AuTag *)(b + 1);
     char *arena = (char *)b + head;
@@ -251,7 +300,7 @@ const AuMediaInfo *media_info_freeze(const MediaDraft *d) {
 }
 
 const AuMediaInfo *media_info_retain(const AuMediaInfo *info) {
-    if (info) SDL_AtomicIncRef(&block_of(info)->refs);
+    if (info) ffa_fetch_add(&block_of(info)->refs, 1);
     return info;
 }
 
@@ -285,11 +334,12 @@ const AuMediaInfo *au_probe(const char *filename, int *out_error) {
         return NULL;
     }
     int st = -1;
+    bool chained = false;
     FfOpenStep failed;
-    if ((ret = ff_open_audio_input(filename, NULL, NULL, &ic, &st, &failed)) < 0) goto end;
+    if ((ret = ff_open_audio_input(filename, NULL, NULL, &ic, &st, &chained, &failed)) < 0) goto end;
 
     MediaDraft d;
-    if ((ret = media_draft_from_context(&d, ic, st, filename)) < 0) goto end;
+    if ((ret = media_draft_from_context(&d, ic, st, filename, chained)) < 0) goto end;
     info = media_info_freeze(&d);
     media_draft_free(&d);
     ret = info ? 0 : AVERROR(ENOMEM);
@@ -303,7 +353,7 @@ end:
 void au_media_info_release(const AuMediaInfo *info) {
     if (!info) return;
     MediaBlock *b = block_of(info);
-    if (SDL_AtomicDecRef(&b->refs)) av_free(b);
+    if (ffa_fetch_add(&b->refs, -1) == 1) av_free(b); // the last reference
 }
 
 // Case-insensitive, like AVDictionary

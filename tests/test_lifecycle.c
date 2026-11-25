@@ -2,29 +2,63 @@
  * Lifecycle tests: calls before init, shutdown while playing, init again after shutdown.
  */
 #include "test_common.h"
+#include <math.h>
 
 static void test_calls_before_init(void) {
-    /* None of these may crash when the player does not exist */
-    au_play(fx("s44_stereo.flac"), NULL);
-    au_queue(fx("s44_stereo.flac"), NULL);
-    au_skip();
-    au_clear_queue();
-    au_stop();
-    au_pause(true);
-    au_seek(0.01);
-    au_seek_fraction(0.1);
-    au_set_volume(0.1f);
-    au_set_muted(true);
+    /* None of these may crash when the player does not exist, and each says so */
+    CHECK(au_play(fx("s44_stereo.flac"), NULL) == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_queue(fx("s44_stereo.flac"), NULL) == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_skip() == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_clear_queue() == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_stop() == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_pause(true) == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_seek(0.01) == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_seek_fraction(0.1) == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_set_volume(0.1f) == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_set_muted(true) == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_set_loop_count(2) == AU_ERR_NOT_INITIALIZED);
+    CHECK(au_open_device() == AU_ERR_NOT_INITIALIZED);
     CHECK(tc_status().position < 0);
     CHECK(tc_status().duration < 0);
     CHECK(au_set_device(NULL) == AU_ERR_NOT_INITIALIZED);
     int count = -1;
     CHECK(au_list_devices(&count) == NULL && count == 0);
+    CHECK(au_shutdown() == AU_ERR_NOT_INITIALIZED);
+}
+
+// Every result has its text; others are "unknown result"
+static void test_result_strings(void) {
+    for (int r = AU_OK; r >= AU_ERR_NOT_SAVED; r--) {
+        const char *text = au_result_string(r);
+        CHECK(text && text[0] && strcmp(text, "unknown result") != 0);
+    }
+    CHECK(strcmp(au_result_string(1), "unknown result") == 0);
+    CHECK(strcmp(au_result_string(AU_ERR_NOT_SAVED - 1), "unknown result") == 0);
+}
+
+// Values out of range are refused, and change nothing (au_set_volume(3.0f) used to do nothing without a word)
+static void test_invalid_values(void) {
+    REQUIRE(tc_init_player(0) == 0);
+    CHECK(au_set_volume(2.01f) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_volume(-0.01f) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_volume(NAN) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(tc_status().volume == 0.5f);
+    CHECK(au_seek(-1) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_seek(INFINITY) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_seek_fraction(1.5) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_loop_count(-2) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_loop_count(-1) == AU_OK);
+    CHECK(au_set_loop_count(0) == AU_OK);
+    CHECK(au_set_muted(false) == AU_OK);
+    CHECK(au_pause(false) == AU_OK);
     au_shutdown();
 }
 
-static void test_init_null_config(void) {
-    CHECK(au_init(NULL) != 0);
+// Everything given to au_init() is optional; a second au_init() is refused
+static void test_init_without_arguments(void) {
+    CHECK(au_init(NULL, NULL, NULL) == AU_OK);
+    CHECK(au_init(NULL, NULL, NULL) == AU_ERR_ALREADY_INITIALIZED);
+    au_shutdown();
 }
 
 static void test_shutdown_while_playing(void) {
@@ -65,7 +99,6 @@ static void test_device_name_and_no_spurious_changes(void) {
     for (int i = 0; i < n; i++) CHECK(devs[i] != NULL);
     au_free_devices(devs, n);
     au_free_devices(NULL, 0);
-    au_free(NULL);
 
     // SDL announces every device at start-up and the list is polled every 2 s: neither is a change
     au_play(fx("long_6s.flac"), NULL);
@@ -76,7 +109,8 @@ static void test_device_name_and_no_spurious_changes(void) {
 
 // A fade too short for a single frame is a cut. The replaced track must still end and be reported; it used to be left
 // in no mixer slot with its threads running, and its end never came. (2.x could also get there by playing before the
-// device was opened; au_init() opens it before any track, so only a device that can not be opened at all would.)
+// device was opened; the device is open before the first track takes a slot, so only one that can not be opened
+// at all would.)
 static void test_fade_without_frames_cuts(void) {
     REQUIRE(tc_init_player(0) == 0);
     const AuFade tiny = { .seconds = 1e-6, .curve = AU_FADE_LINEAR };
@@ -132,7 +166,7 @@ static void test_status_reflects_settings(void) {
     au_pause(true);
     st = tc_status();
     CHECK(st.volume == 0.333f && st.speed == 1.5 && !st.keep_pitch && st.loop_count == 3 && st.muted && st.paused);
-    au_set_volume(2.0f);                 // out of range: ignored
+    au_set_volume(2.5f);                 // out of range: ignored
     CHECK(tc_status().volume == 0.333f);
     au_set_loop_count(0);
     au_set_speed(1.0, true);
@@ -165,8 +199,12 @@ static void test_status_reflects_settings(void) {
 /* ---------- events by polling ---------- */
 
 static int poll_start(void) {
-    const AuConfig config = { .app_name = "ffaudio-tests", .volume = 0.5f };   // no on_event: events are queued
-    return au_init(&config);
+    const int ret = au_init("ffaudio-tests", NULL, NULL);   // no on_event: events are queued
+    if (ret == AU_OK) {
+        au_set_volume(0.5f);
+        au_open_device();
+    }
+    return ret;
 }
 
 // Wait for an event of this type (and handle, when > 0), counting the other events seen meanwhile
@@ -196,6 +234,17 @@ static void test_poll_events(void) {
     CHECK(poll_until(AU_EVENT_TRACK_STARTED, h, 5, NULL, NULL));
     CHECK(poll_until(AU_EVENT_TRACK_ENDED, h, 5, &e, NULL));
     CHECK(e.data.ended.reason == AU_END_FINISHED);
+    CHECK(e.data.ended.error == AU_OK && e.data.ended.message == NULL);
+
+    // A failed track says why; the text is the event's own, valid until the next poll
+    const int32_t bad = au_play(fx("does_not_exist.flac"), NULL);
+    CHECK(poll_until(AU_EVENT_TRACK_ENDED, bad, 5, &e, NULL));
+    CHECK(e.data.ended.reason == AU_END_ERROR && e.data.ended.error == AU_ERR_FILE);
+    CHECK(e.data.ended.message && strstr(e.data.ended.message, "does_not_exist.flac"));
+    printf("   ended: %s\n", e.data.ended.message ? e.data.ended.message : "(none)");
+    CHECK(sizeof(AuEvent) == 72);   // part of the ABI: new members go into the padding
+    // ... and then asks for something to play next (nothing is queued); it may come after the end
+    CHECK(poll_until(AU_EVENT_PREPARE_NEXT, 0, 5, NULL, NULL));
 
     // Nothing more: the wait gives up after its time
     while (au_poll_event(&e)) {}
@@ -260,10 +309,66 @@ static void test_wait_ends_with_shutdown(void) {
     CHECK(SDL_AtomicGet(&done) == 1);
 }
 
+// The device opens when it is needed, with the settings made until then: one AU_EVENT_DEVICE, in the format asked for
+// (au_init() used to open the default device at once, and every format or device setter opened it again)
+static void test_device_opens_lazily(void) {
+    REQUIRE(au_init("ffaudio-tests", NULL, NULL) == AU_OK);
+    tc_sleep_ms(300);
+    AuEvent e;
+    int devices = 0;
+    while (au_poll_event(&e)) if (e.type == AU_EVENT_DEVICE) devices++;
+    CHECK(devices == 0);
+    CHECK(tc_status().sample_rate == 0);
+    char name[256];
+    CHECK(au_get_device_name(name, sizeof(name)) == 0 && name[0] == '\0');
+
+    CHECK(au_set_output_format(1, 22050) == AU_OK);
+    CHECK(au_set_device("no such device") == AU_OK);     // recorded; it falls back when the device opens
+    const int32_t h = au_play(fx("s44_stereo.flac"), NULL);
+    CHECK(poll_until(AU_EVENT_DEVICE, 0, 5, &e, NULL));
+    CHECK(e.data.device.ok && e.data.device.fell_back && e.data.device.sample_rate == 22050 &&
+          e.data.device.channels == 1);
+    int more = 0;
+    CHECK(poll_until(AU_EVENT_TRACK_STARTED, h, 5, NULL, NULL));
+    while (au_poll_event(&e)) if (e.type == AU_EVENT_DEVICE) more++;
+    CHECK(more == 0);
+    CHECK(tc_status().sample_rate == 22050 && tc_status().channels == 1);
+    au_shutdown();
+
+    // au_open_device() opens it before any track, once
+    REQUIRE(au_init("ffaudio-tests", NULL, NULL) == AU_OK);
+    CHECK(au_open_device() == AU_OK);
+    CHECK(poll_until(AU_EVENT_DEVICE, 0, 5, &e, NULL) && e.data.device.ok);
+    CHECK(au_open_device() == AU_OK);
+    tc_sleep_ms(200);
+    more = 0;
+    while (au_poll_event(&e)) if (e.type == AU_EVENT_DEVICE) more++;
+    CHECK(more == 0);
+    au_shutdown();
+    CHECK(au_open_device() == AU_ERR_NOT_INITIALIZED);
+}
+
+// A failed au_init() (here: an audio driver that does not exist) leaves nothing behind (ASan checks for leaks): a
+// polling application can read why it failed, and the next au_init() works
+static void test_failed_init(void) {
+    char driver[64];
+    snprintf(driver, sizeof(driver), "%s", SDL_getenv("SDL_AUDIODRIVER") ? SDL_getenv("SDL_AUDIODRIVER") : "dummy");
+    SDL_setenv("SDL_AUDIODRIVER", "no_such_driver", 1);
+    CHECK(poll_start() == AU_ERR_SDL);
+    AuEvent e;
+    CHECK(au_poll_event(&e) && e.type == AU_EVENT_LOG && e.data.log.level == AU_LOG_FATAL && e.data.log.message);
+    printf("   failed: %s\n", e.data.log.message ? e.data.log.message : "(none)");
+    SDL_setenv("SDL_AUDIODRIVER", driver, 1);
+    REQUIRE(tc_init_player(0) == AU_OK);
+    au_shutdown();
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
     RUN_TEST(test_calls_before_init);
-    RUN_TEST(test_init_null_config);
+    RUN_TEST(test_result_strings);
+    RUN_TEST(test_invalid_values);
+    RUN_TEST(test_init_without_arguments);
     RUN_TEST(test_shutdown_while_playing);
     RUN_TEST(test_reinit);
     RUN_TEST(test_device_name_and_no_spurious_changes);
@@ -273,5 +378,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_poll_events);
     RUN_TEST(test_poll_overflow);
     RUN_TEST(test_wait_ends_with_shutdown);
+    RUN_TEST(test_failed_init);
+    RUN_TEST(test_device_opens_lazily);
     return tc_finish("test_lifecycle");
 }

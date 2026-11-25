@@ -1,7 +1,7 @@
-# ffaudio 3.0 API
+# Migrating from ffaudio 2.x to 3.0
 
-The public API of 3.0.0, as implemented on `stage3` (the headers are the reference). The decisions it follows
-(2026-11-21):
+The public API of 3.0.0 and how 2.x maps to it, kept as it was for 3.0 (formerly `docs/api-3.0.md`). 4.0 changed
+parts of it again: see [migrating-3-to-4.md](migrating-3-to-4.md). The decisions it follows (2026-11-21):
 
 - **One global player.** No player object; every function works on the one player, as in 2.x.
 - **One event type.** `AuEvent` replaces the ten callbacks. It is delivered either to `on_event` on ffaudio's control
@@ -90,7 +90,8 @@ typedef struct AuStatus {
     int32_t handle;                // the audible track, 0 = none
     double position;               // seconds, -1 = nothing playing
     double duration;               // seconds, -1 = unknown
-    bool paused, muted, buffering;
+    bool buffering;                // the audible track waits for network data
+    bool paused, muted;            // the settings as last set
     float volume;
     double speed;
     bool keep_pitch;

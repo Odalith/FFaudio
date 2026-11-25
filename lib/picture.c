@@ -30,6 +30,7 @@
 #include "libavutil/avstring.h"
 #include "libavutil/intreadwrite.h"
 #include "network.h"
+#include "probe.h"
 
 // FFmpeg's names for the ID3v2 / FLAC picture types (libavformat/id3v2.c, ff_id3v2_picture_types), in type order
 static const char *const picture_types[21] = {
@@ -101,11 +102,7 @@ const AuPicture *au_media_picture(const char *path, const int type, int *out_err
     // Only the header is read (no stream info, nothing decoded); the same protocol rules and network settings as
     // the player's inputs
     AVFormatContext *ic = NULL;
-    AVDictionary *opts = NULL;
-    network_input_options(&opts, path, NULL);
-    const int r = avformat_open_input(&ic, path, NULL, &opts);
-    av_dict_free(&opts);
-    if (r < 0) { *err = AU_ERR_FILE; return NULL; }
+    if (ff_open_input(path, NULL, NULL, &ic) < 0) { *err = AU_ERR_FILE; return NULL; }
 
     const AVStream *best = NULL;
     for (unsigned int i = 0; i < ic->nb_streams; i++) {

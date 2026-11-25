@@ -28,7 +28,7 @@ bool gain_cache_lookup(const char *path, AuReplayGain *out);
 // passes or *abort becomes non-zero. Take the mark with gain_cache_failure_mark() before the measurement is
 // requested, so a quick failure is not missed.
 typedef enum GainWait { GAIN_WAIT_CACHED, GAIN_WAIT_TIMEOUT, GAIN_WAIT_FAILED, GAIN_WAIT_ABORTED } GainWait;
-GainWait gain_cache_wait(const char *path, int timeout_ms, SDL_atomic_t *abort, unsigned mark);
+GainWait gain_cache_wait(const char *path, int timeout_ms, FfAtomic *abort, unsigned mark);
 unsigned gain_cache_failure_mark(void);
 
 // The scan queue gave up on `path` (an error or a cancellation): wake gain_cache_wait() for it
@@ -38,8 +38,10 @@ void gain_cache_note_failure(const char *path);
 void ff_gain_cache_changed(const char *path);
 
 // Implemented by the scan queue: measure `path` as soon as possible for a track that is starting
-// (not affected by au_gain_cache_cancel_requests()). false when the file could not be measured before and has
+// (not affected by au_gain_scan_cancel()). false when the file could not be measured before and has
 // not changed since: nothing is queued, so there is nothing to wait for.
 bool gain_scan_request_for_player(const char *path);
+// Whether network files are measured (AuGainScanSettings.measure_streams)
+bool gain_scan_measures_streams(void);
 
 #endif //FFAUDIO_GAIN_CACHE_H

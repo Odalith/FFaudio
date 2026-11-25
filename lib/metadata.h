@@ -39,11 +39,14 @@ typedef struct MediaDraft {
     int picture_count;          // attached pictures (cover art)
 } MediaDraft;
 
-// UTF-8 copy of text that may be Latin-1 (old Icecast servers): valid UTF-8 is kept, anything else is read as Latin-1
+// UTF-8 copy of text that may be in a legacy encoding (old Icecast servers, playlists and cue sheets from Windows
+// tools): valid UTF-8 is kept, anything else is read as Windows-1252 (Latin-1 plus quotes, dashes, the euro sign)
 char *text_to_utf8(const char *s);
 
 // Describe the audio stream `stream_index` of an opened (and probed) input. < 0 on failure (nothing to free).
-int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, int stream_index, const char *path);
+// chained_ogg: from ff_open_audio_input() (such a file is not seekable past its first part)
+int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, int stream_index, const char *path,
+                             bool chained_ogg);
 void media_draft_free(MediaDraft *d);
 
 // The immutable block (one allocation, a reference held by the caller); NULL when out of memory
@@ -57,6 +60,6 @@ const AuMediaInfo *media_info_retain(const AuMediaInfo *info);
 AuReplayGain replaygain_from_tags(const AVDictionary *tags);
 
 // Gain in dB that the ReplayGain settings give a track with these values (0 when off)
-double replaygain_gain_db(const AuReplayGainConfig *config, const AuReplayGain *rg);
+double replaygain_gain_db(const AuReplayGainSettings *config, const AuReplayGain *rg);
 
 #endif //FFAUDIO_METADATA_H

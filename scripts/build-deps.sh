@@ -172,7 +172,7 @@ mkdir -p "$prefix/share/licenses/ffmpeg"
 cp COPYING.LGPLv2.1 LICENSE.md "$prefix/share/licenses/ffmpeg/"
 {
     echo "FFmpeg $FFMPEG_VERSION (https://ffmpeg.org/releases/$tarball, sha256 $FFMPEG_SHA256)"
-    echo "built by ffaudio's scripts/build-ffmpeg.sh with:"
+    echo "built by ffaudio's scripts/build-deps.sh with:"
     sed -n 's/^#define FFMPEG_CONFIGURATION "\(.*\)"$/\1/p' config.h
     grep '^License:' "$work/configure.log"
 } > "$prefix/share/licenses/ffmpeg/BUILD.txt"

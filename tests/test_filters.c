@@ -15,8 +15,22 @@
 static void test_empty_builder(void) {
     AuFilterBuilder *fb = au_fb_create();
     REQUIRE(fb);
-    CHECK(au_fb_build(fb) == NULL);
     CHECK_STR(au_fb_peek(fb), "");
+    au_fb_free(fb);
+}
+
+// NULL settings are the defaults for every helper (3.x: an error for the equalizers and stereo, defaults for the rest)
+static void test_null_is_defaults(void) {
+    AuFilterBuilder *fb = au_fb_create();
+    REQUIRE(fb);
+    CHECK(au_fb_add_equalizer(fb, NULL, NULL) == AU_OK);        // flat: nothing to add
+    CHECK(au_fb_add_parametric_eq(fb, NULL, NULL) == AU_OK);    // no bands
+    CHECK(au_fb_add_stereo(fb, NULL, NULL) == AU_OK);           // centred, full width
+    CHECK_STR(au_fb_peek(fb), "");
+    CHECK_STR(au_fb_last_error(fb), "");
+    CHECK(au_fb_add_equalizer(fb, "eq", NULL) == AU_OK);        // named: every band, so commands can change them
+    CHECK(strstr(au_fb_peek(fb), "equalizer@eq_9") != NULL);
+    CHECK(au_validate_filters(au_fb_peek(fb)) == AU_OK);
     au_fb_free(fb);
 }
 
@@ -27,6 +41,13 @@ static void test_gain(void) {
     CHECK(au_fb_add_volume_db(fb, NULL, 99) == AU_ERR_INVALID_ARGUMENT);
     CHECK_STR(au_fb_peek(fb), "volume=-6.5dB");   // unchanged on error
     CHECK(strlen(au_fb_last_error(fb)) > 0);
+    // A later call that succeeds without adding anything (default settings) clears it; it used to stay
+    const AuStereo stereo = au_stereo_defaults();
+    CHECK(au_fb_add_stereo(fb, NULL, &stereo) == AU_OK);
+    CHECK_STR(au_fb_last_error(fb), "");
+    CHECK(au_fb_add_volume_db(fb, NULL, 99) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_fb_add(fb, "anull") == AU_OK);
+    CHECK_STR(au_fb_last_error(fb), "");
     au_fb_clear(fb);
     CHECK(au_fb_add_volume_db(fb, NULL, 0.91515) == AU_OK);
     CHECK_STR(au_fb_peek(fb), "volume=0.91515dB");
@@ -40,7 +61,7 @@ static void test_equalizer(void) {
 
     // All bands at 0 dB adds nothing
     CHECK(au_fb_add_equalizer(fb, NULL, &eq) == AU_OK);
-    CHECK(au_fb_build(fb) == NULL);
+    CHECK_STR(au_fb_peek(fb), "");
 
     eq.gain_db[0] = 2.0;
     eq.gain_db[5] = -1.5;
@@ -110,10 +131,8 @@ static void test_raw_and_validate(void) {
     AuFilterBuilder *fb = au_fb_create();
     CHECK(au_fb_add(fb, "atempo=1.25") == AU_OK);
     CHECK(au_fb_add(fb, "") == AU_ERR_INVALID_ARGUMENT);
-    char *s = au_fb_build(fb);
-    CHECK_STR(s, "atempo=1.25");
-    CHECK(au_validate_filters(s) == AU_OK);
-    au_free(s);
+    CHECK_STR(au_fb_peek(fb), "atempo=1.25");
+    CHECK(au_validate_filters(au_fb_peek(fb)) == AU_OK);
     au_fb_free(fb);
 
     CHECK(au_validate_filters("no_such_filter") == AU_ERR_INVALID_ARGUMENT);
@@ -363,6 +382,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_tone_stereo_dynamics);
     RUN_TEST(test_parse_locale_independent);
     RUN_TEST(test_empty_builder);
+    RUN_TEST(test_null_is_defaults);
     RUN_TEST(test_gain);
     RUN_TEST(test_equalizer);
     RUN_TEST(test_headphones);

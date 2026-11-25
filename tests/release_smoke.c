@@ -49,8 +49,7 @@ int main(int argc, char **argv) {
     }
     printf("loudness %.2f LUFS, true peak %.2f dBTP\n", l.integrated_lufs, 20 * log10(l.true_peak));
 
-    const AuConfig cfg = { .on_event = on_event };
-    if (au_init(&cfg) != AU_OK) {
+    if (au_init("ffaudio release smoke test", on_event, NULL) != AU_OK) {
         fprintf(stderr, "could not initialize the player\n");
         return 1;
     }

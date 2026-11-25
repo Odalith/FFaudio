@@ -1,0 +1,2 @@
+textual>=8.0
+pillow>=9      # optional: cover art

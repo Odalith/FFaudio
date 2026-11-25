@@ -26,12 +26,12 @@ int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
     MyAVPacketList pkt1;
     int ret;
 
-    if (q->abort_request)
+    if (ffa_load(&q->abort_request))
        return -1;
 
 
     pkt1.pkt = pkt;
-    pkt1.serial = q->serial;
+    pkt1.serial = ffa_load(&q->serial);
 
     ret = av_fifo_write(q->pkt_list, &pkt1, 1);
     if (ret < 0)
@@ -90,9 +90,7 @@ int packet_queue_init(PacketQueue *q)
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateCond(): %s\n", SDL_GetError());
         return AVERROR(ENOMEM);
     }
-    q->abort_request = 1;
-    SDL_AtomicSet(&q->abort_atomic, 1);
-    SDL_AtomicSet(&q->serial_atomic, q->serial);
+    ffa_store(&q->abort_request, 1);
     return 0;
 }
 
@@ -109,8 +107,7 @@ void packet_queue_flush(PacketQueue *q)
     q->nb_packets = 0;
     q->size = 0;
     q->duration = 0;
-    q->serial++;
-    SDL_AtomicSet(&q->serial_atomic, q->serial);
+    ffa_store(&q->serial, ffa_load(&q->serial) + 1);
     SDL_UnlockMutex(q->mutex);
 }
 
@@ -129,8 +126,7 @@ void packet_queue_abort(PacketQueue *q)
     CHAOS("packet_queue_abort");
     SDL_LockMutex(q->mutex);
 
-    q->abort_request = 1;
-    SDL_AtomicSet(&q->abort_atomic, 1);
+    ffa_store(&q->abort_request, 1);
 
     SDL_CondSignal(q->cond);
 
@@ -140,10 +136,8 @@ void packet_queue_abort(PacketQueue *q)
 void packet_queue_start(PacketQueue *q)
 {
     SDL_LockMutex(q->mutex);
-    q->abort_request = 0;
-    q->serial++;
-    SDL_AtomicSet(&q->abort_atomic, 0);
-    SDL_AtomicSet(&q->serial_atomic, q->serial);
+    ffa_store(&q->abort_request, 0);
+    ffa_store(&q->serial, ffa_load(&q->serial) + 1);
     SDL_UnlockMutex(q->mutex);
 }
 
@@ -157,7 +151,7 @@ int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *serial)
     SDL_LockMutex(q->mutex);
 
     for (;;) {
-        if (q->abort_request) {
+        if (ffa_load(&q->abort_request)) {
             ret = -1;
             break;
         }

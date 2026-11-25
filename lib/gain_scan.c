@@ -19,7 +19,8 @@
 /*
  * Background measurement queue: jobs (one file, or one album) are measured by low-priority worker threads
  * and stored in the ReplayGain cache. Urgent jobs go to the front (newest first), prefetch jobs to the back.
- * Workers start on demand and keep running until au_gain_scan_stop().
+ * Workers start on demand and keep running until au_gain_scan_stop(), or until fewer are wanted (then they leave
+ * after their current job, and nobody waits for that).
  */
 
 #include <sys/stat.h>
@@ -39,7 +40,7 @@ typedef struct Job {
     char **paths;
     int n;
     bool album;
-    bool from_player;           // not dropped by au_gain_cache_cancel_requests()
+    bool from_player;           // not dropped by au_gain_scan_cancel()
     bool measuring;             // taken by a worker
     struct Job *next;
 } Job;
@@ -47,8 +48,12 @@ typedef struct Job {
 typedef struct Worker {
     SDL_Thread *thread;
     Job *job;                   // being measured
-    SDL_atomic_t cancel;        // 1 = stop the current job (read without the lock while measuring)
+    FfAtomic cancel;        // 1 = stop the current job (read without the lock while measuring)
+    bool exited;                // the thread left (no longer wanted): joining it does not wait, then the slot is free
 } Worker;
+
+// Set on the scan workers' own threads: au_gain_scan_stop() from on_cached must not join its caller
+static _Thread_local bool on_scan_worker = false;
 
 // Guarded by lock
 static SDL_mutex *lock = NULL;
@@ -56,9 +61,9 @@ static SDL_cond *wake = NULL;
 static FfOnce init_once = FF_ONCE_INIT;
 static Job *head = NULL, *tail = NULL;
 static Worker workers[MAX_WORKERS];
-static AuGainScanConfig config;
+static AuGainScanSettings config;
 static int pending = 0;          // paths queued or being measured
-static SDL_atomic_t stopping;    // 1 while au_gain_scan_stop() runs (read without the lock while measuring)
+static FfAtomic stopping;    // 1 while au_gain_scan_stop() runs (read without the lock while measuring)
 
 // Files that could not be measured (not media, no audio stream, unreadable), with their size and modification
 // time: requests skip them until the file changes, instead of reading and failing again on every request.
@@ -146,9 +151,12 @@ static void forget_all_failures(void) {
     n_failed = failed_oldest = 0;
 }
 
-// For workers (lock not held)
+// For workers (lock not held). Cancellations and memory errors say nothing about the file. A URL has no size or time
+// to see a change by, so an error opening it (a server that was down for a moment) is not remembered; a live stream
+// (AU_ERR_UNSUPPORTED: it never ends) is, so it is not opened again on every request.
 static void note_result(const char *path, const int result) {
-    if (result != AU_ERR_FILE) return; // not cancellations or memory errors: those say nothing about the file
+    const bool url = au_is_network_url(path);
+    if (result != AU_ERR_UNSUPPORTED && (result != AU_ERR_FILE || url)) return;
     SDL_LockMutex(lock);
     remember_failure(path);
     SDL_UnlockMutex(lock);
@@ -296,11 +304,20 @@ static int wanted_workers(void) {
     return config.threads > 0 ? FFMIN(config.threads, MAX_WORKERS) : default_threads();
 }
 
+// lock held. A slot is reused only once its thread has left: a worker that is no longer wanted finishes its job first,
+// and two threads must never share a slot
 static void start_workers(void) {
     CHAOS("start_workers");
     const int n = wanted_workers();
     for (int i = 0; i < n; i++) {
+        if (workers[i].thread && workers[i].exited) {
+            // It flagged its slot as its last step under the lock and needs the lock no more: this does not wait
+            SDL_WaitThread(workers[i].thread, NULL);
+            workers[i].thread = NULL;
+            workers[i].exited = false;
+        }
         if (workers[i].thread) continue;
+        workers[i].exited = false;
         workers[i].thread = SDL_CreateThread(worker_main, "ffa_gain_scan", (void *)(intptr_t)i);
     }
     SDL_CondBroadcast(wake);
@@ -316,7 +333,7 @@ typedef struct ProgressCtx {
 
 static int interrupted(void *user) {
     const ProgressCtx *ctx = user;
-    return SDL_AtomicGet(&workers[ctx->index].cancel) || SDL_AtomicGet(&stopping);
+    return ffa_load(&workers[ctx->index].cancel) || ffa_load(&stopping);
 }
 
 static bool keep_going(double fraction, void *user) {
@@ -324,17 +341,17 @@ static bool keep_going(double fraction, void *user) {
     return !interrupted(user);
 }
 
-static void notify(const AuGainScanConfig *cfg, const char *path, const int result, const AuReplayGain *rg) {
+static void notify(const AuGainScanSettings *cfg, const char *path, const int result, const AuReplayGain *rg) {
     CHAOS("notify");
     if (result != AU_OK) gain_cache_note_failure(path); // a player waiting for this value stops waiting
     if (cfg->on_cached) cfg->on_cached(path, result, rg, cfg->user);
 }
 
 // `file` and `album` are the worker's own meters, reused for every file
-static void measure_job(const int index, const Job *job, const AuGainScanConfig *cfg, AuLoudnessMeter *file,
+static void measure_job(const int index, const Job *job, const AuGainScanSettings *cfg, AuLoudnessMeter *file,
                         AuLoudnessMeter *album) {
     ProgressCtx ctx = { .index = index };
-    const AuLoudnessConfig lcfg = { .skip_true_peak = cfg->skip_true_peak, .progress = keep_going,
+    const AuLoudnessOptions lcfg = { .skip_true_peak = cfg->skip_true_peak, .progress = keep_going,
                                     .progress_user = &ctx };
     const AVIOInterruptCB interrupt = { .callback = interrupted, .opaque = &ctx };
     if (!file || !album) {
@@ -351,8 +368,8 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
             if (ret == AU_OK) {
                 au_loudness_result(file, &l);
                 const AuReplayGain rg = au_loudness_to_replaygain(&l, NULL);
-                au_gain_cache_set(path, &rg);
-                notify(cfg, path, AU_OK, &rg);
+                const int set = au_gain_cache_set(path, &rg);   // AU_ERR_NOT_SAVED: in memory only
+                notify(cfg, path, set, set == AU_OK || set == AU_ERR_NOT_SAVED ? &rg : NULL);
             }
             else {
                 note_result(path, ret);
@@ -391,8 +408,8 @@ static void measure_job(const int index, const Job *job, const AuGainScanConfig 
             continue;
         }
         const AuReplayGain rg = au_loudness_to_replaygain(&tracks[i], have_album ? &album_values : NULL);
-        au_gain_cache_set(job->paths[i], &rg);
-        notify(cfg, job->paths[i], AU_OK, &rg);
+        const int set = au_gain_cache_set(job->paths[i], &rg);
+        notify(cfg, job->paths[i], set, set == AU_OK || set == AU_ERR_NOT_SAVED ? &rg : NULL);
     }
 end:
     av_free(tracks);
@@ -403,24 +420,30 @@ static int worker_main(void *arg) {
     CHAOS("worker_main");
     ff_thread_use_c_locale();
     const int index = (int)(intptr_t)arg;
+    on_scan_worker = true;
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
-    // About 320 KB each, kept for every file
+    // About 240 KB each, kept for every file
     AuLoudnessMeter *file = loudness_meter_create(), *album = loudness_meter_create();
 
     SDL_LockMutex(lock);
     for (;;) {
-        // The wanted count is read again after every wake-up: au_gain_scan_configure() may have lowered it
-        // while this worker was idle, and it then waits for this thread to leave
-        while (!head && !SDL_AtomicGet(&stopping) && index < wanted_workers())
+        // The wanted count is read again after every wake-up and job: au_set_gain_scan() may have lowered it.
+        // A worker no longer wanted leaves by itself; nobody waits for it (start_workers() or au_gain_scan_stop()
+        // joins it later, at once)
+        while (!head && !ffa_load(&stopping) && index < wanted_workers())
             SDL_CondWait(wake, lock);
-        if (SDL_AtomicGet(&stopping) || index >= wanted_workers()) break;
+        if (ffa_load(&stopping)) break;   // au_gain_scan_stop() has taken the slot and joins this thread
+        if (index >= wanted_workers()) {
+            workers[index].exited = true;  // the slot is still this thread's: start_workers() joins it
+            break;
+        }
 
         Job *job = head;
         unlink_job(job, NULL);
         job->measuring = true;
         workers[index].job = job;
-        SDL_AtomicSet(&workers[index].cancel, 0);
-        const AuGainScanConfig cfg = config;
+        ffa_store(&workers[index].cancel, 0);
+        const AuGainScanSettings cfg = config;
         SDL_UnlockMutex(lock);
 
         measure_job(index, job, &cfg, file, album);
@@ -456,30 +479,37 @@ static int request(const char *const *paths, const int count, const bool urgent,
     if (!paths || count <= 0) return 0;
     if (!ready()) return AU_ERR_SDL;
 
-    // Albums are only skipped when every track already has album values
-    if (album) {
-        bool all_done = true;
-        for (int i = 0; i < count && all_done; i++) {
-            AuReplayGain rg;
-            all_done = paths[i] && au_gain_cache_get(paths[i], &rg) && !isnan(rg.album_gain_db);
-        }
-        if (all_done) return 0;
-    }
-
-    const bool measure_streams = network_config(NULL, 0).measure_streams;
-    if (album && !measure_streams) {
-        // Measuring would download whole files, and an album measured without them would be wrong
-        for (int i = 0; i < count; i++)
-            if (paths[i] && au_is_network_url(paths[i])) return 0;
-    }
     SDL_LockMutex(lock);
-    if (SDL_AtomicGet(&stopping)) {
+    if (ffa_load(&stopping)) {
         // au_gain_scan_stop() is waiting for the workers; new ones started now would never be joined
         SDL_UnlockMutex(lock);
         return 0;
     }
+    const bool measure_streams = config.measure_streams;
+    if (album && !measure_streams) {
+        // Measuring would download whole files, and an album measured without them would be wrong
+        for (int i = 0; i < count; i++) {
+            if (paths[i] && au_is_network_url(paths[i])) {
+                SDL_UnlockMutex(lock);
+                return 0;
+            }
+        }
+    }
 
     if (album) {
+        // Skipped when every track already has album values. A track that could not be measured before and has not
+        // changed does not count, and is left out of the job: one cover image or broken file would otherwise make
+        // every request measure the whole album again.
+        bool all_done = true;
+        for (int i = 0; i < count && all_done; i++) {
+            AuReplayGain rg;
+            all_done = !paths[i] || !paths[i][0] || known_failure(paths[i]) ||
+                       (au_gain_cache_get(paths[i], &rg) && !isnan(rg.album_gain_db));
+        }
+        if (all_done) {
+            SDL_UnlockMutex(lock);
+            return 0;
+        }
         if (paths[0] && paths[0][0]) {
             Job *queued = NULL, *prev = NULL;
             if (album_pending(paths[0], &queued, &prev)) {
@@ -501,7 +531,7 @@ static int request(const char *const *paths, const int count, const bool urgent,
             const char *path = paths[i];
             bool dup = false;
             for (int k = 0; k < job->n && !dup; k++) dup = path && !strcmp(job->paths[k], path);
-            if (!path || !path[0] || dup) continue;
+            if (!path || !path[0] || dup || known_failure(path)) continue;
             if (!(job->paths[job->n] = av_strdup(path))) break;
             job->n++;
         }
@@ -568,6 +598,14 @@ static int request(const char *const *paths, const int count, const bool urgent,
     return n;
 }
 
+bool gain_scan_measures_streams(void) {
+    if (!ready()) return false;
+    SDL_LockMutex(lock);
+    const bool yes = config.measure_streams;
+    SDL_UnlockMutex(lock);
+    return yes;
+}
+
 bool gain_scan_request_for_player(const char *path) {
     CHAOS("gain_scan_request_for_player");
     if (!path || !ready()) return false;
@@ -580,42 +618,33 @@ bool gain_scan_request_for_player(const char *path) {
     return true;
 }
 
-int au_gain_cache_request(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
-    CHAOS("au_gain_cache_request");
+int au_gain_scan_request(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
+    CHAOS("au_gain_scan_request");
     return request(paths, count, priority == AU_SCAN_URGENT, false, false);
 }
 
-int au_gain_cache_request_album(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
-    CHAOS("au_gain_cache_request_album");
+int au_gain_scan_request_album(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
+    CHAOS("au_gain_scan_request_album");
     return request(paths, count, priority == AU_SCAN_URGENT, true, false);
 }
 
-int au_gain_scan_configure(const AuGainScanConfig *cfg) {
+int au_set_gain_scan(const AuGainScanSettings *cfg) {
     if (cfg && (cfg->threads < 0 || cfg->threads > MAX_WORKERS)) return AU_ERR_INVALID_ARGUMENT;
     if (!ready()) return AU_ERR_SDL;
 
-    SDL_Thread *finished[MAX_WORKERS];
-    int n_finished = 0;
     SDL_LockMutex(lock);
     if (cfg) config = *cfg;
     else memset(&config, 0, sizeof(config));
     if (config.threads == 0) config.threads = default_threads();
-    // Workers above the new count leave after their current job
-    for (int i = config.threads; i < MAX_WORKERS; i++) {
-        if (workers[i].thread) {
-            finished[n_finished++] = workers[i].thread;
-            workers[i].thread = NULL;
-        }
-    }
+    // Workers above the new count leave by themselves after their current job; this does not wait for them
     if (head) start_workers();
     SDL_CondBroadcast(wake);
     SDL_UnlockMutex(lock);
-    for (int i = 0; i < n_finished; i++) SDL_WaitThread(finished[i], NULL);
     return AU_OK;
 }
 
-void au_gain_cache_cancel_requests(void) {
-    CHAOS("au_gain_cache_cancel_requests");
+void au_gain_scan_cancel(void) {
+    CHAOS("au_gain_scan_cancel");
     if (!ready()) return;
     SDL_LockMutex(lock);
     Job *prev = NULL, *j = head;
@@ -632,11 +661,11 @@ void au_gain_cache_cancel_requests(void) {
         j = next;
     }
     for (int i = 0; i < MAX_WORKERS; i++)
-        if (workers[i].job && !workers[i].job->from_player) SDL_AtomicSet(&workers[i].cancel, 1);
+        if (workers[i].job && !workers[i].job->from_player) ffa_store(&workers[i].cancel, 1);
     SDL_UnlockMutex(lock);
 }
 
-int au_gain_cache_pending(void) {
+int au_gain_scan_pending(void) {
     if (!ready()) return 0;
     SDL_LockMutex(lock);
     const int n = pending;
@@ -644,13 +673,14 @@ int au_gain_cache_pending(void) {
     return n;
 }
 
-void au_gain_scan_stop(void) {
+int au_gain_scan_stop(void) {
     CHAOS("au_gain_scan_stop");
-    if (!ready()) return;
+    if (!ready()) return AU_ERR_SDL;
+    if (on_scan_worker) return AU_ERR_WRONG_THREAD; // from on_cached: it would wait for the thread making the call
     SDL_Thread *threads[MAX_WORKERS];
     int n = 0;
     SDL_LockMutex(lock);
-    SDL_AtomicSet(&stopping, 1);
+    ffa_store(&stopping, 1);
     while (head) {
         Job *j = head;
         unlink_job(j, NULL);
@@ -658,9 +688,10 @@ void au_gain_scan_stop(void) {
         job_drop(j);
     }
     for (int i = 0; i < MAX_WORKERS; i++) {
-        if (workers[i].job) SDL_AtomicSet(&workers[i].cancel, 1);
-        if (workers[i].thread) threads[n++] = workers[i].thread;
+        if (workers[i].job) ffa_store(&workers[i].cancel, 1);
+        if (workers[i].thread) threads[n++] = workers[i].thread; // also those that left already
         workers[i].thread = NULL;
+        workers[i].exited = false;
     }
     SDL_CondBroadcast(wake);
     SDL_UnlockMutex(lock);
@@ -668,7 +699,8 @@ void au_gain_scan_stop(void) {
     for (int i = 0; i < n; i++) SDL_WaitThread(threads[i], NULL);
 
     SDL_LockMutex(lock);
-    SDL_AtomicSet(&stopping, 0);
+    ffa_store(&stopping, 0);
     forget_all_failures();
     SDL_UnlockMutex(lock);
+    return AU_OK;
 }

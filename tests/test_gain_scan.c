@@ -54,7 +54,7 @@ static int done_index(const char *file) {
 
 static bool wait_idle(uint32_t timeout_ms) {
     const uint32_t end = SDL_GetTicks() + timeout_ms;
-    while (au_gain_cache_pending() > 0) {
+    while (au_gain_scan_pending() > 0) {
         if ((int32_t)(end - SDL_GetTicks()) <= 0) return false;
         SDL_Delay(5);
     }
@@ -62,8 +62,8 @@ static bool wait_idle(uint32_t timeout_ms) {
 }
 
 static void configure(int threads) {
-    const AuGainScanConfig cfg = { .threads = threads, .on_cached = on_cached };
-    REQUIRE(au_gain_scan_configure(&cfg) == AU_OK);
+    const AuGainScanSettings cfg = { .threads = threads, .on_cached = on_cached };
+    REQUIRE(au_set_gain_scan(&cfg) == AU_OK);
 }
 
 static const char *scan_file(int i) {
@@ -78,7 +78,7 @@ static void test_request(void) {
     reset_done();
     configure(1);
     const char *paths[3] = { scan_file(1), scan_file(2), scan_file(3) };
-    CHECK(au_gain_cache_request(paths, 3, AU_SCAN_PREFETCH) == 3);
+    CHECK(au_gain_scan_request(paths, 3, AU_SCAN_PREFETCH) == 3);
     CHECK(wait_idle(10000));
     CHECK(done_count() == 3);
     for (int i = 0; i < 3; i++) {
@@ -91,13 +91,13 @@ static void test_request(void) {
 static void test_dedup(void) {
     reset_done();
     const char *again[3] = { scan_file(1), scan_file(2), scan_file(3) };
-    CHECK(au_gain_cache_request(again, 3, AU_SCAN_PREFETCH) == 0);   // all cached
+    CHECK(au_gain_scan_request(again, 3, AU_SCAN_PREFETCH) == 0);   // all cached
     const char *dup[4] = { scan_file(4), scan_file(4), scan_file(5), NULL };
-    CHECK(au_gain_cache_request(dup, 4, AU_SCAN_PREFETCH) == 2);     // duplicate and NULL skipped
-    CHECK(au_gain_cache_request(dup, 3, AU_SCAN_PREFETCH) <= 2);     // queued or being measured: skipped
+    CHECK(au_gain_scan_request(dup, 4, AU_SCAN_PREFETCH) == 2);     // duplicate and NULL skipped
+    CHECK(au_gain_scan_request(dup, 3, AU_SCAN_PREFETCH) <= 2);     // queued or being measured: skipped
     CHECK(wait_idle(10000));
     CHECK(done_count() == 2);
-    CHECK(au_gain_cache_request(NULL, 3, AU_SCAN_PREFETCH) == 0);
+    CHECK(au_gain_scan_request(NULL, 3, AU_SCAN_PREFETCH) == 0);
 }
 
 static void test_urgent_goes_first(void) {
@@ -105,10 +105,10 @@ static void test_urgent_goes_first(void) {
     configure(1);
     for (int i = 6; i <= 12; i++) {
         const char *p = scan_file(i);
-        au_gain_cache_request(&p, 1, AU_SCAN_PREFETCH);
+        au_gain_scan_request(&p, 1, AU_SCAN_PREFETCH);
     }
     const char *last = scan_file(12);
-    au_gain_cache_request(&last, 1, AU_SCAN_URGENT);                 // already queued: moved to the front
+    au_gain_scan_request(&last, 1, AU_SCAN_URGENT);                 // already queued: moved to the front
     CHECK(wait_idle(10000));
     printf("   scan_12 finished at position %d of %d\n", done_index("scan_12"), done_count());
     CHECK(done_count() == 7);
@@ -120,7 +120,7 @@ static void test_request_uses_every_worker(void) {
     reset_done();
     configure(2);
     const char *paths[5] = { scan_file(20), scan_file(21), scan_file(22), scan_file(23), scan_file(24) };
-    CHECK(au_gain_cache_request(paths, 5, AU_SCAN_PREFETCH) == 5);
+    CHECK(au_gain_scan_request(paths, 5, AU_SCAN_PREFETCH) == 5);
     CHECK(wait_idle(10000));
     CHECK(done_count() == 5);
     int threads = 0;
@@ -142,11 +142,11 @@ static void test_cancel(void) {
     configure(1);
     for (int i = 13; i <= 19; i++) {
         const char *p = scan_file(i);
-        au_gain_cache_request(&p, 1, AU_SCAN_PREFETCH);
+        au_gain_scan_request(&p, 1, AU_SCAN_PREFETCH);
     }
-    au_gain_cache_cancel_requests();
+    au_gain_scan_cancel();
     CHECK(wait_idle(3000));
-    CHECK(au_gain_cache_pending() == 0);
+    CHECK(au_gain_scan_pending() == 0);
     printf("   %d callbacks after cancelling 7 requests\n", done_count());
     CHECK(done_count() <= 1);                                        // only the one already running
     int cached = 0;
@@ -157,7 +157,7 @@ static void test_cancel(void) {
 static void test_album(void) {
     reset_done();
     const char *album[2] = { fx("ld_m23_48k.flac"), fx("ld_m33_48k.flac") };
-    CHECK(au_gain_cache_request_album(album, 2, AU_SCAN_PREFETCH) == 2);
+    CHECK(au_gain_scan_request_album(album, 2, AU_SCAN_PREFETCH) == 2);
     CHECK(wait_idle(10000));
     AuReplayGain a, b;
     CHECK(au_gain_cache_get(album[0], &a) && au_gain_cache_get(album[1], &b));
@@ -165,13 +165,13 @@ static void test_album(void) {
     // Album loudness over both tracks: -25.6 LUFS -> +7.6 dB
     CHECK(!isnan(a.album_gain_db) && fabs(a.album_gain_db - 7.6) < 0.1);
     CHECK(!isnan(b.album_gain_db) && a.album_gain_db == b.album_gain_db);
-    CHECK(au_gain_cache_request_album(album, 2, AU_SCAN_PREFETCH) == 0); // album values present: skipped
+    CHECK(au_gain_scan_request_album(album, 2, AU_SCAN_PREFETCH) == 0); // album values present: skipped
 }
 
 static void test_errors(void) {
     reset_done();
     const char *bad[2] = { fx("does_not_exist.flac"), fx("text.mp3") };
-    CHECK(au_gain_cache_request(bad, 2, AU_SCAN_URGENT) == 2);
+    CHECK(au_gain_scan_request(bad, 2, AU_SCAN_URGENT) == 2);
     CHECK(wait_idle(5000));
     CHECK(done_count() == 2);
     CHECK(done_result[0] == AU_ERR_FILE && done_result[1] == AU_ERR_FILE);
@@ -179,7 +179,7 @@ static void test_errors(void) {
 
     // They are remembered: asking again queues nothing (playlists used to re-read them on every track change)
     reset_done();
-    CHECK(au_gain_cache_request(bad, 2, AU_SCAN_PREFETCH) == 0);
+    CHECK(au_gain_scan_request(bad, 2, AU_SCAN_PREFETCH) == 0);
     CHECK(wait_idle(1000));
     CHECK(done_count() == 0);
 }
@@ -198,21 +198,21 @@ static void test_changed_failure_is_measured_again(void) {
     const char *p[1] = { path };
 
     reset_done();
-    CHECK(au_gain_cache_request(p, 1, AU_SCAN_URGENT) == 1);
+    CHECK(au_gain_scan_request(p, 1, AU_SCAN_URGENT) == 1);
     CHECK(wait_idle(5000));
     CHECK(done_count() == 1 && done_result[0] == AU_ERR_FILE);
-    CHECK(au_gain_cache_request(p, 1, AU_SCAN_URGENT) == 0); // unchanged: skipped
+    CHECK(au_gain_scan_request(p, 1, AU_SCAN_URGENT) == 0); // unchanged: skipped
 
     // The file changes (here: its size), so it is tried again
     write_text(path, "still not audio, but longer now");
     reset_done();
-    CHECK(au_gain_cache_request(p, 1, AU_SCAN_URGENT) == 1);
+    CHECK(au_gain_scan_request(p, 1, AU_SCAN_URGENT) == 1);
     CHECK(wait_idle(5000));
     CHECK(done_count() == 1 && done_result[0] == AU_ERR_FILE);
 
     // au_gain_scan_stop() forgets the failures
     au_gain_scan_stop();
-    CHECK(au_gain_cache_request(p, 1, AU_SCAN_URGENT) == 1);
+    CHECK(au_gain_scan_request(p, 1, AU_SCAN_URGENT) == 1);
     CHECK(wait_idle(5000));
     remove(path);
 }
@@ -221,7 +221,7 @@ static void test_configure_and_stop(void) {
     reset_done();
     configure(4);
     const char *paths[3] = { scan_file(20), scan_file(21), scan_file(22) };
-    CHECK(au_gain_cache_request(paths, 3, AU_SCAN_PREFETCH) == 3);
+    CHECK(au_gain_scan_request(paths, 3, AU_SCAN_PREFETCH) == 3);
     configure(1);                                                    // extra workers leave after their job
     CHECK(wait_idle(10000));
     CHECK(done_count() == 3);
@@ -231,7 +231,7 @@ static void test_configure_and_stop(void) {
     const char *more[4] = { scan_file(9), scan_file(10), scan_file(11), scan_file(12) };
     au_gain_cache_remove(more[0]); au_gain_cache_remove(more[1]);
     au_gain_cache_remove(more[2]); au_gain_cache_remove(more[3]);
-    for (int i = 0; i < 4; i++) au_gain_cache_request(&more[i], 1, AU_SCAN_PREFETCH);
+    for (int i = 0; i < 4; i++) au_gain_scan_request(&more[i], 1, AU_SCAN_PREFETCH);
     CHECK(wait_idle(10000));
     tc_sleep_ms(50);                                                 // all four workers are idle now
     const uint32_t t0 = SDL_GetTicks();
@@ -239,16 +239,68 @@ static void test_configure_and_stop(void) {
     printf("   lowering 4 idle workers to 1 took %u ms\n", SDL_GetTicks() - t0);
     CHECK(SDL_GetTicks() - t0 < 2000);
     au_gain_scan_stop();
-    const AuGainScanConfig bad = { .threads = 99 };
-    CHECK(au_gain_scan_configure(&bad) == AU_ERR_INVALID_ARGUMENT);
+    const AuGainScanSettings bad = { .threads = 99 };
+    CHECK(au_set_gain_scan(&bad) == AU_ERR_INVALID_ARGUMENT);
     // Workers start again on the next request
     const char *p = scan_file(23);
-    CHECK(au_gain_cache_request(&p, 1, AU_SCAN_PREFETCH) == 1);
+    CHECK(au_gain_scan_request(&p, 1, AU_SCAN_PREFETCH) == 1);
     CHECK(wait_idle(10000));
     CHECK(au_gain_cache_get(p, NULL));
 }
 
 /* ---------- the player ---------- */
+
+// Settings from inside on_cached (a scan worker): lowering the count there used to join the calling worker itself, and
+// au_gain_scan_stop() joined every worker including its caller. Lowering now never waits; stopping from there is refused.
+static SDL_atomic_t from_callback_calls;
+static Uint32 from_callback_ms;
+
+static void on_cached_reconfigures(const char *path, int result, const AuReplayGain *rg, void *user) {
+    on_cached(path, result, rg, user);
+    if (SDL_AtomicIncRef(&from_callback_calls) != 0) return;   // the first callback only
+    const Uint32 t0 = SDL_GetTicks();
+    const AuGainScanSettings one = { .threads = 1, .on_cached = on_cached_reconfigures };
+    CHECK(au_set_gain_scan(&one) == AU_OK);
+    CHECK(au_gain_scan_stop() == AU_ERR_WRONG_THREAD);          // refused: it would wait for this thread
+    from_callback_ms = SDL_GetTicks() - t0;
+}
+
+static void test_configure_from_callback(void) {
+    reset_done();
+    SDL_AtomicSet(&from_callback_calls, 0);
+    const AuGainScanSettings four = { .threads = 4, .on_cached = on_cached_reconfigures };
+    REQUIRE(au_set_gain_scan(&four) == AU_OK);
+    const char *paths[4] = { scan_file(13), scan_file(14), scan_file(15), scan_file(16) };
+    for (int i = 0; i < 4; i++) au_gain_cache_remove(paths[i]);
+    CHECK(au_gain_scan_request(paths, 4, AU_SCAN_PREFETCH) == 4);
+    CHECK(wait_idle(10000));
+    printf("   configure + stop from on_cached took %u ms\n", from_callback_ms);
+    CHECK(SDL_AtomicGet(&from_callback_calls) >= 1 && from_callback_ms < 1000);
+    CHECK(done_count() == 4);
+    // Lowered to 1 while the others were measuring; raising again reuses their slots once they have left
+    configure(4);
+    const char *more[3] = { scan_file(17), scan_file(18), scan_file(19) };
+    for (int i = 0; i < 3; i++) au_gain_cache_remove(more[i]);
+    CHECK(au_gain_scan_request(more, 3, AU_SCAN_PREFETCH) == 3);
+    CHECK(wait_idle(10000));
+    CHECK(done_count() == 7);
+    au_gain_scan_stop();
+}
+
+// An album with a file that can not be measured (cover art in the folder) is done once its other tracks have album
+// values: every request used to measure the whole album again
+static void test_album_with_unmeasurable_file(void) {
+    reset_done();
+    configure(2);
+    const char *album[3] = { scan_file(5), scan_file(6), fx("not_audio.bin") };
+    au_gain_cache_remove(album[0]);
+    au_gain_cache_remove(album[1]);
+    CHECK(au_gain_scan_request_album(album, 3, AU_SCAN_PREFETCH) >= 2);   // the bad file may be known already
+    CHECK(wait_idle(10000));
+    AuReplayGain rg;
+    CHECK(au_gain_cache_get(album[0], &rg) && !isnan(rg.album_gain_db));
+    CHECK(au_gain_scan_request_album(album, 3, AU_SCAN_PREFETCH) == 0);   // nothing left to measure
+}
 
 static double gain_when_open(const int32_t handle) {
     double db = -999;
@@ -263,7 +315,7 @@ static void test_player_measures_missing(void) {
     reset_done();
     configure(1);
     REQUIRE(tc_init_player(0) == 0);
-    AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK, .fallback_gain_db = -6, .measure_missing = true };
+    AuReplayGainSettings rg = { .mode = AU_REPLAYGAIN_TRACK, .fallback_gain_db = -6, .measure_missing = true };
     CHECK(au_set_replaygain(&rg) == AU_OK);
 
     // Untagged and not cached: measured before it starts (well within the default 500 ms)
@@ -308,7 +360,7 @@ static void test_player_measures_missing(void) {
     tc_sleep_ms(200);
     CHECK(!au_gain_cache_get(fx("rg_untagged.flac"), NULL));
 
-    const AuReplayGainConfig too_long = { .mode = AU_REPLAYGAIN_TRACK, .measure_wait_seconds = 20 };
+    const AuReplayGainSettings too_long = { .mode = AU_REPLAYGAIN_TRACK, .measure_wait_seconds = 20 };
     CHECK(au_set_replaygain(&too_long) == AU_ERR_INVALID_ARGUMENT);
 
     au_stop();
@@ -333,6 +385,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_errors);
     RUN_TEST(test_changed_failure_is_measured_again);
     RUN_TEST(test_configure_and_stop);
+    RUN_TEST(test_configure_from_callback);
+    RUN_TEST(test_album_with_unmeasurable_file);
     RUN_TEST(test_player_measures_missing);
 
     au_gain_scan_stop();

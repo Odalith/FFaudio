@@ -43,7 +43,7 @@ void packet_queue_start(PacketQueue *q);
 int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *serial);
 
 /* Lock-free reads of the current serial / abort state, safe from any thread */
-static inline int packet_queue_serial(PacketQueue *q) { return SDL_AtomicGet(&q->serial_atomic); }
-static inline int packet_queue_aborted(PacketQueue *q) { return SDL_AtomicGet(&q->abort_atomic); }
+static inline int packet_queue_serial(PacketQueue *q) { return ffa_load(&q->serial); }
+static inline int packet_queue_aborted(PacketQueue *q) { return ffa_load(&q->abort_request); }
 
 #endif //FFAUDIO_PACKET_QUEUE_UTILS_H

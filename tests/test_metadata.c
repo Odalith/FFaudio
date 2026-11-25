@@ -95,6 +95,13 @@ static void test_chained_ogg_duration(void) {
     REQUIRE(single);
     CHECK(fabs(single->duration - 2.0) < 0.03 && single->seekable);
     au_media_info_release(single);
+    // Two streams at once whose last pages are the longer one's: not chained (it was taken for chained, and its seeks
+    // were ignored)
+    const AuMediaInfo *muxed = au_probe(fx("muxed.ogg"), NULL);
+    REQUIRE(muxed);
+    printf("   muxed.ogg: %.3f s, seekable %d\n", muxed->duration, muxed->seekable);
+    CHECK(muxed->seekable);
+    au_media_info_release(muxed);
 
     REQUIRE(tc_init_player(0) == 0);
     au_play(fx("chained.ogg"), NULL);
@@ -103,6 +110,13 @@ static void test_chained_ogg_duration(void) {
     au_seek(3.0);                                 // ignored, like on a live stream
     tc_sleep_ms(500);
     CHECK(tc_snapshot().restart == 0);
+    au_stop();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    tc_reset_events();
+    au_play(fx("muxed.ogg"), NULL);
+    CHECK(TC_WAIT_FIELD(started, 1, 5000));
+    au_seek(1.0);
+    CHECK(TC_WAIT_FIELD(restart, 1, 3000));        // a real seek
     au_shutdown();
 }
 
@@ -160,6 +174,17 @@ static void test_pictures(void) {
     au_shutdown();
 }
 
+// Tags in a legacy encoding (a WAV INFO title in Windows-1252) come out as UTF-8, as AuMediaInfo promises: they used to
+// be passed on as raw bytes
+static void test_legacy_tag_encoding(void) {
+    const AuMediaInfo *info = au_probe(fx("legacy_tag.wav"), NULL);
+    REQUIRE(info);
+    const char *title = au_media_tag(info, "title");
+    printf("   title: %s\n", title ? title : "(none)");
+    CHECK(title && !strcmp(title, "Caf\xc3\xa9 \xe2\x80\x9cLive\xe2\x80\x9d"));
+    au_media_info_release(info);
+}
+
 static void test_probe_untagged_and_bad(void) {
     const AuMediaInfo *info = au_probe(fx("rg_untagged.flac"), NULL);
     REQUIRE(info);
@@ -206,13 +231,13 @@ static void test_track_info_while_playing(void) {
 
     double gain = 99;
     CHECK(au_track_gain_db(h, &gain) == AU_OK && gain == 0.0); // ReplayGain is off by default
-    const AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings rg = { .mode = AU_REPLAYGAIN_TRACK };
     CHECK(au_set_replaygain(&rg) == AU_OK);
     tc_sleep_ms(100);
     CHECK(au_track_gain_db(0, &gain) == AU_OK && fabs(gain + 6.0) < 0.01);
     CHECK(au_track_gain_db(h + 1000, &gain) == AU_ERR_NOTHING_TO_DO);
 
-    const AuReplayGainConfig bad = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 40 };
+    const AuReplayGainSettings bad = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 40 };
     CHECK(au_set_replaygain(&bad) == AU_ERR_INVALID_ARGUMENT);
 
     au_stop();
@@ -266,6 +291,34 @@ static void test_ffmpeg_log_routed(void) {
     au_shutdown();
 }
 
+// FFmpeg logs from threads that are not the player's (gain-scan workers, au_probe() on an application thread, the
+// application's own FFmpeg) while au_shutdown() frees the player: ff_log() used to read the player without the
+// lifecycle lock and could post to freed memory (ASan, TSan)
+static SDL_atomic_t logger_stop;
+
+static int logger_main(void *arg) {
+    (void)arg;
+    const AVClass *ctx = &probe_class;
+    while (!SDL_AtomicGet(&logger_stop)) {
+        av_log(&ctx, AV_LOG_ERROR, "from another thread\n");
+        SDL_Delay(1);
+    }
+    return 0;
+}
+
+static void test_ffmpeg_log_during_shutdown(void) {
+    SDL_AtomicSet(&logger_stop, 0);
+    SDL_Thread *logger = SDL_CreateThread(logger_main, "logger", NULL);
+    REQUIRE(logger);
+    for (int i = 0; i < 30; i++) {
+        REQUIRE(tc_init_player(0) == 0);
+        tc_sleep_ms(5);
+        au_shutdown();
+    }
+    SDL_AtomicSet(&logger_stop, 1);
+    SDL_WaitThread(logger, NULL);
+}
+
 static void test_non_audio_opens_no_decoder(void) {
     // not_audio.bin is damaged JPEG data, detected as a raw video stream like encrypted cache files often are.
     // Probing it used to open the video decoder, which printed warnings ("[vvc] SPS id 9 not available", ...).
@@ -299,9 +352,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_probe_r128);
     RUN_TEST(test_probe_untagged_and_bad);
     RUN_TEST(test_chained_ogg_duration);
+    RUN_TEST(test_legacy_tag_encoding);
     RUN_TEST(test_pictures);
     RUN_TEST(test_track_info_while_playing);
     RUN_TEST(test_ffmpeg_log_routed);
+    RUN_TEST(test_ffmpeg_log_during_shutdown);
     RUN_TEST(test_non_audio_opens_no_decoder);
     return tc_finish("test_metadata");
 }

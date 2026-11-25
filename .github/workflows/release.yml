@@ -1,14 +1,19 @@
 name: Release
 
-# Pushing a tag like v2.0.0 builds the release archives (ffaudio with an LGPL FFmpeg built by
+# Pushing a tag like v4.0.0 builds the release archives (ffaudio with an LGPL FFmpeg built by
 # scripts/build-deps.sh), tests them and attaches them to a draft GitHub release, together with the FFmpeg
 # and soxr sources. Pull requests that change the packaging, and manual runs (workflow_dispatch), build and test
 # the archives as workflow artifacts only.
 on:
   push:
     tags: [ 'v*' ]
+    # Caches are only shared from the default branch: a run on master after the dependencies change stores the
+    # FFmpeg builds where every pull request and tag finds them (a pull request's own cache is its own)
+    branches: [ master ]
+    paths: [ 'scripts/build-deps.sh', '.github/workflows/release.yml' ]
   pull_request:
-    paths: [ '.github/workflows/release.yml', 'scripts/**', 'CMakeLists.txt', 'ffaudio.pc.in', 'tests/release_smoke.c' ]
+    paths: [ '.github/workflows/release.yml', 'scripts/**', 'CMakeLists.txt', 'ffaudio.pc.in', 'tests/release_smoke.c',
+             'bindings/**', 'player/**' ]
   workflow_dispatch:
 
 permissions:
@@ -71,9 +76,11 @@ jobs:
           sudo chown -R "$USER" ~/apt-cache
 
       # FFmpeg and soxr only change with scripts/build-deps.sh
-      - name: Cache dependency builds
+      # Restored and saved in two steps: actions/cache saves only when the whole job succeeds, so a failing test threw
+      # a fresh FFmpeg build away
+      - name: Restore dependency builds
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: deps
           key: deps-linux-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
@@ -84,11 +91,18 @@ jobs:
           scripts/build-deps.sh deps/prefix deps/work
           find deps/work -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +   # keep only the source tarballs
 
+      - name: Save dependency builds
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
       - name: Build ffaudio
         run: |
           export PKG_CONFIG_PATH="$PWD/deps/prefix/lib/pkgconfig"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFFAUDIO_SANITIZER=none \
-            -DFFAUDIO_RELOCATABLE=ON -DFFAUDIO_BUILD_MANUAL_PLAYER=OFF -DCMAKE_INSTALL_PREFIX="$PWD/stage"
+            -DFFAUDIO_RELOCATABLE=ON -DFFAUDIO_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$PWD/stage"
           cmake --build build
 
       - name: Test with the bundled FFmpeg
@@ -112,6 +126,13 @@ jobs:
             $(PKG_CONFIG_PATH="$a/lib/pkgconfig" pkg-config --cflags --libs ffaudio) -lm -Wl,-rpath,"$a/lib"
           env -u LD_LIBRARY_PATH SDL_AUDIODRIVER=dummy smoke/run build/fixtures/s44_stereo.flac
           ldd smoke/run | grep -E 'ffaudio|libav|soxr|bs2b'
+          # The Python bindings find the archive's library by themselves; the player's modules import with Textual
+          env -u LD_LIBRARY_PATH SDL_AUDIODRIVER=dummy python3 -c "import sys; sys.path.insert(0, '$a/python'); \
+            import ffaudio; print('python bindings', ffaudio.version(), ffaudio.probe('build/fixtures/s44_stereo.flac').codec)"
+          python3 -m venv smoke/venv
+          smoke/venv/bin/pip install -q -r "$a/player/requirements.txt"
+          env -u LD_LIBRARY_PATH smoke/venv/bin/python -c "import sys; sys.path[:0] = ['$a/player', '$a/python']; \
+            import ffaudio_player.ui.app; print('player imports')"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -152,9 +173,11 @@ jobs:
             mingw-w64-ucrt-x86_64-libbs2b
             mingw-w64-ucrt-x86_64-ffmpeg
 
-      - name: Cache dependency builds
+      # Restored and saved in two steps: actions/cache saves only when the whole job succeeds, so a failing test threw
+      # a fresh FFmpeg build away
+      - name: Restore dependency builds
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: deps
           key: deps-windows-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
@@ -166,6 +189,13 @@ jobs:
         run: |
           scripts/build-deps.sh deps/prefix deps/work
           find deps/work -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+
+      - name: Save dependency builds
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       - name: Build ffaudio
         run: |

@@ -47,7 +47,7 @@ static void test_random_ops(void) {
             case 8: au_pause(rnd() % 2); break;
             case 9: au_seek((rnd() % 3000) / 1000.0); break;
             case 10: au_seek_fraction((rnd() % 100) / 100.0); break;
-            case 11: au_set_volume((rnd() % 101) / 100.0f); (void)tc_status(); break;
+            case 11: au_set_volume((rnd() % 201) / 100.0f); (void)tc_status(); break;
         }
         tc_sleep_ms(rnd() % 40);
     }

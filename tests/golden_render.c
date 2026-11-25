@@ -44,9 +44,11 @@ static SDL_atomic_t next_item;   // next playlist item to queue
 static SDL_atomic_t ended, errors;
 
 static void queue(const int i) {
-    const AuPlayConfig cfg = { .filters = playlist[i].filters };
-    if (i == 0) au_play(paths[i], &cfg);
-    else au_queue(paths[i], &cfg);
+    AuPlayOptions *o = au_play_options_create();
+    if (o && au_play_options_set_filters(o, playlist[i].filters) != AU_OK) fprintf(stderr, "bad filters %d\n", i);
+    if (i == 0) au_play(paths[i], o);
+    else au_queue(paths[i], o);
+    au_play_options_free(o);
 }
 
 static void on_prepare_next(int32_t handle, void *user) {
@@ -144,22 +146,16 @@ int main(int argc, char **argv) {
     for (int i = 0; i < N_ITEMS; i++) snprintf(paths[i], sizeof(paths[i]), "%s/%s", argv[1], playlist[i].file);
 
     au_gain_cache_set_file(""); // memory only: no values from (or for) the user's cache
-    const AuConfig config = {
-        .app_name = "ffaudio-golden",
-        .volume = 1.0f,
-        .prepare_next_seconds = 4,
-        .output_channels = CHANNELS,
-        .output_sample_rate = RATE,
-        .on_event = on_event,
-    };
-    if (au_init(&config) != AU_OK) {
+    if (au_init("ffaudio-golden", on_event, NULL) != AU_OK) {
         fprintf(stderr, "could not start the player\n");
         return 2;
     }
+    au_set_prepare_next(4);
+    au_set_output_format(CHANNELS, RATE); // the device opens in it with the first track
     const AuCrossfade xf = { .on_track_end = { .seconds = 0.5, .curve = AU_FADE_EQUAL_POWER },
                                  .min_track_seconds = 2.0 };
     au_set_crossfade(&xf);
-    const AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings rg = { .mode = AU_REPLAYGAIN_TRACK };
     au_set_replaygain(&rg);
     SDL_AtomicSet(&next_item, 2);
     queue(0);

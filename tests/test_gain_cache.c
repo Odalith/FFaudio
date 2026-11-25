@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <wchar.h>
 #else
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -39,15 +40,15 @@ static void test_basics(void) {
     CHECK(au_gain_cache_count() == 1);
     CHECK(au_gain_cache_get("/music/a.flac", &out) && out.track_gain_db == -2);
 
-    CHECK(au_gain_cache_remove("/music/a.flac"));
-    CHECK(!au_gain_cache_remove("/music/a.flac"));
+    CHECK(au_gain_cache_remove("/music/a.flac") == AU_OK);
+    CHECK(au_gain_cache_remove("/music/a.flac") == AU_ERR_NOTHING_TO_DO);
     CHECK(au_gain_cache_count() == 0);
 
     CHECK(au_gain_cache_set(NULL, &rg) == AU_ERR_INVALID_ARGUMENT);
     CHECK(au_gain_cache_set("", &rg) == AU_ERR_INVALID_ARGUMENT);
     CHECK(au_gain_cache_set("/x", NULL) == AU_ERR_INVALID_ARGUMENT);
     CHECK(!au_gain_cache_get(NULL, &out));
-    CHECK(!au_gain_cache_remove(NULL));
+    CHECK(au_gain_cache_remove(NULL) == AU_ERR_INVALID_ARGUMENT);
     CHECK(au_gain_cache_foreach(NULL, NULL) == 0);
 }
 
@@ -174,7 +175,7 @@ static double applied_gain(const int32_t handle) {
 static void start_player(void) {
     tc_reset_events();
     REQUIRE(tc_init_player(0) == 0);
-    const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings cfg = { .mode = AU_REPLAYGAIN_TRACK };
     REQUIRE(au_set_replaygain(&cfg) == AU_OK);
 }
 
@@ -194,10 +195,11 @@ static void test_player_priority(void) {
     h = au_play(fx("rg_tagged.flac"), NULL);
     CHECK(fabs(applied_gain(h) + 7) < 0.01);
 
-    // AuPlayConfig.replaygain wins over the cache
+    // au_play_options_set_replaygain() wins over the cache
     const AuReplayGain explicit_rg = track_gain(-3);
-    const AuPlayConfig cfg = { .replaygain = &explicit_rg };
-    h = au_play(fx("rg_tagged.flac"), &cfg);
+    AuPlayOptions *o = au_play_options_create();
+    REQUIRE(au_play_options_set_replaygain(o, &explicit_rg) == AU_OK);
+    h = tc_play(fx("rg_tagged.flac"), o);
     CHECK(fabs(applied_gain(h) + 3) < 0.01);
 
     au_stop();
@@ -226,7 +228,7 @@ static void test_player_live_updates(void) {
     tc_sleep_ms(100);
     CHECK(fabs(applied_gain(next) + 4.5) < 0.01);
 
-    CHECK(au_gain_cache_remove(fx("rg_long.flac")));
+    CHECK(au_gain_cache_remove(fx("rg_long.flac")) == AU_OK);
     tc_sleep_ms(100);
     CHECK(fabs(applied_gain(h) + 6) < 0.01);       // back to the tags
     au_gain_cache_clear();
@@ -314,7 +316,7 @@ static void test_persistence(void) {
     CHECK(au_gain_cache_set("/m/a.flac", &full) == AU_OK);
     CHECK(au_gain_cache_set("/m/b.flac", &b) == AU_OK);
     CHECK(au_gain_cache_set("/m/c.flac", &c) == AU_OK);
-    CHECK(au_gain_cache_remove("/m/b.flac"));
+    CHECK(au_gain_cache_remove("/m/b.flac") == AU_OK);
     c.track_gain_db = 4.0;
     CHECK(au_gain_cache_set("/m/c.flac", &c) == AU_OK);
 
@@ -396,7 +398,7 @@ static void test_damaged_and_foreign_lines(void) {
     append_text(cache_file, "S\t-3.5\t-\t-\t-\t0\t/m/x.flac\n");
     CHECK(au_gain_cache_reload() == AU_OK);
     CHECK(au_gain_cache_count() == 0);
-    CHECK(au_gain_cache_set("/m/y.flac", &rg) == AU_ERR_FILE);  // kept in memory only
+    CHECK(au_gain_cache_set("/m/y.flac", &rg) == AU_ERR_NOT_SAVED);  // kept in memory only
     CHECK(au_gain_cache_get("/m/y.flac", NULL));
     CHECK(count_lines(cache_file) == 1);
 
@@ -405,7 +407,7 @@ static void test_damaged_and_foreign_lines(void) {
     append_text(cache_file, "ffaudio-replaygain-cache 2\nwhatever version 2 writes\n");
     CHECK(au_gain_cache_reload() == AU_OK);
     CHECK(au_gain_cache_count() == 0);
-    CHECK(au_gain_cache_set("/m/y.flac", &rg) == AU_ERR_FILE);
+    CHECK(au_gain_cache_set("/m/y.flac", &rg) == AU_ERR_NOT_SAVED);
     CHECK(count_lines(cache_file) == 2);
     use_fresh_file(); // the tests after this one write to the cache file
 }
@@ -531,6 +533,35 @@ static void test_memory_only_and_default_location(void) {
     REQUIRE(au_gain_cache_set_file(cache_file) == AU_OK);
 }
 
+// A cache file that can not be written (a read-only folder): every change is made in memory and says so with
+// AU_ERR_NOT_SAVED (3.x: AU_ERR_FILE for a set, which also means an unreadable audio file; nothing for the others)
+static void test_not_saved(void) {
+#ifdef _WIN32
+    printf("   skipped: POSIX permissions\n");
+#else
+    if (geteuid() == 0) { printf("   skipped: root can write anywhere\n"); return; }
+    char dir[1100], file[1200];
+    snprintf(dir, sizeof(dir), "%s/read_only_cache", tc_fixture_dir);
+    snprintf(file, sizeof(file), "%s/replaygain.cache", dir);
+    remove(file);
+    rmdir(dir);
+    REQUIRE(mkdir(dir, 0555) == 0);
+    REQUIRE(au_gain_cache_set_file(file) == AU_OK);
+    const AuReplayGain rg = track_gain(-4);
+    CHECK(au_gain_cache_set("/m/ro.flac", &rg) == AU_ERR_NOT_SAVED);
+    CHECK(au_gain_cache_get("/m/ro.flac", NULL));                 // in memory all the same
+    CHECK(au_gain_cache_remove("/m/ro.flac") == AU_ERR_NOT_SAVED);
+    CHECK(!au_gain_cache_get("/m/ro.flac", NULL));
+    CHECK(au_gain_cache_remove("/m/ro.flac") == AU_ERR_NOTHING_TO_DO);
+    CHECK(au_gain_cache_clear() == AU_ERR_NOT_SAVED);
+    AuReplayGain out;
+    CHECK(au_gain_cache_scan(fx("rg_untagged.flac"), NULL, &out) == AU_ERR_NOT_SAVED);
+    CHECK(!isnan(out.track_gain_db) && au_gain_cache_get(fx("rg_untagged.flac"), NULL));
+    REQUIRE(au_gain_cache_set_file(cache_file) == AU_OK);
+    rmdir(dir);
+#endif
+}
+
 int main(int argc, char **argv) {
     // The other process of test_two_processes on Windows
     if (argc == 3 && !strcmp(argv[1], "--cache-child")) return child_writes(argv[2]);
@@ -547,6 +578,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_damaged_and_foreign_lines);
     RUN_TEST(test_locale);
     RUN_TEST(test_memory_only_and_default_location);
+    RUN_TEST(test_not_saved);
     RUN_TEST(test_basics);
     RUN_TEST(test_foreach);
     RUN_TEST(test_many_entries);

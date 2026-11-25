@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ffaudio"
+version = "4.0.0"
+description = "Python bindings (ctypes) for ffaudio, the music playback library on FFmpeg and SDL2"
+readme = "README.md"
+license = { text = "LGPL-2.1-or-later" }
+requires-python = ">=3.9"
+classifiers = ["Topic :: Multimedia :: Sound/Audio :: Players"]
+
+[project.urls]
+Homepage = "https://github.com/Odalith/ffAudio"
+
+[tool.setuptools]
+packages = ["ffaudio"]
