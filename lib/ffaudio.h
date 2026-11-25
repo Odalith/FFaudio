@@ -651,10 +651,6 @@ extern "C" {
     // "major.minor.patch"
     FFAUDIO_API const char *au_get_version(void);
 
-    // Free memory ffaudio returns without a dedicated free function, such as au_fb_build() strings. Like
-    // au_free_devices(), it frees with ffaudio's own C runtime (see there).
-    FFAUDIO_API void au_free(void *ptr);
-
 #ifdef __cplusplus
 } // extern "C"
 #endif

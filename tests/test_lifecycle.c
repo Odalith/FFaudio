@@ -88,7 +88,6 @@ static void test_device_name_and_no_spurious_changes(void) {
     for (int i = 0; i < n; i++) CHECK(devs[i] != NULL);
     au_free_devices(devs, n);
     au_free_devices(NULL, 0);
-    au_free(NULL);
 
     // SDL announces every device at start-up and the list is polled every 2 s: neither is a change
     au_play(fx("long_6s.flac"), NULL);

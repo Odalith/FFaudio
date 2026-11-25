@@ -184,9 +184,7 @@ eq.preamp_db = -3.0;                        // headroom for the boost
 au_fb_add_equalizer(fb, "eq", &eq);         // named: each band can be changed while playing
 au_fb_add_crossfeed(fb, NULL, NULL);        // no name, default settings
 
-char *filters = au_fb_build(fb);
-au_set_filters(filters);                    // every track, changes apply while playing
-au_free(filters);
+au_set_filters(au_fb_peek(fb));             // every track, changes apply while playing; the string is copied
 au_fb_free(fb);
 
 // Per track
@@ -551,7 +549,7 @@ au_shutdown();   // not from on_event; au_init() may be called again afterwards
 
 ## Memory use
 Free what ffaudio returns with ffaudio's functions (`au_media_info_release()`, `au_free_devices()`,
-`au_loudness_meter_free()`, `au_fb_free()`, `au_free()`, ...), never with your own `free()`: on Windows a program
+`au_loudness_meter_free()`, `au_fb_free()`, ...), never with your own `free()`: on Windows a program
 and a DLL can use different C runtimes, and freeing across them corrupts the heap.
 
 On Linux, a process using ffaudio can appear to grow for a while and then level off. That growth is not a leak.

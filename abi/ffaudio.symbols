@@ -21,14 +21,12 @@ au_fb_add_parametric_eq
 au_fb_add_stereo
 au_fb_add_tone
 au_fb_add_volume_db
-au_fb_build
 au_fb_clear
 au_fb_create
 au_fb_free
 au_fb_last_error
 au_fb_peek
 au_filter_available
-au_free
 au_free_devices
 au_gain_cache_clear
 au_gain_cache_count

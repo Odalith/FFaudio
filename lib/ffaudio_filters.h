@@ -24,13 +24,11 @@
  *   eq.gain_db[0] = 3.0;                      // +3 dB at 31 Hz
  *   au_fb_add_equalizer(fb, "eq", &eq);       // named "eq": its bands can be changed while playing
  *   au_fb_add_crossfeed(fb, NULL, NULL);      // no name, default settings
- *   char *filters = au_fb_build(fb);          // "equalizer@eq_0=...,crossfeed=..."
- *   au_set_filters(filters);
- *   au_free(filters);
+ *   au_set_filters(au_fb_peek(fb));           // "equalizer@eq_0=...,crossfeed=..."; copied
  *   au_fb_free(fb);
  *
  * Every au_fb_add_* function returns AU_OK or a negative AU_RESULT and leaves the builder unchanged on error;
- * au_fb_last_error() explains what was wrong. Numbers are written independently of the C locale, so a comma
+ * au_fb_last_error() explains what was wrong. Settings given as NULL are the defaults, for every helper. Numbers are written independently of the C locale, so a comma
  * decimal separator can not break the strings.
  */
 
@@ -50,16 +48,12 @@ extern "C" {
     FFAUDIO_API void au_fb_free(AuFilterBuilder *fb);
     FFAUDIO_API void au_fb_clear(AuFilterBuilder *fb);
 
-    // The filter string so far, or NULL when nothing was added. Free it with au_free().
-    FFAUDIO_API char *au_fb_build(const AuFilterBuilder *fb);
-
-    // The filter string so far ("" when empty), owned by the builder
+    // The filter string so far ("" when empty), owned by the builder: valid until it is changed or freed. Every
+    // function that takes filters copies them. (au_fb_build() and au_free() before 4.0.)
     FFAUDIO_API const char *au_fb_peek(const AuFilterBuilder *fb);
 
     // Why the last au_fb_add_* call failed ("" when it did not)
     FFAUDIO_API const char *au_fb_last_error(const AuFilterBuilder *fb);
-
-    // au_free() (declared in ffaudio.h) frees the strings au_fb_build() returns
 
     // Append any filter (or filter chain) as-is, e.g. "atempo=1.25"
     FFAUDIO_API int au_fb_add(AuFilterBuilder *fb, const char *filter);
@@ -113,7 +107,7 @@ extern "C" {
     // Octave bands at 31.25, 62.5, 125, 250, 500, 1k, 2k, 4k, 8k and 16k Hz, all gains 0
     FFAUDIO_API AuEqualizer au_equalizer_defaults(void);
 
-    // Adds nothing when every gain is 0 (unless named). Filters: volume@<name> (preamp, when not 0) and one per band,
+    // eq NULL = au_equalizer_defaults(). Adds nothing when every gain is 0 (unless named). Filters: volume@<name> (preamp, when not 0) and one per band,
     // equalizer@<name>_<band index> (0..9, the band's place in AuEqualizer); each takes the commands f (Hz),
     // w (width in Hz) and g (dB), e.g. ("equalizer@eq_3", "g", "-2.5").
     FFAUDIO_API int au_fb_add_equalizer(AuFilterBuilder *fb, const char *name, const AuEqualizer *eq);
@@ -147,7 +141,8 @@ extern "C" {
         AuPeqBand bands[AU_PEQ_MAX_BANDS];
     } AuParametricEq;
 
-    // Filters: volume@<name> (preamp, when not 0) and one per band, <filter>@<name>_<band index>, where the filter
+    // eq NULL = no bands and no preamp. Filters: volume@<name> (preamp, when not 0) and one per band,
+    // <filter>@<name>_<band index>, where the filter
     // is equalizer, lowshelf, highshelf, lowpass or highpass. Each takes the commands f, w (Q) and g (dB), e.g.
     // ("equalizer@hp_3", "g", "-2.5").
     FFAUDIO_API int au_fb_add_parametric_eq(AuFilterBuilder *fb, const char *name, const AuParametricEq *eq);
@@ -185,7 +180,7 @@ extern "C" {
     // balance 0, width 1, no swap
     FFAUDIO_API AuStereo au_stereo_defaults(void);
 
-    // Adds nothing for the defaults (unless named). Filter: stereotools@<name>; commands balance_out (-1..1),
+    // stereo NULL = au_stereo_defaults(). Adds nothing for the defaults (unless named). Filter: stereotools@<name>; commands balance_out (-1..1),
     // slev (width, 0.015625..64) and mode ("lr>lr", "lr>l+r" = mono, "lr>rl" = swap).
     FFAUDIO_API int au_fb_add_stereo(AuFilterBuilder *fb, const char *name, const AuStereo *stereo);
 
