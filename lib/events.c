@@ -68,9 +68,13 @@ static void strings_of(AuEvent *e, const char ***a, const char ***b) {
         case AU_EVENT_LOG:             *a = &e->data.log.message; break;
         case AU_EVENT_DEVICE:          *a = &e->data.device.name; break;
         case AU_EVENT_STREAM_METADATA: *a = &e->data.metadata.title; *b = &e->data.metadata.artist; break;
+        case AU_EVENT_TRACK_ENDED:     *a = &e->data.ended.message; break;
         default: break;
     }
 }
+
+// AuEvent's size is part of the ABI (au_poll_event() writes into the caller's): a new member must fit the padding
+typedef char au_event_data_is_64_bytes[sizeof(((AuEvent *)0)->data) == 64 ? 1 : -1];
 
 static void clear_locked(void) {
     for (int i = 0; i < count; i++) entry_free(&ring[(head + i) % cap]);

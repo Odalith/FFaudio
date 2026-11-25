@@ -57,9 +57,11 @@ extern "C" {
         AU_ERR_DEVICE = -6,
         AU_ERR_WRONG_THREAD = -7,
         AU_ERR_NOTHING_TO_DO = -8,
-        AU_ERR_FILE = -9,              // a file could not be opened or decoded
+        AU_ERR_FILE = -9,              // a file could not be read (missing, no permission, an I/O or network error)
         AU_ERR_CANCELLED = -10,
-        AU_ERR_UNSUPPORTED = -11,       // not available in this build (e.g. an FFmpeg filter that was not compiled in)
+        // not available in this build (e.g. an FFmpeg filter that was not compiled in), or no audio that can be played
+        // in the file (not a media file, no audio stream, a codec this FFmpeg does not have)
+        AU_ERR_UNSUPPORTED = -11,
     } AU_RESULT;
 
     typedef enum AU_LOG_LEVEL {
@@ -111,7 +113,10 @@ extern "C" {
             struct { bool ok; bool fell_back; const char *name; int32_t sample_rate, channels; } device;
             // duration: seconds, -1 = unknown; live: a stream with no end (no duration, no seeking)
             struct { double duration; bool live, seekable; } opened;
-            struct { AU_END reason; } ended;
+            // error (AU_END_ERROR only, otherwise AU_OK): why, as an AU_RESULT (AU_ERR_FILE, AU_ERR_UNSUPPORTED,
+            // AU_ERR_DEVICE, AU_ERR_NO_MEMORY, ...); message: the text that was logged for it (NULL without an error).
+            // Since 4.0.
+            struct { AU_END reason; int32_t error; const char *message; } ended;
             // position in seconds; from_loop: a loop started (loops_remaining after it), otherwise a seek
             struct { double position; bool from_loop; int32_t loops_remaining; } restarted;
             struct { double seconds; } duration;
@@ -120,6 +125,8 @@ extern "C" {
             // Icecast "Artist - Title" is split at " - "; artist is NULL when there is none
             struct { const char *title, *artist; } metadata;
             struct { int32_t dropped; } overflow;
+            // Fixes the size of AuEvent (72 bytes) for the major version, so events may carry more in 4.x
+            uint8_t padding[64];
         } data;
     } AuEvent;
 
@@ -150,8 +157,9 @@ extern "C" {
 
     // t goes 0 -> 1 over the fade; return the gain (0..1) of the track fading IN.
     // The track fading out uses curve(1 - t). Called on ffaudio's control thread while the fade is set up
-    // (au_set_crossfade(), or the track with its own fade-in (au_play_options_set_fade_in()) being queued): the curve is sampled at 257
-    // points, which are used from then on, so custom_user only has to live until that call has been processed.
+    // (au_set_crossfade(), or the track with its own fade-in, au_play_options_set_fade_in(), being queued): the curve
+    // is sampled at 257 points, which are used from then on, so custom_user only has to live until that call has been
+    // processed.
     typedef float (*AuFadeCurveFn)(float t, void *custom_user);
 
     // How a fade happens. seconds <= 0 means no fade (cut, or gapless at a natural track end).

@@ -224,6 +224,15 @@ static void test_poll_events(void) {
     CHECK(poll_until(AU_EVENT_TRACK_STARTED, h, 5, NULL, NULL));
     CHECK(poll_until(AU_EVENT_TRACK_ENDED, h, 5, &e, NULL));
     CHECK(e.data.ended.reason == AU_END_FINISHED);
+    CHECK(e.data.ended.error == AU_OK && e.data.ended.message == NULL);
+
+    // A failed track says why; the text is the event's own, valid until the next poll
+    const int32_t bad = au_play(fx("does_not_exist.flac"), NULL);
+    CHECK(poll_until(AU_EVENT_TRACK_ENDED, bad, 5, &e, NULL));
+    CHECK(e.data.ended.reason == AU_END_ERROR && e.data.ended.error == AU_ERR_FILE);
+    CHECK(e.data.ended.message && strstr(e.data.ended.message, "does_not_exist.flac"));
+    printf("   ended: %s\n", e.data.ended.message ? e.data.ended.message : "(none)");
+    CHECK(sizeof(AuEvent) == 72);   // part of the ABI: new members go into the padding
 
     // Nothing more: the wait gives up after its time
     while (au_poll_event(&e)) {}

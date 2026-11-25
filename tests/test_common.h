@@ -79,6 +79,8 @@ typedef struct TcEvents {
     int32_t last_eof_handle;
     int32_t last_started_handle;
     int32_t last_prepare_handle;       // AU_EVENT_PREPARE_NEXT's handle (the track that nears its end)
+    int32_t last_end_error;            // data.ended.error of the last AU_EVENT_TRACK_ENDED
+    char last_end_message[256];        // ... and its message ("" for none)
     double last_duration;
 } TcEvents;
 
@@ -124,6 +126,9 @@ static void tc_on_ended(const AuEvent *e) {
     if (error) tc_ev.eof_error++;
     if (skip) tc_ev.eof_skip++;
     tc_ev.last_eof_handle = e->handle;
+    tc_ev.last_end_error = e->data.ended.error;
+    snprintf(tc_ev.last_end_message, sizeof(tc_ev.last_end_message), "%s",
+             e->data.ended.message ? e->data.ended.message : "");
     SDL_CondBroadcast(tc_cond);
     void (*eof_hook)(bool, bool, int32_t) = tc_on_eof_hook;
     SDL_UnlockMutex(tc_mutex);

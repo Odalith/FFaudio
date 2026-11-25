@@ -41,7 +41,9 @@ static void test_all_formats(void) {
 }
 
 static void test_bad_inputs(void) {
+    // Each ends as an error that says why: a file that can not be read, or one with nothing playable in it
     const char *bad[] = { "empty.flac", "text.mp3", "video_only.mkv", "does_not_exist.flac" };
+    const int why[] = { AU_ERR_UNSUPPORTED, AU_ERR_UNSUPPORTED, AU_ERR_UNSUPPORTED, AU_ERR_FILE };
     const int n = (int)(sizeof(bad) / sizeof(bad[0]));
     for (int i = 0; i < n; i++) {
         au_play(fx(bad[i]), NULL);
@@ -49,6 +51,9 @@ static void test_bad_inputs(void) {
             fprintf(stderr, "no EOF for bad input %s\n", bad[i]);
             CHECK(false);
         }
+        const TcEvents e = tc_snapshot();
+        printf("   %s: %d \"%s\"\n", bad[i], e.last_end_error, e.last_end_message);
+        CHECK(e.last_end_error == why[i] && strstr(e.last_end_message, bad[i]));
     }
     const TcEvents e = tc_snapshot();
     CHECK(e.eof_error == n);

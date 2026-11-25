@@ -215,7 +215,11 @@ typedef struct TrackState {
     FfAtomic worker_exited;         // 1 = the worker has returned (joining it does not wait)
 
     // ---- seek requests (control thread -> read side), guarded by seek_mutex ----
-    SDL_mutex *seek_mutex;              // also guards filtergraph_str, filter_cmds and the seek handoff below
+    SDL_mutex *seek_mutex;              // also guards filtergraph_str, filter_cmds, fail_* and the seek handoff below
+    // Why the track ends as an error (AuEvent.data.ended): the first reason given (track_set_failure()), by the
+    // worker, the reader or the control thread; end_track() reads it
+    int fail_code;                      // an AU_RESULT; 0 = none given
+    char fail_text[256];
     FilterCmd *filter_cmds;             // pending avfilter_graph_send_command() calls
     bool seek_req;
     double seek_pos;                    // seconds into the track (the range)

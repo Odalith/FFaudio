@@ -26,6 +26,13 @@
 // Control thread: allocate a track (its worker does not run yet). NULL on allocation failure.
 TrackState *track_create(AudioPlayer *ap, int32_t handle, const char *filename, const AuPlayOptions *options);
 
+// Any thread of the track, or the control thread: why it ends as an error (AuEvent.data.ended.error / .message).
+// The first reason given is kept. Logs nothing.
+void track_set_failure(TrackState *t, int code, const char *text);
+
+// The reason given (code 0 = none), copied out under seek_mutex: text holds size bytes
+int track_failure(TrackState *t, char *text, size_t size);
+
 // Control thread: start the track's worker, once the track is registered: the worker publishes its details for
 // au_track_info() as soon as the file is open (docs/threading.md, "Creating a track"). < 0 when it could not start;
 // the track can then be destroyed at once.

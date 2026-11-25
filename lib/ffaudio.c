@@ -229,6 +229,7 @@ static void dispatch_notes(AudioPlayer *ap) {
                 case AU_EVENT_LOG:             n.ev.data.log.message = n.s1; break;
                 case AU_EVENT_DEVICE:          n.ev.data.device.name = n.s1; break;
                 case AU_EVENT_STREAM_METADATA: n.ev.data.metadata.title = n.s1; n.ev.data.metadata.artist = n.s2; break;
+                case AU_EVENT_TRACK_ENDED:     n.ev.data.ended.message = n.s1; break;
                 default: break;
             }
             if (ap->on_event) ap->on_event(&n.ev, ap->user_data);
@@ -355,7 +356,15 @@ static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
         reason = END_ERROR;
     t->ended = true;
     pub_remove(ap, t->handle); // ended: au_track_info() no longer knows it, before the event says so
-    note_add((AuEvent){ .type = AU_EVENT_TRACK_ENDED, .handle = t->handle, .data.ended.reason = end_reason(reason) });
+    AuEvent ev = { .type = AU_EVENT_TRACK_ENDED, .handle = t->handle, .data.ended.reason = end_reason(reason) };
+    char *message = NULL;
+    if (reason == END_ERROR) {
+        char text[sizeof(t->fail_text)];
+        const int code = track_failure(t, text, sizeof(text));
+        ev.data.ended.error = code ? code : AU_ERR_FILE;   // every failure site gives one; this is a safety net
+        message = av_asprintf("%s", code ? text : "Playback failed");
+    }
+    note_add_owned(ev, message, NULL);
 }
 
 static void lock_mixer(AudioPlayer *ap);
@@ -466,7 +475,10 @@ static TrackState *create_track(AudioPlayer *ap, const Msg *msg) {
         if (registered) registry_remove(ap, t);
         if (t) track_destroy(t); // never started: no wait
         ff_log(AU_LOG_FATAL, "Failed to create a track for '%s'", msg->str);
-        note_add((AuEvent){ .type = AU_EVENT_TRACK_ENDED, .handle = msg->handle, .data.ended.reason = AU_END_ERROR });
+        // Registered, so allocated: the thread could not be started
+        const AuEvent ev = { .type = AU_EVENT_TRACK_ENDED, .handle = msg->handle,
+                             .data.ended = { AU_END_ERROR, registered ? AU_ERR_SDL : AU_ERR_NO_MEMORY, NULL } };
+        note_add_owned(ev, av_asprintf("Failed to create a track for '%s'", msg->str), NULL);
         return NULL;
     }
     return t;
@@ -872,6 +884,9 @@ static int ensure_device(AudioPlayer *ap) {
 // instead of waiting for one. The next track tries again.
 static bool device_for_track(AudioPlayer *ap, TrackState *t) {
     if (ensure_device(ap) >= 0) return true;
+    char text[sizeof(t->fail_text)];
+    snprintf(text, sizeof(text), "No output device could be opened for '%s'", t->filename);
+    track_set_failure(t, AU_ERR_DEVICE, text);   // AU_EVENT_DEVICE (ok = false) has the details
     end_track(ap, t, END_ERROR);
     return false;
 }

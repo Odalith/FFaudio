@@ -34,6 +34,8 @@
 #include "gain_cache.h"
 #include "output.h"
 #include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include "decoder_utils.h"
 #include "filtergraph.h"
 #include "packet_queue_utils.h"
@@ -46,6 +48,9 @@
 #define NET_BUFFER_FALLBACK_BYTES (256 * 1024)
 // A backwards jump of the frame timestamps larger than this, without a seek, means the track looped
 #define LOOP_DETECT_SECONDS 0.25
+
+static void note_failure(TrackState *t, int code, AU_LOG_LEVEL level, const char *fmt, ...)
+    __attribute__((format(printf, 4, 5)));
 // Audio kept on both sides of a cut when the file is resampled (longer than the resampler's filter)
 #define RESAMPLE_MARGIN_SECONDS 0.05
 // A track starts once 1/10 s of it is decoded (or all of it)
@@ -780,13 +785,14 @@ static int local_get_packet(void *ctx, AVPacket *pkt, int *serial) {
         if (ret < 0) {
             bool end = ret == AVERROR_EOF || avio_feof(ic->pb);
             if (!end) {
-                if (!ffa_load(&t->abort_request))
-                    ff_log(AU_LOG_ERROR, "%s: read error: %s", t->filename, av_err2str(ret));
                 // An I/O error, or a file that keeps failing to read: play out what is decoded, end as an error
                 if ((ic->pb && ic->pb->error) || ++t->read_errors >= 100) {
+                    note_failure(t, AU_ERR_FILE, AU_LOG_ERROR, "%s: read error: %s", t->filename, av_err2str(ret));
                     ffa_store(&t->had_error, 1);
                     end = true;
                 }
+                else if (!ffa_load(&t->abort_request))
+                    ff_log(AU_LOG_ERROR, "%s: read error: %s", t->filename, av_err2str(ret));
             }
             if (!end) {
                 wait_ms(t, 10);
@@ -859,6 +865,9 @@ static int net_reader(void *arg) {
             }
             if (ic->pb && ic->pb->error && !t->demux_eof) {
                 // I/O error (after the reconnects): let what is decoded play out, then end the track as an error
+                char text[128];
+                snprintf(text, sizeof(text), "%s: read error: %s", t->filename, av_err2str(ic->pb->error));
+                track_set_failure(t, AU_ERR_FILE, text);   // logged above
                 ffa_store(&t->had_error, 1);
                 if (handle_demux_end(t) == DEMUX_ENDED)
                     packet_queue_put_nullpacket(&t->audio_queue, pkt, t->audio_stream);
@@ -890,8 +899,57 @@ static int net_reader(void *arg) {
     return 0;
 }
 
+void track_set_failure(TrackState *t, const int code, const char *text) {
+    CHAOS("track_set_failure");
+    SDL_LockMutex(t->seek_mutex);
+    if (!t->fail_code) {
+        t->fail_code = code;
+        snprintf(t->fail_text, sizeof(t->fail_text), "%s", text ? text : "");
+    }
+    SDL_UnlockMutex(t->seek_mutex);
+}
+
+int track_failure(TrackState *t, char *text, const size_t size) {
+    SDL_LockMutex(t->seek_mutex);
+    const int code = t->fail_code;
+    snprintf(text, size, "%s", t->fail_text);
+    SDL_UnlockMutex(t->seek_mutex);
+    return code;
+}
+
+// Why the track can not be played (on): logged at `level` (unless the track is being stopped anyway) and, with a code,
+// kept for its AU_EVENT_TRACK_ENDED
+static void note_failure(TrackState *t, const int code, const AU_LOG_LEVEL level, const char *fmt, ...) {
+    char text[sizeof(t->fail_text)];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(text, sizeof(text), fmt, args);
+    va_end(args);
+    if (!ffa_load(&t->abort_request)) ff_log(level, "%s", text);
+    if (code) track_set_failure(t, code, text);
+}
+
+// The AU_RESULT for an FFmpeg error that keeps a track from playing
+static int result_of(const int averror) {
+    switch (averror) {
+        case AVERROR(ENOMEM):
+            return AU_ERR_NO_MEMORY;
+        case AVERROR_INVALIDDATA:
+        case AVERROR_DEMUXER_NOT_FOUND:
+        case AVERROR_DECODER_NOT_FOUND:
+        case AVERROR_PROTOCOL_NOT_FOUND:
+        case AVERROR_STREAM_NOT_FOUND:
+        case AVERROR_FILTER_NOT_FOUND:
+        case AVERROR_PATCHWELCOME:
+        case AVERROR(ENOSYS):
+            return AU_ERR_UNSUPPORTED;
+        default:
+            return AU_ERR_FILE;
+    }
+}
+
 // The track can not be played on (it did not open, or a graph could not be built): nothing more will ever come out of
-// it. The end marker first, then the message (docs/threading.md, "A track that fails").
+// it. The end marker first, then the message (docs/threading.md, "A track that fails"). The reason is noted before.
 static void fail_track(TrackState *t) {
     CHAOS("fail_track");
     ffa_store(&t->had_error, 1);
@@ -953,14 +1011,13 @@ static int open_track(TrackState *t) {
     bool chained = false;
     int ret = ff_open_audio_input(t->filename, t->http_headers, &interrupt, &ic, &st_index, &chained, &failed);
     if (ret < 0) {
-        if (!ffa_load(&t->abort_request)) {
-            if (failed == FF_OPEN_NO_AUDIO)
-                ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
-            else if (failed == FF_OPEN_STREAM_INFO)
-                ff_log(AU_LOG_WARNING, "%s: could not find codec parameters", t->filename);
-            else
-                ff_log(AU_LOG_ERROR, "Could not open input '%s': %s", t->filename, av_err2str(ret));
-        }
+        if (failed == FF_OPEN_NO_AUDIO)
+            note_failure(t, AU_ERR_UNSUPPORTED, AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
+        else if (failed == FF_OPEN_STREAM_INFO)
+            note_failure(t, AU_ERR_UNSUPPORTED, AU_LOG_WARNING, "%s: could not find codec parameters", t->filename);
+        else
+            note_failure(t, result_of(ret), AU_LOG_ERROR, "Could not open input '%s': %s", t->filename,
+                         av_err2str(ret));
         return ret;
     }
     t->ic = ic;
@@ -993,9 +1050,9 @@ static int open_track(TrackState *t) {
     wait_for_measurement(t, info);
     track_update_gain(t, false);
 
-    if (stream_component_open(t, st_index) < 0 || t->audio_stream < 0) {
-        if (!ffa_load(&t->abort_request))
-            ff_log(AU_LOG_ERROR, "No playable audio stream in '%s'", t->filename);
+    if ((ret = stream_component_open(t, st_index)) < 0 || t->audio_stream < 0) {
+        note_failure(t, ret == AVERROR(ENOMEM) ? AU_ERR_NO_MEMORY : AU_ERR_UNSUPPORTED, AU_LOG_ERROR,
+                     "No playable audio stream in '%s'", t->filename);
         return AVERROR_STREAM_NOT_FOUND;
     }
 
@@ -1020,7 +1077,7 @@ static int track_thread(void *arg) {
         char name[32];
         snprintf(name, sizeof(name), "ffa_read_%d", t->handle);
         if (!(t->reader_tid = SDL_CreateThread(net_reader, name, t))) {
-            ff_log(AU_LOG_FATAL, "SDL_CreateThread(): %s", SDL_GetError());
+            note_failure(t, AU_ERR_SDL, AU_LOG_FATAL, "SDL_CreateThread(): %s", SDL_GetError());
             fail_track(t);
             goto end;
         }
@@ -1370,10 +1427,11 @@ static int rebuild_user_graph(TrackState *t, const bool first) {
     if (ret >= 0)
         ret = build_user_graph(&fresh, track_filters, global_filters, rate, &layout, ap->filter_nbthreads);
 
-    if (ret < 0) {
-        ff_log(AU_LOG_ERROR, "Invalid filters for '%s' (track: \"%s\", global: \"%s\"): %s%s", t->filename,
-               track_filters ? track_filters : "", global_filters ? global_filters : "", av_err2str(ret),
-               first ? "" : "; keeping the previous filters");
+    if (ret < 0) { // the first graph can not be done without: the track fails (AU_ERR_INVALID_ARGUMENT)
+        note_failure(t, first ? AU_ERR_INVALID_ARGUMENT : 0, AU_LOG_ERROR,
+                     "Invalid filters for '%s' (track: \"%s\", global: \"%s\"): %s%s", t->filename,
+                     track_filters ? track_filters : "", global_filters ? global_filters : "", av_err2str(ret),
+                     first ? "" : "; keeping the previous filters");
     }
     else {
         free_filter_chain(&t->user);
@@ -1615,7 +1673,8 @@ static void decode_loop(TrackState *t) {
 
             if ((ret = ensure_convert_graph(t)) < 0) {
                 if (ret != AVERROR_EXIT) {
-                    ff_log(AU_LOG_ERROR, "Could not configure the conversion for '%s': %s", t->filename, av_err2str(ret));
+                    note_failure(t, ret == AVERROR(ENOMEM) ? AU_ERR_NO_MEMORY : AU_ERR_UNSUPPORTED, AU_LOG_ERROR,
+                                 "Could not configure the conversion for '%s': %s", t->filename, av_err2str(ret));
                     fail_track(t);
                 }
                 break;
