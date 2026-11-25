@@ -2,6 +2,7 @@
 # Compare the functions a built libffaudio exports with abi/ffaudio.symbols: check_symbols.sh <libffaudio.so> [--update]
 # Every change to the public API changes this list on purpose; --update rewrites it from the library.
 set -euo pipefail
+export LC_ALL=C   # one sort order everywhere (some locales ignore "_" when sorting)
 src=$(cd "$(dirname "$0")/../.." && pwd)
 lib=${1:?usage: check_symbols.sh <libffaudio.so|.dll> [--update]}
 list="$src/abi/ffaudio.symbols"

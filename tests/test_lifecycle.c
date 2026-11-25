@@ -242,6 +242,8 @@ static void test_poll_events(void) {
     CHECK(e.data.ended.message && strstr(e.data.ended.message, "does_not_exist.flac"));
     printf("   ended: %s\n", e.data.ended.message ? e.data.ended.message : "(none)");
     CHECK(sizeof(AuEvent) == 72);   // part of the ABI: new members go into the padding
+    // ... and then asks for something to play next (nothing is queued); it may come after the end
+    CHECK(poll_until(AU_EVENT_PREPARE_NEXT, 0, 5, NULL, NULL));
 
     // Nothing more: the wait gives up after its time
     while (au_poll_event(&e)) {}
