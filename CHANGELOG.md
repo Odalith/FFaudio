@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.2.0 (unreleased)
+## 3.2.0 (2026-11-24)
 
 ### Added
 - Level meters (`ffaudio_meters.h`): `au_get_levels(window_seconds, &levels)` gives peak and RMS per channel of what is
