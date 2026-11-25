@@ -117,7 +117,7 @@ class MainScreen(Screen):
         Binding("left_square_bracket", "speed(-0.05)", "Slower", show=False),
         Binding("right_square_bracket", "speed(0.05)", "Faster", show=False),
         Binding("backslash", "pitch", "Pitch", show=False),
-        Binding("r", "repeat", "Repeat"), Binding("s", "shuffle", "Shuffle"),
+        Binding("r", "repeat", "Repeat", show=False), Binding("s", "shuffle", "Shuffle", show=False),
         Binding("ctrl+f", "find", "Find", show=False),
         Binding("e", "app.effects", "Effects"), Binding("o", "app.settings", "Settings"),
         Binding("u", "app.open", "Open"), Binding("slash", "filter", "Filter", show=False),
