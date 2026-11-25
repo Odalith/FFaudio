@@ -13,6 +13,8 @@ option(FFAUDIO_INSTALL "Generate install rules" ON)
 option(FFAUDIO_CHAOS "Testing only: random delays at the points where threads hand state over (lib/chaos.h), to find races" OFF)
 option(FFAUDIO_RELOCATABLE "Linux/macOS: look for dependencies next to libffaudio first (RUNPATH $ORIGIN), for archives that bundle them" OFF)
 set(FFAUDIO_SANITIZER "" CACHE STRING "Sanitizer to build with: address, thread, undefined, none or empty")
+set(FFAUDIO_TEST_TIMEOUT 180 CACHE STRING "Seconds each playback test may take (chaos runs need more)")
+option(FFAUDIO_REQUIRE_TESTS "Fail the configure step when the playback tests can not be built (no ffmpeg or bash), as CI wants" OFF)
 
 # Debug builds default to AddressSanitizer
 if(FFAUDIO_SANITIZER STREQUAL "" AND CMAKE_BUILD_TYPE MATCHES "Debug" AND NOT MSVC)
@@ -21,6 +23,10 @@ endif()
 
 if(NOT FFAUDIO_SANITIZER STREQUAL "" AND NOT FFAUDIO_SANITIZER STREQUAL "none")
     set(SAN_FLAGS -fsanitize=${FFAUDIO_SANITIZER} -fno-omit-frame-pointer -g)
+    if(FFAUDIO_SANITIZER MATCHES "undefined")
+        # UBSan only prints by default; abort so the test fails
+        list(APPEND SAN_FLAGS -fno-sanitize-recover=undefined)
+    endif()
     message(STATUS "ffaudio: building with -fsanitize=${FFAUDIO_SANITIZER}")
 endif()
 
@@ -234,6 +240,9 @@ if(FFAUDIO_BUILD_TESTS)
     ffaudio_test_exe(golden_render tests/golden_render.c)
 
     if(NOT FFMPEG_EXECUTABLE OR NOT BASH_EXECUTABLE)
+        if(FFAUDIO_REQUIRE_TESTS)
+            message(FATAL_ERROR "ffaudio: ffmpeg or bash not found, the playback tests can not be built")
+        endif()
         message(WARNING "ffaudio: ffmpeg or bash not found, playback tests are disabled")
     else()
         set(FIXTURE_DIR ${CMAKE_BINARY_DIR}/fixtures)
@@ -262,8 +271,29 @@ if(FFAUDIO_BUILD_TESTS)
                 target_link_libraries(${t} PRIVATE PkgConfig::FFMPEG)
             endif()
             set_tests_properties(${t} PROPERTIES
-                    TIMEOUT 180
+                    TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
                     ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
+
+        if(FFAUDIO_CHAOS)
+            # Races of docs/threading.md pinned down: a delay forced at the chaos point that opens each one's window
+            ffaudio_test_exe(test_races tests/test_races.c)
+            add_dependencies(test_races ffaudio_fixtures)
+            set(FFAUDIO_RACES
+                    "registration@registration@create_track: worker started=100000"
+                    "failed_track_mixer_first@failed_track@eos stored, failure not posted=200000"
+                    "failed_track_failure_first@failed_track@sdl_audio_callback=20000"
+                    "pause_after_queue@pause_after_queue@cmd_set_next=100000")
+            foreach(race ${FFAUDIO_RACES})
+                string(REPLACE "@" ";" parts "${race}")
+                list(GET parts 0 name)
+                list(GET parts 1 case)
+                list(GET parts 2 point)
+                add_test(NAME race_${name} COMMAND test_races ${FIXTURE_DIR} ${case})
+                set_tests_properties(race_${name} PROPERTIES
+                        TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
+                        ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};FFAUDIO_CHAOS_AT=${point};TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
+            endforeach()
+        endif()
     endif()
 endif()

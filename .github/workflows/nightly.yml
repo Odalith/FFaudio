@@ -1,0 +1,70 @@
+name: Nightly
+
+# Long checks that do not fit every push: a chaos campaign (docs/threading.md, "Chaos testing") with and without
+# ThreadSanitizer, and the golden render against the last release tag (tests/golden_render.c), built on one runner so
+# both renders use the same FFmpeg. Not blocking: read the results by the rules in docs/threading.md.
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  chaos:
+    name: Chaos (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: medium, sanitizer: none, intensity: '30:5000' }
+          - { name: heavy, sanitizer: none, intensity: '50:20000' }
+          - { name: tsan, sanitizer: thread, intensity: '20:3000' }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ffmpeg flac libsdl2-dev \
+            libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev libswresample-dev
+      - name: Allow ThreadSanitizer
+        if: matrix.sanitizer == 'thread'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=${{ matrix.sanitizer }} \
+            -DFFAUDIO_CHAOS=ON -DFFAUDIO_TEST_TIMEOUT=1200 -DFFAUDIO_REQUIRE_TESTS=ON
+          cmake --build build
+      - name: Test under chaos
+        run: |
+          export FFAUDIO_CHAOS="${{ github.run_number }}:${{ matrix.intensity }}"
+          echo "FFAUDIO_CHAOS=$FFAUDIO_CHAOS"
+          ctest --test-dir build -j2 --output-on-failure 2>&1 | tee chaos.log || true
+          reports=$(grep -c "WARNING: ThreadSanitizer" chaos.log || true)
+          # tests/test_output.c's counter checks: a sample missing, repeated or out of order
+          wrong=$(grep -c ": frame [0-9]* is -\?[0-9]*, expected\|frames more after the end" chaos.log || true)
+          echo "TSan reports: $reports, sample-exactness failures: $wrong"
+          [ "$reports" = 0 ] && [ "$wrong" = 0 ]
+
+  golden:
+    name: Golden render against the last tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build ffmpeg flac libsdl2-dev \
+            libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev libswresample-dev
+      - name: Build
+        run: |
+          cmake -S . -B build-dev/release -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=none
+          cmake --build build-dev/release
+      - name: Compare
+        run: scripts/dev/golden.sh "$(git describe --tags --abbrev=0 --match 'v*')"

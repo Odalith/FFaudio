@@ -143,8 +143,9 @@ flags that publish nothing stay `SDL_atomic_t`.
 ## Lock order
 
 Locks are taken in this order only (left before right). Locks not shown are leaves: nothing is taken while they are
-held. This was checked with a scan of every nested acquisition (`lock_scan.py` in the development notes) and by
-reading each case.
+held. This was checked with a scan of every nested acquisition (`scripts/dev/lock_scan.py`, a heuristic: it lists
+every lock taken while another is held, directly or through a call) and by reading each case. Run it again after a
+change that adds a lock or takes one in a new place.
 
 ```mermaid
 flowchart LR
@@ -314,6 +315,11 @@ The audio callback (`sdl_audio_callback()` and everything it calls in `output.c`
   the device lock);
 - never signals `ring_cond` (the worker's timeout covers it).
 
+This code is marked `/* RT-BEGIN */ … /* RT-END */` in `output.c`, `track.c` and `sample_ring.c`.
+`scripts/dev/rt_lint.sh` (run by CI) looks inside the markers for calls that break these rules: waiting locks and
+conditions, allocation, logging, FFmpeg calls, application callbacks. Code that runs on the callback goes inside the
+markers.
+
 ## Chaos testing
 
 Configure with `-DFFAUDIO_CHAOS=ON` (testing only; release builds have none of it). `lib/chaos.h` defines
@@ -325,9 +331,15 @@ microseconds (`CHAOS_RT` at most `max_us / 20`, capped at 300 µs, so the device
 under several seeds and intensities, release and ThreadSanitizer builds:
 
 ```sh
-cmake -S . -B build-chaos -DFFAUDIO_CHAOS=ON && cmake --build build-chaos
-FFAUDIO_CHAOS=7:30:5000 ctest --test-dir build-chaos -j3 --output-on-failure --timeout 1200
+scripts/dev/build_all.sh build-dev chaos chaos-tsan     # FFAUDIO_TEST_TIMEOUT=1200: delayed tests need longer
+scripts/dev/chaos_campaign.sh build-dev chaos-out       # 3 light, 3 medium, 2 heavy, 3 TSan runs
+# or one run: FFAUDIO_CHAOS=7:30:5000 ctest --test-dir build-dev/chaos -j3 --output-on-failure
 ```
+
+`FFAUDIO_CHAOS_AT="name=us|name=us"` makes the named points sleep exactly that long every time (also `CHAOS_RT` ones,
+whatever the underruns). `tests/test_races.c` uses it: each race found is a CTest (`race_*`, chaos builds only) that
+forces the delay opening its window, so the order that once went wrong happens on every run. A newly found race gets
+one, written to fail before the fix.
 
 A failure under chaos is either a race (fix it, and add the delay that shows it to a test if possible) or a test that
 assumes timing (make the test state what it really requires). What to expect:
@@ -338,7 +350,8 @@ assumes timing (make the test state what it really requires). What to expect:
 - **Underruns** are expected at medium and heavy intensities: the delays slow the worker below real time, and the
   mixer plays silence until it catches up. So are failures of checks on real-time behaviour (prepare-next and
   positions within a few hundred ms, buffering counts, scan ordering, a test that floods 5000 tracks within 20 s), and
-  tests passing the 180 s ctest limit (run them directly to see whether they pass).
+  tests passing the ctest limit (`FFAUDIO_TEST_TIMEOUT`, 180 s by default; `build_all.sh` sets 1200 for the chaos
+  trees).
 
 The first campaign (2026-11-24: 3 light, 3 medium, 2 heavy release runs, 3 TSan runs) found the `update_device_running()`
 race; everything else it showed was of the expected kinds above, and sample-exactness held with gaps skipped.

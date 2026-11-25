@@ -639,6 +639,15 @@ one thread.
 `golden_render <fixture-dir> <out.f32> [reference.f32]` (not a CTest) renders a fixed queue of tracks
 without anything depending on timing, so a render from before a change can be compared with one after it.
 
+`scripts/dev/` has the development workflow:
+- `build_all.sh` builds release, ASan, TSan and chaos trees.
+- `run_all.sh` runs every suite against a given SDL2 build and the system's SDL.
+- `chaos_campaign.sh` runs the suites under chaos delays (see docs/threading.md).
+- `golden.sh <git-ref>` compares the golden render with that of an earlier version.
+- `rt_lint.sh` checks the audio callback's code against the real-time rules.
+- `check_symbols.sh` compares the exported functions with `abi/ffaudio.symbols`.
+- `lock_scan.py` lists nested lock acquisitions.
+
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
 `tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir | sheet.cue | audio file> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]`
 plays a folder on real hardware for listening tests (Linux and Windows), or the tracks of a cue sheet (or of an audio file with one inside,

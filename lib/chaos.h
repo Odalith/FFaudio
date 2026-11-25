@@ -23,7 +23,11 @@
  *
  * At run time FFAUDIO_CHAOS="seed:percent:max_us" (default 1:10:2000) makes each point sleep, with that probability,
  * for up to max_us microseconds. CHAOS_RT() is for the audio callback: at most max_us / 20, capped at 300 us, so the
- * device keeps running (underruns are fine, the point is the order of events). Unset or percent 0: no delays.
+ * device keeps running (underruns are fine, the point is the order of events). Unset or percent 0: no delays. The
+ * thread ids are mixed into each thread's random sequence, so a seed gives the same kind of run, not the same run.
+ *
+ * FFAUDIO_CHAOS_AT="name=us|name=us" makes the named points (exactly as written in CHAOS("…")) sleep that long every
+ * time, CHAOS_RT ones included: tests/test_races.c uses it to open one race's window on every run.
  */
 
 #ifndef FFAUDIO_CHAOS_H

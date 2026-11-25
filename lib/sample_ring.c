@@ -79,6 +79,7 @@ void ring_write(SampleRing *r, const float *src, const int32_t frames, const Rin
 //+-----------------------------------------------------+
 //| Consumer                                            |
 //+-----------------------------------------------------+
+/* RT-BEGIN: runs on the audio callback (docs/threading.md, "Real-time rules"; scripts/dev/rt_lint.sh) */
 
 const RingMarker *ring_peek(SampleRing *r) {
     if ((uint32_t)ffa_load_acquire(&r->write_marker) == r->rd) return NULL;
@@ -128,3 +129,4 @@ int32_t ring_read(SampleRing *r, float *dst, const int32_t max) {
 void ring_skip(SampleRing *r) {
     advance(r);
 }
+/* RT-END */

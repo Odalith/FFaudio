@@ -65,6 +65,7 @@ void fade_curve_build(FadeCurve *out, const AuFade *fade) {
         out->g[i] = curve_value(fade, (float)i / FADE_CURVE_STEPS);
 }
 
+/* RT-BEGIN: runs on the audio callback (docs/threading.md, "Real-time rules"; scripts/dev/rt_lint.sh) */
 static inline float curve_at(const FadeCurve *c, float t) {
     if (t <= 0.0f) return c->g[0];
     if (t >= 1.0f) return c->g[FADE_CURVE_STEPS];
@@ -591,6 +592,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
         SDL_SemPost(ap->wake_sem);
     }
 }
+/* RT-END */
 
 //+-----------------------------------------------------+
 //| Device                                              |

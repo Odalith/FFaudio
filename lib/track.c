@@ -260,12 +260,14 @@ static void wait_for_request(TrackState *t, const int ms) {
     SDL_UnlockMutex(t->wait_mutex);
 }
 
+/* RT-BEGIN: runs on the audio callback (docs/threading.md, "Real-time rules"; scripts/dev/rt_lint.sh) */
 // No lock: duration_s is written once, before `opened` is set, and read only after `opened` has been seen (the audio
 // callback calls this every period)
 double track_duration(TrackState *t) {
     if (!ffa_load_acquire(&t->opened)) return -1;
     return t->duration_s;
 }
+/* RT-END */
 
 //+-----------------------------------------------------+
 //| Lifetime                                            |
@@ -334,6 +336,7 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
         ff_log(AU_LOG_FATAL, "SDL_CreateThread(): %s", SDL_GetError());
         goto fail;
     }
+    CHAOS("create_track: worker started");
     return t;
 
 fail:
@@ -1714,6 +1717,7 @@ void track_free_stream_meta(StreamMeta *m) {
     free_stream_meta(m);
 }
 
+/* RT-BEGIN: runs on the audio callback (docs/threading.md, "Real-time rules"; scripts/dev/rt_lint.sh) */
 // Drop what the mixer can not play: audio decoded before a seek, or for another output format (a device change). Only
 // index arithmetic: the mixer calls it for every slot each period, also while paused, so a seek frees the ring at once.
 static void drop_stale(TrackState *t, const int serial, const int rate, const int channels) {
@@ -1816,3 +1820,4 @@ int track_pull(TrackState *t, float *dst, const int frames, const int rate, cons
     }
     return written;
 }
+/* RT-END */

@@ -2,13 +2,36 @@ name: CI
 
 on:
   push:
-    branches: [ master, dev, stabilize, dual-tracks ]
+    branches: [ '**' ]
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  checks:
+    name: Version and real-time lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version in CMakeLists.txt and lib/ffaudio.h agree
+        run: |
+          version=$(sed -n 's/^project(ffAudio VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt)
+          header=$(for p in MAJOR MINOR PATCH; do sed -n "s/^#define FFAUDIO_VERSION_$p \([0-9]*\).*/\1/p" lib/ffaudio.h; done | paste -sd.)
+          [ "$header" = "$version" ] || { echo "::error::lib/ffaudio.h says $header, CMakeLists.txt says $version"; exit 1; }
+      - name: Real-time rules (docs/threading.md)
+        run: scripts/dev/rt_lint.sh
+
   linux:
     name: Linux (${{ matrix.name }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
@@ -16,11 +39,37 @@ jobs:
           - name: release
             build_type: RelWithDebInfo
             sanitizer: none
+            chaos: OFF
+            experimental: false
           - name: asan
             build_type: Debug
             sanitizer: address
+            chaos: OFF
+            experimental: false
+          - name: tsan
+            build_type: RelWithDebInfo
+            sanitizer: thread
+            chaos: OFF
+            experimental: false
+          - name: ubsan
+            build_type: RelWithDebInfo
+            sanitizer: address,undefined
+            chaos: OFF
+            experimental: false
+          # Light random delays at the thread hand-offs (docs/threading.md, "Chaos testing") and the forced race
+          # tests; not blocking until it has been green for a while
+          - name: chaos
+            build_type: RelWithDebInfo
+            sanitizer: none
+            chaos: ON
+            experimental: true
     steps:
       - uses: actions/checkout@v4
+
+      # ThreadSanitizer can not map its shadow memory with the runner's high mmap randomisation
+      - name: Allow ThreadSanitizer
+        if: matrix.sanitizer == 'thread'
+        run: sudo sysctl vm.mmap_rnd_bits=28
 
       # The Ubuntu mirror is sometimes very slow (~100 kB/s for the ~107 MB of packages, 15+ minutes),
       # so the downloaded .deb files are cached. The month in the key picks up package updates regularly.
@@ -54,16 +103,50 @@ jobs:
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DFFAUDIO_SANITIZER=${{ matrix.sanitizer }}
+          -DFFAUDIO_CHAOS=${{ matrix.chaos }}
+          -DFFAUDIO_REQUIRE_TESTS=ON
+          -DCMAKE_INSTALL_PREFIX=$PWD/stage
 
       - name: Build
         run: cmake --build build
 
       - name: Test
+        env:
+          FFAUDIO_CHAOS: ${{ matrix.chaos == 'ON' && '1:10:2000' || '' }}
         run: ctest --test-dir build --output-on-failure
 
+      - name: Exported functions (abi/ffaudio.symbols)
+        if: matrix.name == 'release'
+        run: scripts/dev/check_symbols.sh build/libffaudio.so
+
+      # An application's view: the installed headers from C and C++, through find_package and pkg-config
+      - name: Consumer
+        if: matrix.name == 'release'
+        run: |
+          cmake --install build
+          cmake -S tests/consumer -B build-consumer -G Ninja -DCMAKE_PREFIX_PATH=$PWD/stage
+          cmake --build build-consumer
+          LD_LIBRARY_PATH=$PWD/stage/lib build-consumer/consumer_c
+          LD_LIBRARY_PATH=$PWD/stage/lib build-consumer/consumer_cpp
+          export PKG_CONFIG_PATH=$PWD/stage/lib/pkgconfig
+          cc -std=c99 -pedantic -Wall -Werror tests/consumer/consumer.c -o consumer_pc $(pkg-config --cflags --libs ffaudio)
+          LD_LIBRARY_PATH=$PWD/stage/lib ./consumer_pc
+
   windows:
-    name: Windows (MSYS2 UCRT64)
+    name: Windows (MSYS2 UCRT64, ${{ matrix.name }})
     runs-on: windows-latest
+    timeout-minutes: 60
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: release
+            chaos: OFF
+            experimental: false
+          - name: chaos
+            chaos: ON
+            experimental: true
     defaults:
       run:
         shell: msys2 {0}
@@ -85,10 +168,14 @@ jobs:
 
       # The test fixtures are generated with MSYS2's ffmpeg.exe (and metaflac.exe) (bash comes with MSYS2)
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=none
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=none
+          -DFFAUDIO_CHAOS=${{ matrix.chaos }} -DFFAUDIO_REQUIRE_TESTS=ON
 
       - name: Build
         run: cmake --build build
 
       - name: Test
+        env:
+          FFAUDIO_CHAOS: ${{ matrix.chaos == 'ON' && '1:10:2000' || '' }}
         run: ctest --test-dir build --output-on-failure
