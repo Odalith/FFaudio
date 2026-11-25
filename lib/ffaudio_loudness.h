@@ -136,7 +136,8 @@ extern "C" {
         void *user;
     } AuGainScanConfig;
 
-    // Optional; NULL restores the defaults. Can be called at any time.
+    // Optional; NULL restores the defaults. Can be called at any time, also from on_cached, and never waits: workers
+    // above a lowered count leave after their current file or album.
     FFAUDIO_API int au_gain_scan_configure(const AuGainScanConfig *config);
 
     // Measure these files (track values). Returns the number of paths queued (skipped ones not counted).
@@ -155,8 +156,9 @@ extern "C" {
     // Paths queued or being measured
     FFAUDIO_API int au_gain_cache_pending(void);
 
-    // Cancel everything (including the player's requests) and stop the worker threads; they start again on
-    // the next request. Call it before unloading the library, or let the process exit.
+    // Cancel everything (including the player's requests) and stop the worker threads, waiting for them; they start
+    // again on the next request. Call it before unloading the library, or let the process exit. Not from on_cached
+    // (it would wait for its own thread): it then does nothing.
     FFAUDIO_API void au_gain_scan_stop(void);
 
 #ifdef __cplusplus

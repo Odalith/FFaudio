@@ -393,6 +393,40 @@ static void test_failed_measurement_ends_wait(void) {
     remove(cache);
 }
 
+// The measurement queue's memory of failures, for URLs: a URL that failed (a server down for a moment) is tried again
+// on the next request (it has no size or time to see a change by, and was skipped for the whole session); a live
+// stream is not opened again on every request (it was never remembered)
+static void wait_scans(void) {
+    for (int i = 0; i < 400 && au_gain_cache_pending() > 0; i++) tc_sleep_ms(20);
+}
+
+static void test_failed_urls_are_tried_again(void) {
+    char cache[1100];
+    snprintf(cache, sizeof(cache), "%s/test_network_retry.cache", tc_fixture_dir);
+    remove(cache);
+    CHECK(au_gain_cache_set_file(cache) == AU_OK);
+    const AuNetworkConfig measure = { .measure_streams = true };
+    CHECK(au_set_network(&measure) == AU_OK);
+
+    const char *missing[1] = { url("/status/404?n=retry") };
+    CHECK(au_gain_cache_request(missing, 1, AU_SCAN_URGENT) == 1);
+    wait_scans();
+    CHECK(au_gain_cache_request(missing, 1, AU_SCAN_URGENT) == 1);   // tried again
+    wait_scans();
+    printf("   failing URL: %d requests to the server\n", ts_count(&srv, "/status/404?n=retry"));
+
+    const char *live[1] = { url("/live/live.mp3?n=scan") };
+    CHECK(au_gain_cache_request(live, 1, AU_SCAN_URGENT) == 1);
+    wait_scans();
+    CHECK(au_gain_cache_request(live, 1, AU_SCAN_URGENT) == 0);      // known to be live
+    printf("   live stream: %d requests to the server\n", ts_count(&srv, "/live/live.mp3?n=scan"));
+
+    CHECK(au_set_network(NULL) == AU_OK);
+    au_gain_scan_stop();
+    au_gain_cache_set_file("");
+    remove(cache);
+}
+
 static void test_no_analysis_of_live_streams(void) {
     // It would wait forever for the end; it must give up right after probing
     const uint32_t t0 = SDL_GetTicks();
@@ -476,6 +510,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_no_analysis_of_live_streams);
     RUN_TEST(test_no_analysis_of_broken_transfer);
     RUN_TEST(test_failed_measurement_ends_wait);
+    RUN_TEST(test_failed_urls_are_tried_again);
 
     au_shutdown();
     ts_stop(&srv);

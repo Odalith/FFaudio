@@ -250,6 +250,58 @@ static void test_configure_and_stop(void) {
 
 /* ---------- the player ---------- */
 
+// Settings from inside on_cached (a scan worker): lowering the count there used to join the calling worker itself, and
+// au_gain_scan_stop() joined every worker including its caller. Lowering now never waits; stopping from there is refused.
+static SDL_atomic_t from_callback_calls;
+static Uint32 from_callback_ms;
+
+static void on_cached_reconfigures(const char *path, int result, const AuReplayGain *rg, void *user) {
+    on_cached(path, result, rg, user);
+    if (SDL_AtomicIncRef(&from_callback_calls) != 0) return;   // the first callback only
+    const Uint32 t0 = SDL_GetTicks();
+    const AuGainScanConfig one = { .threads = 1, .on_cached = on_cached_reconfigures };
+    CHECK(au_gain_scan_configure(&one) == AU_OK);
+    au_gain_scan_stop();                                        // refused: it would wait for this thread
+    from_callback_ms = SDL_GetTicks() - t0;
+}
+
+static void test_configure_from_callback(void) {
+    reset_done();
+    SDL_AtomicSet(&from_callback_calls, 0);
+    const AuGainScanConfig four = { .threads = 4, .on_cached = on_cached_reconfigures };
+    REQUIRE(au_gain_scan_configure(&four) == AU_OK);
+    const char *paths[4] = { scan_file(13), scan_file(14), scan_file(15), scan_file(16) };
+    for (int i = 0; i < 4; i++) au_gain_cache_remove(paths[i]);
+    CHECK(au_gain_cache_request(paths, 4, AU_SCAN_PREFETCH) == 4);
+    CHECK(wait_idle(10000));
+    printf("   configure + stop from on_cached took %u ms\n", from_callback_ms);
+    CHECK(SDL_AtomicGet(&from_callback_calls) >= 1 && from_callback_ms < 1000);
+    CHECK(done_count() == 4);
+    // Lowered to 1 while the others were measuring; raising again reuses their slots once they have left
+    configure(4);
+    const char *more[3] = { scan_file(17), scan_file(18), scan_file(19) };
+    for (int i = 0; i < 3; i++) au_gain_cache_remove(more[i]);
+    CHECK(au_gain_cache_request(more, 3, AU_SCAN_PREFETCH) == 3);
+    CHECK(wait_idle(10000));
+    CHECK(done_count() == 7);
+    au_gain_scan_stop();
+}
+
+// An album with a file that can not be measured (cover art in the folder) is done once its other tracks have album
+// values: every request used to measure the whole album again
+static void test_album_with_unmeasurable_file(void) {
+    reset_done();
+    configure(2);
+    const char *album[3] = { scan_file(5), scan_file(6), fx("not_audio.bin") };
+    au_gain_cache_remove(album[0]);
+    au_gain_cache_remove(album[1]);
+    CHECK(au_gain_cache_request_album(album, 3, AU_SCAN_PREFETCH) >= 2);   // the bad file may be known already
+    CHECK(wait_idle(10000));
+    AuReplayGain rg;
+    CHECK(au_gain_cache_get(album[0], &rg) && !isnan(rg.album_gain_db));
+    CHECK(au_gain_cache_request_album(album, 3, AU_SCAN_PREFETCH) == 0);   // nothing left to measure
+}
+
 static double gain_when_open(const int32_t handle) {
     double db = -999;
     for (int i = 0; i < 200; i++) {
@@ -333,6 +385,8 @@ int main(int argc, char **argv) {
     RUN_TEST(test_errors);
     RUN_TEST(test_changed_failure_is_measured_again);
     RUN_TEST(test_configure_and_stop);
+    RUN_TEST(test_configure_from_callback);
+    RUN_TEST(test_album_with_unmeasurable_file);
     RUN_TEST(test_player_measures_missing);
 
     au_gain_scan_stop();
