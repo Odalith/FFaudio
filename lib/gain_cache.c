@@ -47,6 +47,7 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <direct.h>
+#include <fcntl.h>
 #include <io.h>
 #endif
 
@@ -384,6 +385,54 @@ static void close_append(void) {
     append_file = NULL;
 }
 
+#ifdef _WIN32
+// Which file a handle or a path is: its volume and index (like st_dev and st_ino)
+typedef struct FileId { DWORD volume, index_high, index_low; } FileId;
+static FileId append_id;                // of append_file, when it is open
+
+static bool handle_id(HANDLE h, FileId *id) {
+    BY_HANDLE_FILE_INFORMATION fi;
+    if (h == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(h, &fi)) return false;
+    *id = (FileId){ fi.dwVolumeSerialNumber, fi.nFileIndexHigh, fi.nFileIndexLow };
+    return true;
+}
+
+static bool path_id(const char *path, FileId *id) {
+    wchar_t *w = utf8_to_wide(path);
+    // Attributes only: no data access, so it neither waits for nor blocks anyone
+    HANDLE h = w ? CreateFileW(w, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+    av_free(w);
+    const bool ok = handle_id(h, id);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    return ok;
+}
+
+// The cache file opened for appending so that it stays open between records: shared for reading, writing and
+// deleting, so another process may still replace it when it compacts (a rename over a file someone holds open needs
+// FILE_SHARE_DELETE from every holder; where Windows refuses anyway, that compaction waits for a later one)
+static FILE *open_append_shared(const char *path) {
+    wchar_t *w = utf8_to_wide(path);
+    HANDLE h = w ? CreateFileW(w, FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+    av_free(w);
+    if (h == INVALID_HANDLE_VALUE) return NULL;
+    if (!handle_id(h, &append_id)) {
+        CloseHandle(h);
+        return NULL;
+    }
+    const int fd = _open_osfhandle((intptr_t)h, _O_APPEND | _O_BINARY | _O_WRONLY);
+    if (fd < 0) {
+        CloseHandle(h);
+        return NULL;
+    }
+    FILE *f = _fdopen(fd, "ab");
+    if (!f) _close(fd);   // closes the handle too
+    return f;
+}
+#endif
+
 // Cross-process lock: a file next to the cache that is never replaced (a lock on the cache file itself would be lost
 // when a compaction renames a new file over it). Every write takes it, so appends from several processes do not
 // interleave and a compaction includes what the others appended. When it can not be taken (no permission, a file
@@ -603,18 +652,28 @@ static int append_record(const char *record, const size_t len) {
     if (!persistent()) return AU_OK;
     if (foreign) return AU_ERR_FILE; // kept in memory only: the file is not ours to write
     const bool locked = take_file_lock();
-#ifndef _WIN32
-    // Another process may have compacted the cache since: append to the new file, not to the one it replaced
+    // Another process may have compacted the cache since: append to the new file, not to the one it replaced. The file
+    // stays open between records; this check (under the file lock, as every compaction is) is all it costs.
     if (append_file) {
+#ifdef _WIN32
+        FileId now;
+        if (!path_id(file_path, &now) || now.volume != append_id.volume || now.index_high != append_id.index_high ||
+            now.index_low != append_id.index_low)
+            close_append();
+#else
         struct stat a, b;
         if (fstat(fileno(append_file), &a) != 0 || stat(file_path, &b) != 0 || a.st_ino != b.st_ino ||
             a.st_dev != b.st_dev)
             close_append();
-    }
 #endif
+    }
     if (!append_file) {
         make_parent_dirs(file_path);
+#ifdef _WIN32
+        append_file = open_append_shared(file_path);
+#else
         append_file = open_file(file_path, "ab");
+#endif
         if (!append_file) {
             release_file_lock(locked);
             return AU_ERR_FILE;
@@ -628,9 +687,6 @@ static int append_record(const char *record, const size_t len) {
     // One write per record keeps lines intact
     const bool ok = fwrite(record, 1, len, append_file) == len && fflush(append_file) == 0;
     file_lines++;
-#ifdef _WIN32
-    close_append(); // Windows can only replace a file nobody has open: let other processes compact it
-#endif
     release_file_lock(locked);
     return ok ? AU_OK : AU_ERR_FILE;
 }

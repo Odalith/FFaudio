@@ -32,6 +32,10 @@
   UTF-8 paths and arguments.
 
 ### Fixed
+- Writing to the ReplayGain cache on Windows (`au_gain_cache_set()`, each measurement) opened and closed the cache
+  file for every entry, about 19 ms each on a slower laptop (20000 entries took 6 minutes). The file now stays open
+  between entries as on Linux, shared so that another program's compaction can still replace it, and each write
+  checks it is still the file at the path. The two-process cache test now runs on Windows too.
 - A crossfade on play or skip (`AuCrossfade.on_play` / `.on_skip`) into a track slower to open than the fade (a network
   stream, a slow disk, a busy machine) faded the old track out before the new one started, leaving silence. The old
   track now holds at the gain its fade has reached until the new one can play. Found with the chaos build on Windows.

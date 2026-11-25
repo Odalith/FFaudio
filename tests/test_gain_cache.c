@@ -5,7 +5,10 @@
 #include "../lib/ffaudio_loudness.h"
 #include <math.h>
 #include <locale.h>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <windows.h>
+#include <wchar.h>
+#else
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -409,48 +412,76 @@ static void test_damaged_and_foreign_lines(void) {
 
 // Two processes writing one cache file: while this one compacts it again and again, another appends entries of its
 // own. Every write takes a file lock and an append follows a file that was replaced, so none of them are lost (they
-// used to go to the replaced file, or be dropped by a compaction that had not seen them).
-static void test_two_processes(void) {
+// used to go to the replaced file, or be dropped by a compaction that had not seen them). On Windows the other
+// process is this test again (--cache-child), and it keeps the cache file open between its writes, which the
+// compactions here must neither be blocked by for good nor lose entries to.
+#define CHILD_ENTRIES 500
+
+// The other process's part: its entries, spread over the parent's compactions. 0 = all written.
+static int child_writes(const char *file) {
+    au_gain_cache_set_file(file); // its own state, its own lock
+    for (int i = 0; i < CHILD_ENTRIES; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/child/%d.flac", i);
+        const AuReplayGain rg = track_gain(-i * 0.01);
+        if (au_gain_cache_set(path, &rg) != AU_OK) return 1;
 #ifdef _WIN32
-    printf("   (needs fork(), skipped on Windows)\n");
+        Sleep(1);
 #else
+        usleep(400);
+#endif
+    }
+    return 0;
+}
+
+static int compact_round(void) {
+    const AuReplayGain rg = track_gain(-2);
+    for (int i = 0; i < 300; i++) au_gain_cache_set("/m/superseded.flac", &rg);
+    au_gain_cache_reload(); // loading compacts once superseded lines pile up
+    return 1;
+}
+
+static void test_two_processes(void) {
     use_fresh_file();
     const AuReplayGain old = track_gain(-1);
     for (int i = 0; i < 2000; i++) au_gain_cache_set("/m/superseded.flac", &old);
     fflush(NULL);
+    int rounds = 0;
+    bool child_ok = false;
+#ifdef _WIN32
+    wchar_t exe[1024], wfile[1100], cmd[2400];
+    GetModuleFileNameW(NULL, exe, 1024);
+    MultiByteToWideChar(CP_UTF8, 0, cache_file, -1, wfile, 1100);
+    swprintf(cmd, 2400, L"\"%ls\" --cache-child \"%ls\"", exe, wfile);
+    STARTUPINFOW si = { .cb = sizeof(si) };
+    PROCESS_INFORMATION pi;
+    REQUIRE(CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi));
+    while (WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT) rounds += compact_round();
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    child_ok = code == 0;
+#else
     const pid_t pid = fork();
     REQUIRE(pid >= 0);
-    if (pid == 0) {
-        au_gain_cache_set_file(cache_file); // its own state, its own lock
-        for (int i = 0; i < 500; i++) {
-            char path[64];
-            snprintf(path, sizeof(path), "/child/%d.flac", i);
-            const AuReplayGain rg = track_gain(-i * 0.01);
-            if (au_gain_cache_set(path, &rg) != AU_OK) _exit(1);
-            usleep(400); // spread over the parent's compactions
-        }
-        _exit(0);
-    }
-    int status = 0, rounds = 0;
-    while (waitpid(pid, &status, WNOHANG) == 0) {
-        const AuReplayGain rg = track_gain(-2);
-        for (int i = 0; i < 300; i++) au_gain_cache_set("/m/superseded.flac", &rg);
-        au_gain_cache_reload(); // loading compacts once superseded lines pile up
-        rounds++;
-    }
+    if (pid == 0) _exit(child_writes(cache_file));
+    int status = 0;
+    while (waitpid(pid, &status, WNOHANG) == 0) rounds += compact_round();
+    child_ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
     printf("   %d compactions while the other process wrote\n", rounds);
-    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    CHECK(child_ok);
     CHECK(au_gain_cache_reload() == AU_OK);
     int found = 0;
-    for (int i = 0; i < 500; i++) {
+    for (int i = 0; i < CHILD_ENTRIES; i++) {
         char path[64];
         snprintf(path, sizeof(path), "/child/%d.flac", i);
         found += au_gain_cache_get(path, NULL);
     }
-    printf("   %d of the other process's 500 entries are in the file\n", found);
-    CHECK(found == 500);
+    printf("   %d of the other process's %d entries are in the file\n", found, CHILD_ENTRIES);
+    CHECK(found == CHILD_ENTRIES);
     CHECK(au_gain_cache_get("/m/superseded.flac", NULL));
-#endif
 }
 
 static void test_locale(void) {
@@ -501,6 +532,8 @@ static void test_memory_only_and_default_location(void) {
 }
 
 int main(int argc, char **argv) {
+    // The other process of test_two_processes on Windows
+    if (argc == 3 && !strcmp(argv[1], "--cache-child")) return child_writes(argv[2]);
     tc_setup(argc, argv);
     // Never use the real per-user cache from the tests
     snprintf(cache_file, sizeof(cache_file), "%s/test_gain_cache.cache", tc_fixture_dir);
@@ -510,7 +543,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_persistence);
     RUN_TEST(test_tricky_paths);
     RUN_TEST(test_compaction);
-    RUN_TEST(test_two_processes); // early: fork() while no other thread runs
+    RUN_TEST(test_two_processes); // early: fork() (POSIX) while no other thread runs
     RUN_TEST(test_damaged_and_foreign_lines);
     RUN_TEST(test_locale);
     RUN_TEST(test_memory_only_and_default_location);
