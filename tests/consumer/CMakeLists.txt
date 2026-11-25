@@ -16,5 +16,5 @@ target_link_libraries(consumer_cpp PRIVATE ffaudio::ffaudio)
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(consumer_c PRIVATE -Wall -Wextra -pedantic -Werror)
-    target_compile_options(consumer_cpp PRIVATE -Wall -Wextra -Werror)
+    target_compile_options(consumer_cpp PRIVATE -Wall -Wextra -pedantic -Werror)
 endif()

@@ -422,7 +422,7 @@ static int worker_main(void *arg) {
     const int index = (int)(intptr_t)arg;
     on_scan_worker = true;
     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_LOW);
-    // About 320 KB each, kept for every file
+    // About 240 KB each, kept for every file
     AuLoudnessMeter *file = loudness_meter_create(), *album = loudness_meter_create();
 
     SDL_LockMutex(lock);

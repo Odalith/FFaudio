@@ -79,6 +79,7 @@ au_play_options_set_replaygain
 au_poll_event
 au_probe
 au_queue
+au_result_string
 au_seek
 au_seek_fraction
 au_send_filter_command

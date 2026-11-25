@@ -26,6 +26,16 @@ static void test_calls_before_init(void) {
     CHECK(au_shutdown() == AU_ERR_NOT_INITIALIZED);
 }
 
+// Every result has its text; others are "unknown result"
+static void test_result_strings(void) {
+    for (int r = AU_OK; r >= AU_ERR_NOT_SAVED; r--) {
+        const char *text = au_result_string(r);
+        CHECK(text && text[0] && strcmp(text, "unknown result") != 0);
+    }
+    CHECK(strcmp(au_result_string(1), "unknown result") == 0);
+    CHECK(strcmp(au_result_string(AU_ERR_NOT_SAVED - 1), "unknown result") == 0);
+}
+
 // Values out of range are refused, and change nothing (au_set_volume(2.0f) used to do nothing without a word)
 static void test_invalid_values(void) {
     REQUIRE(tc_init_player(0) == 0);
@@ -353,6 +363,7 @@ static void test_failed_init(void) {
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
     RUN_TEST(test_calls_before_init);
+    RUN_TEST(test_result_strings);
     RUN_TEST(test_invalid_values);
     RUN_TEST(test_init_without_arguments);
     RUN_TEST(test_shutdown_while_playing);

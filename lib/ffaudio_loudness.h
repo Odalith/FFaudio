@@ -72,7 +72,7 @@ extern "C" {
         void *progress_user;
     } AuLoudnessOptions;
 
-    // A measurement: one file, or several merged (an album). About 320 KB (two histograms of 0.01 LU bins).
+    // A measurement: one file, or several merged (an album). About 240 KB (two histograms of 10000 bins of 0.01 LU).
     typedef struct AuLoudnessMeter AuLoudnessMeter;
 
     // Measure one file into a new meter (*out; free it with au_loudness_meter_free()). config may be NULL

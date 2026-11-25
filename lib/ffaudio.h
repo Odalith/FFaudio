@@ -196,14 +196,20 @@ extern "C" {
     // NAN marks a missing value: isnan(rg.album_gain_db)
     typedef struct AuReplayGain {
         float track_gain_db;
-        float track_peak;            // linear sample peak, 1.0 = full scale
+        // linear, 1.0 = full scale: the true peak when ffaudio measured it (the sample peak with skip_true_peak), the
+        // tag's value (normally a sample peak) when it came from tags
+        float track_peak;
         float album_gain_db;
-        float album_peak;
+        float album_peak;            // as track_peak
         bool from_r128;              // the gains came from R128_TRACK_GAIN / R128_ALBUM_GAIN
     } AuReplayGain;
 
-    // No values at all
+    // No values at all (a C compound literal; C++ has no compound literals, so it gets a temporary)
+#ifdef __cplusplus
+    #define AU_REPLAYGAIN_NONE (AuReplayGain{ NAN, NAN, NAN, NAN, false })
+#else
     #define AU_REPLAYGAIN_NONE ((AuReplayGain){ NAN, NAN, NAN, NAN, false })
+#endif
 
     typedef enum AU_REPLAYGAIN_MODE {
         AU_REPLAYGAIN_OFF = 0,
@@ -650,6 +656,10 @@ extern "C" {
 
     // "major.minor.patch"
     FFAUDIO_API const char *au_get_version(void);
+
+    // What an AU_RESULT means, in English ("invalid argument", ...): static text, never NULL ("unknown result" for
+    // other values). Since 4.0.
+    FFAUDIO_API const char *au_result_string(int result);
 
 #ifdef __cplusplus
 } // extern "C"

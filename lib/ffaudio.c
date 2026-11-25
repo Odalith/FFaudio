@@ -1971,6 +1971,25 @@ void au_wait_loop(void) {
     }
 }
 
+const char *au_result_string(const int result) {
+    switch ((AU_RESULT)result) {
+        case AU_OK:                      return "success";
+        case AU_ERR_NOT_INITIALIZED:     return "the player is not initialized";
+        case AU_ERR_INVALID_ARGUMENT:    return "invalid argument";
+        case AU_ERR_ALREADY_INITIALIZED: return "the player is already initialized";
+        case AU_ERR_NO_MEMORY:           return "out of memory";
+        case AU_ERR_SDL:                 return "SDL error";
+        case AU_ERR_DEVICE:              return "no output device could be opened";
+        case AU_ERR_WRONG_THREAD:        return "not allowed on this thread";
+        case AU_ERR_NOTHING_TO_DO:       return "nothing to do";
+        case AU_ERR_FILE:                return "the file could not be read";
+        case AU_ERR_CANCELLED:           return "cancelled";
+        case AU_ERR_UNSUPPORTED:         return "not supported";
+        case AU_ERR_NOT_SAVED:           return "not saved to the cache file";
+    }
+    return "unknown result";
+}
+
 const char *au_get_version(void) {
 #define FFA_STR2(x) #x
 #define FFA_STR(x) FFA_STR2(x)

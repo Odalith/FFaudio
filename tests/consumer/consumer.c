@@ -23,6 +23,10 @@ int main(void) {
     const int levels = au_get_levels(0.05, &lv); // no player: AU_ERR_NOT_INITIALIZED
     AuLoudness l;
     const int loudness = au_loudness_result(NULL, &l); // no meter: AU_ERR_INVALID_ARGUMENT
-    return filters_ok && playlist_ok && sp && levels == AU_ERR_NOT_INITIALIZED && loudness == AU_ERR_INVALID_ARGUMENT
-           ? 0 : 1;
+    AuPlayOptions *o = au_play_options_create();
+    const int options_ok = o && au_play_options_set_range(o, 1, 2) == AU_OK;
+    au_play_options_free(o);
+    printf("%s\n", au_result_string(AU_ERR_INVALID_ARGUMENT));
+    return filters_ok && playlist_ok && sp && options_ok && levels == AU_ERR_NOT_INITIALIZED &&
+           loudness == AU_ERR_INVALID_ARGUMENT ? 0 : 1;
 }
