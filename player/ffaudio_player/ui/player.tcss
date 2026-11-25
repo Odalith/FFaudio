@@ -59,6 +59,20 @@ Screen {
     margin: 0 0 1 0;
 }
 
+#find-bar {
+    height: 1;
+    margin-bottom: 1;
+}
+
+#find {
+    width: 1fr;
+}
+
+#find-count {
+    width: 14;
+    padding-left: 1;
+}
+
 #queue {
     height: 1fr;
     background: transparent;

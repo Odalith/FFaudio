@@ -97,16 +97,51 @@ class EngineTests(unittest.TestCase):
         self.engine.next()                                     # skip: c takes over
         self.run_until(lambda: self.engine.current is c)
 
-    def test_repeat_one_and_shuffle(self):
-        items = [Item(fx("join_a.flac")), Item(fx("join_b.flac")), Item(fx("s44_stereo.flac"))]
+    def test_shuffle_shows_a_shuffled_queue_and_restores_the_truth(self):
+        items = [Item(fx(f)) for f in ("join_a.flac", "join_b.flac", "s44_stereo.flac", "s48_stereo.mp3",
+                                         "s44_mono.wav", "s48_stereo.ogg")]
+        self.engine.add(items)
+        self.engine.play_item(items[2])
+        self.run_until(lambda: self.engine.current is items[2])
         self.engine.toggle_shuffle()
-        self.engine.add(items, play=True)
-        self.run_until(lambda: len(self.started()) == 3 and not self.engine.handles)
-        self.assertEqual(sorted(it.uid for it in self.started()), sorted(it.uid for it in items))   # each once
-        self.engine.cycle_repeat()
-        self.engine.cycle_repeat()
-        self.assertEqual(self.engine.s.repeat, "one")
+        shown = list(self.engine.items)
+        self.assertIs(shown[0], items[2])                      # the current track first
+        self.assertEqual(sorted(it.uid for it in shown), sorted(it.uid for it in items))
+        self.assertEqual(self.engine.truth, items)             # the order the user made, kept
+        extra = Item(fx("cd_6s.flac"))
+        self.engine.add([extra])                               # among the tracks still to come
+        self.assertIn(extra, self.engine.items[1:])
+        self.assertIs(self.engine.truth[-1], extra)
+        self.engine.move(self.engine.items[-1], -1)            # rearranges the shuffle, not the truth
+        self.assertEqual(self.engine.truth, items + [extra])
+        # It plays the queue as shown, top to bottom
+        expected = self.engine.items[1:3]
+        self.run_until(lambda: len(self.started()) >= 3, timeout=20)
+        self.assertEqual(self.started()[1:3], expected)
+        # Saved and restored as shown; off restores the truth with the current track in place
+        self.engine.save_session()
+        again = Engine(settings_module.Settings.load(), self.calls.put)
+        self.assertEqual([it.path for it in again.items], [it.path for it in self.engine.items])
+        self.engine.toggle_shuffle()
+        self.assertEqual(self.engine.items, items + [extra])
+        self.assertEqual(self.engine.cursor, self.engine.items.index(self.engine.current))
+
+    def test_repeat_track_and_queue(self):
+        a, b = Item(fx("join_a.flac")), Item(fx("join_b.flac"))
+        self.engine.set_repeat("one")
+        self.engine.add([a, b], play=True)
+        self.run_until(lambda: any(k == "state" for k, _ in self.events) and ffaudio.status().handle != 0)
+        time.sleep(2.5)                                        # a 1 s track: it loops, b does not come
+        for _ in range(20):
+            try:
+                self.calls.get_nowait()()
+            except queue.Empty:
+                break
+        self.assertEqual(self.started(), [a])
         self.assertEqual(ffaudio.status().loop_count, -1)
+        self.engine.set_repeat("all")                          # then a, b, and a again
+        self.run_until(lambda: len(self.started()) >= 3, timeout=20)
+        self.assertEqual(self.started()[:3], [a, b, a])
 
     def test_previous_and_seek(self):
         a, b = Item(fx("long_6s.flac")), Item(fx("cd_6s.flac"))
@@ -226,6 +261,34 @@ class UITests(unittest.TestCase):
 
             await pilot.press("plus")
             self.assertAlmostEqual(eng.s.volume, 1.05)
+
+            # Files: f shows the file in the queue without playing it; g plays it there (no second copy)
+            from ffaudio_player.ui.main import Browser, QueueTable
+            browser = app.main.query_one(Browser)
+            browser.focus()
+            target = next(it for it in eng.items if it.path.endswith("long_6s.flac"))
+            await self.wait(pilot, lambda: browser.cursor_node is not None)
+            node = next(n for n in browser.root.children if n.data and str(n.data.path).endswith("long_6s.flac"))
+            browser.move_cursor(node)
+            playing = eng.current
+            await pilot.press("f")
+            await self.wait(pilot, lambda: app.main.selected_item() is target)
+            self.assertIs(eng.current, playing)
+            browser.focus()
+            await pilot.press("g")
+            await self.wait(pilot, lambda: eng.current is target)
+            self.assertEqual(len(eng.items), 3)
+
+            # The queue's find bar moves the cursor, plays nothing, hides nothing
+            app.main.query_one(QueueTable).focus()
+            await pilot.press("f")
+            self.assertIsInstance(app.focused, Input)
+            await pilot.press("j", "o", "i", "n")
+            await self.wait(pilot, lambda: app.main.selected_item() is not None and
+                            "join_a" in app.main.selected_item().path)
+            self.assertEqual(len(app.main.row_items), 3)
+            self.assertIs(eng.current, target)
+            await pilot.press("escape")
             await pilot.press("q")
 
         app = self.run_app(script, [fx("long_6s.flac"), fx("cd_6s.flac"), fx("join_a.flac")])

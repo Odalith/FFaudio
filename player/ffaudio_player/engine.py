@@ -5,6 +5,10 @@ Threads: everything here runs on one thread (the UI's). A pump thread only waits
 each one to that thread with `post`; the probe and loudness workers do the same with what they find. So no state
 here needs a lock.
 
+The queue: `truth` is the order the user made; `items` is the queue as shown and played, always from top to bottom.
+Without shuffle they are the same. Shuffle shows a shuffled copy of the truth (the current track first, the rest
+after it in random order); turning it off shows the truth again, the current track playing on in its place there.
+
 How the queue meets ffaudio: ffaudio plays one track and holds at most one queued after it. When the current track
 nears its end, ffaudio says PrepareNext and the engine queues the next item of its own queue (ffaudio.queue()),
 which then starts gaplessly or crossfaded. Every track given to ffaudio has a handle; `handles` maps it back to the
@@ -38,12 +42,17 @@ class Engine:
         self.s = settings
         self.post = post                        # runs a function on the engine's thread
         self.effects = Effects(settings.effects)
-        self.items: list[Item] = [Item.from_json(d) for d in settings.queue if isinstance(d, dict) and "path" in d]
+        self.truth: list[Item] = [Item.from_json(d) for d in settings.queue if isinstance(d, dict) and "path" in d]
+        order = settings.shuffle_order
+        if settings.shuffle and sorted(order) == list(range(len(self.truth))):
+            self.items = [self.truth[i] for i in order]
+        else:
+            self.items = list(self.truth)           # the queue as shown and played
+            if self.truth:
+                settings.shuffle = False            # no valid shuffled order saved: show the truth
         self.current: Optional[Item] = None     # the one being heard
         self.handles: dict[int, Item] = {}      # every track ffaudio has and has not ended yet
         self.next_handle = 0                    # the track queued in ffaudio after the current one
-        self.history: list[Item] = []           # what was heard, for previous()
-        self.played: set[int] = set()           # uids heard in this round of shuffle
         self.cursor = 0                         # where the current item is (or was) in `items`
         self.device: Optional[ffaudio.Device] = None
         self.buffering: Optional[ffaudio.Buffering] = None
@@ -106,7 +115,9 @@ class Engine:
             pass
 
     def save_session(self) -> None:
-        self.s.queue = [it.to_json() for it in self.items]
+        self.s.queue = [it.to_json() for it in self.truth]
+        index = {id(it): i for i, it in enumerate(self.truth)}
+        self.s.shuffle_order = [index[id(it)] for it in self.items] if self.s.shuffle else []
         cur = self.current if self.current in self.items else None
         self.s.current = self.items.index(cur) if cur else -1
         st = ffaudio.status() if self._running else None
@@ -201,16 +212,41 @@ class Engine:
         self._emit("state")
 
     def cycle_repeat(self) -> None:
-        self.s.repeat = {"off": "all", "all": "one", "one": "off"}[self.s.repeat]
-        ffaudio.set_loop_count(-1 if self.s.repeat == "one" else 0)
+        """Off, the queue (all), the track (one)."""
+        self.set_repeat({"off": "all", "all": "one", "one": "off"}[self.s.repeat])
+
+    def set_repeat(self, mode: str) -> None:
+        self.s.repeat = mode
+        ffaudio.set_loop_count(-1 if mode == "one" else 0)   # the track: ffaudio loops it, gaplessly
         self._requeue()
         self._emit("state")
 
     def toggle_shuffle(self) -> None:
+        """Shuffle the queue as shown (the current track first), or show the order the user made again."""
         self.s.shuffle = not self.s.shuffle
-        self.played = {self.current.uid} if self.current else set()
+        cur = self.current if self.current in self.truth else None
+        if self.s.shuffle:
+            rest = [it for it in self.truth if it is not cur]
+            random.shuffle(rest)
+            self.items = ([cur] if cur else []) + rest
+        else:
+            self.items = list(self.truth)
+        self._recursor()
+        self._emit("queue")
         self._requeue()
         self._emit("state")
+
+    def _recursor(self) -> None:
+        if self.current in self.items:
+            self.cursor = self.items.index(self.current)
+        else:
+            self.cursor = min(self.cursor, len(self.items))
+
+    def _sync(self) -> None:
+        """Without shuffle the queue as shown is the truth."""
+        if not self.s.shuffle:
+            self.items = list(self.truth)
+        self._recursor()
 
     #+-----------------------------------------------------+
     #| Playback                                            |
@@ -261,12 +297,7 @@ class Engine:
             ffaudio.seek(0)
             return
         prev = None
-        if self.s.shuffle:
-            past = [it for it in self.history[:-1] if it in self.items]
-            prev = past[-1] if past else None
-            if prev:
-                self.history = self.history[:-2]   # it is pushed again when it starts
-        elif self.current in self.items:
+        if self.current in self.items:
             i = self.items.index(self.current)
             prev = self.items[i - 1] if i > 0 else (self.items[-1] if self.s.repeat == "all" else None)
         elif self.items:
@@ -290,14 +321,9 @@ class Engine:
             ffaudio.seek_fraction(min(max(fraction, 0.0), 1.0))
 
     def _next_item(self, after: Optional[Item], user: bool = False) -> Optional[Item]:
+        """The one after `after` in the queue as shown (shuffled or not, it always plays top to bottom)."""
         if not self.items:
             return None
-        if self.s.shuffle:
-            pool = [it for it in self.items if it.uid not in self.played and it is not after]
-            if not pool and (self.s.repeat == "all" or user):
-                self.played = set()
-                pool = [it for it in self.items if it is not after] or list(self.items)
-            return random.choice(pool) if pool else None
         if after is not None and after in self.items:
             i = self.items.index(after) + 1
         else:
@@ -371,8 +397,6 @@ class Engine:
                 self.current, item.error, self.stream_title, self.buffering = item, "", "", None
                 if item in self.items:
                     self.cursor = self.items.index(item)
-                self.history.append(item)
-                self.played.add(item.uid)
                 if self._resume and self._resume[0] is item:
                     ffaudio.seek(self._resume[1])
                 self._resume = None
@@ -407,64 +431,90 @@ class Engine:
     #| The queue                                           |
     #+-----------------------------------------------------+
 
-    def add(self, items: list[Item], at: Optional[int] = None, play: bool = False) -> None:
+    def add(self, items: list[Item], play: bool = False) -> None:
+        """At the end of the queue; while shuffled, at random places among the tracks still to come."""
         if not items:
             return
-        pos = len(self.items) if at is None else max(0, min(at, len(self.items)))
-        self.items[pos:pos] = items
-        if pos <= self.cursor and self.current is not None:
-            self.cursor += len(items)
+        self.truth.extend(items)
+        if self.s.shuffle:
+            first = self.cursor + 1 if self.current in self.items else self.cursor
+            for it in items:
+                self.items.insert(random.randint(min(first, len(self.items)), len(self.items)), it)
+        self._sync()
         self.probe(items)
         self._emit("queue")
         if play:
             self.play_item(items[0])
         else:
             self._requeue()
-            if not ffaudio.status().handle and not self.next_handle and self.current is None and len(items) == len(
-                    self.items):
-                self.cursor = 0
 
     def add_next(self, items: list[Item]) -> None:
-        """After the current item."""
-        at = self.items.index(self.current) + 1 if self.current in self.items else self.cursor
-        self.add(items, at=at)
+        """Right after the current track, in the truth and in the queue as shown."""
+        if not items:
+            return
+        cur = self.current
+        t = self.truth.index(cur) + 1 if cur in self.truth else min(self.cursor, len(self.truth))
+        self.truth[t:t] = items
+        if self.s.shuffle:
+            v = self.items.index(cur) + 1 if cur in self.items else min(self.cursor, len(self.items))
+            self.items[v:v] = items
+        self._sync()
+        self.probe(items)
+        self._emit("queue")
+        self._requeue()
 
     def remove(self, items: list[Item]) -> None:
         gone = set(id(it) for it in items)
         before = [it for it in self.items[:self.cursor] if id(it) in gone]
+        self.truth = [it for it in self.truth if id(it) not in gone]
         self.items = [it for it in self.items if id(it) not in gone]
         self.cursor = max(0, self.cursor - len(before))
+        self._sync()
         self._emit("queue")
         self._requeue()
 
     def move(self, item: Item, delta: int) -> int:
-        i = self.items.index(item)
-        j = max(0, min(i + delta, len(self.items) - 1))
+        """Moves it in the queue as shown; while shuffled that is the shuffle's order, the truth stays as it is."""
+        order = self.items if self.s.shuffle else self.truth
+        i = order.index(item)
+        j = max(0, min(i + delta, len(order) - 1))
         if i != j:
-            self.items.insert(j, self.items.pop(i))
-            if self.current in self.items:
-                self.cursor = self.items.index(self.current)
+            order.insert(j, order.pop(i))
+            self._sync()
             self._emit("queue")
             self._requeue()
-        return j
+        return self.items.index(item)
 
     def clear(self) -> None:
-        self.items = []
+        self.truth, self.items = [], []
         self.cursor = 0
         self._emit("queue")
         self._requeue()
 
     def sort(self, key: str) -> None:
+        """Sorts the truth; a sorted queue is not a shuffled one, so shuffle goes off."""
         keys = {"title": lambda it: it.display_title.lower(), "artist": lambda it: (it.display_artist.lower(),
                 it.display_album.lower(), it.info.disc_number if it.info else 0,
                 it.info.track_number if it.info else it.number), "album": lambda it: (it.display_album.lower(),
                 it.info.disc_number if it.info else 0, it.info.track_number if it.info else it.number),
                 "path": lambda it: (it.path, it.start)}
-        self.items.sort(key=keys[key])
-        if self.current in self.items:
-            self.cursor = self.items.index(self.current)
+        self.truth.sort(key=keys[key])
+        self.s.shuffle = False
+        self._sync()
         self._emit("queue")
         self._requeue()
+        self._emit("state")
+
+    def find(self, paths: set, folder: Optional[str] = None) -> list[Item]:
+        """The items of the queue as shown that play one of these files, or a file under this folder."""
+        prefix = os.path.join(os.path.abspath(folder), "") if folder else None
+        paths = {p if ffaudio.is_network_url(p) else os.path.abspath(p) for p in paths}
+        found = []
+        for it in self.items:
+            p = it.path if it.is_url else os.path.abspath(it.path)
+            if p in paths or (prefix and p.startswith(prefix)):
+                found.append(it)
+        return found
 
     def total_duration(self) -> float:
         return sum(max(0.0, it.display_duration) for it in self.items)

@@ -72,8 +72,9 @@ class Settings:
     theme: str = "tokyo-night"
     effects: EffectSettings = field(default_factory=EffectSettings)
     # The session
-    queue: list = field(default_factory=list)
-    current: int = -1                   # index into queue
+    queue: list = field(default_factory=list)       # in the order the user made (the "truth")
+    shuffle_order: list = field(default_factory=list)   # while shuffled: the queue as shown, as indexes into queue
+    current: int = -1                   # index into the queue as shown
     position: float = 0.0
 
     @property

@@ -36,9 +36,18 @@ or `FFAUDIO_LIBRARY`. `--fresh` starts with an empty queue, and `--settings FILE
 
 - **Queue:** files, folders, M3U/M3U8/PLS playlists, cue sheets, audio files with an embedded cue sheet or chapters
   (audiobooks), and HTTP(S) streams. A cue sheet's tracks join gaplessly, to the sample. You can reorder the queue,
-  remove tracks, filter it (`/`), sort it, shuffle it, repeat all or one, and save it as a playlist. Tags,
-  durations and gains are read in the background. A file that can't be played is marked ✗ with the reason (from
-  `AU_EVENT_TRACK_ENDED`), and playback goes on past it.
+  remove tracks, sort it, and save it as a playlist.
+  - **Shuffle** keeps the order you made as the queue's truth and shows a shuffled copy, the playing track first.
+    Playback always goes down the queue as shown. Turning shuffle off shows your order again, with the current
+    track playing on in its place.
+  - **Repeat** the queue or the track (`r`); ffaudio loops a repeated track gaplessly.
+  - **Find** (`f` or `ctrl+f`) jumps to matching tracks without hiding the others; the **filter** (`/`) shows only
+    the matches.
+  - **From the files:** `g` (or `enter`) goes to a file in the queue and plays it there, or adds it when it isn't in
+    the queue. `f` shows where it is without playing it; press it again for the next place. A folder, cue sheet or
+    playlist is found by the files in it.
+  - Tags, durations and gains are read in the background. A file that can't be played is marked ✗ with the reason
+    (from `AU_EVENT_TRACK_ENDED`), and playback goes on past it.
 - **Transitions:** gapless by default. Crossfades can be 0–12 s with a choice of curve, and skipping, stopping and
   pausing fade quickly. The next track is queued in ffaudio when it asks (`AU_EVENT_PREPARE_NEXT`), so every
   transition is ffaudio's own.

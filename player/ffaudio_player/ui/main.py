@@ -21,7 +21,7 @@ from ..library import Item
 from .widgets import CoverArt, LevelMeter, SeekBar, SpectrumView, fmt_time
 
 # Plain symbols: emoji are drawn at different widths by different terminals
-REPEAT_ICONS = {"off": "", "all": "↻ all", "one": "↻ one"}
+REPEAT_ICONS = {"off": "", "all": "↻ repeat queue", "one": "↻ repeat track"}
 FIXED_COLUMNS = {"state": 2, "n": 4, "gain": 6, "time": 7}
 
 
@@ -29,7 +29,8 @@ class Browser(DirectoryTree):
     """Folders, audio files, playlists and cue sheets."""
 
     BINDINGS = [
-        Binding("a", "add", "Add"), Binding("A", "add_play", "Play now"), Binding("i", "add_next", "Play next"),
+        Binding("g", "go_to", "Go to & play"), Binding("f", "find", "Find in queue"),
+        Binding("a", "add", "Add"), Binding("A", "add_play", "Add & play"), Binding("i", "add_next", "Play next"),
         Binding("backspace", "up", "Parent folder", show=False),
     ]
 
@@ -39,6 +40,16 @@ class Browser(DirectoryTree):
     def _target(self) -> Optional[str]:
         node = self.cursor_node
         return str(node.data.path) if node and node.data else None
+
+    def action_go_to(self) -> None:
+        """Play it where it is in the queue; add it when it is not there."""
+        if (p := self._target()):
+            self.screen.locate(p, play=True)
+
+    def action_find(self) -> None:
+        """Show it in the queue, without playing it (again: the next place it is)."""
+        if (p := self._target()):
+            self.screen.locate(p, play=False)
 
     def action_add(self) -> None:
         if (p := self._target()):
@@ -65,6 +76,7 @@ class QueueTable(DataTable):
         Binding("ctrl+up,K", "move(-1)", "Move up", show=False), Binding("ctrl+down,J", "move(1)", "Move down",
                                                                           show=False),
         Binding("i", "queue_next", "Play next", show=False),
+        Binding("f", "screen.find", "Find"),
     ]
 
     def action_play_selected(self) -> None:
@@ -105,7 +117,8 @@ class MainScreen(Screen):
         Binding("left_square_bracket", "speed(-0.05)", "Slower", show=False),
         Binding("right_square_bracket", "speed(0.05)", "Faster", show=False),
         Binding("backslash", "pitch", "Pitch", show=False),
-        Binding("r", "repeat", "Repeat", show=False), Binding("s", "shuffle", "Shuffle", show=False),
+        Binding("r", "repeat", "Repeat"), Binding("s", "shuffle", "Shuffle"),
+        Binding("ctrl+f", "find", "Find", show=False),
         Binding("e", "app.effects", "Effects"), Binding("o", "app.settings", "Settings"),
         Binding("u", "app.open", "Open"), Binding("slash", "filter", "Filter", show=False),
         Binding("b", "toggle_browser", "Files", show=False), Binding("l", "app.log", "Log", show=False),
@@ -116,7 +129,7 @@ class MainScreen(Screen):
     ] + [Binding(str(d), f"seek_fraction({d / 10})", show=False) for d in range(10)]
 
     TYPING_KEYS = {"play_pause", "seek", "volume", "speed", "mute", "pitch", "repeat", "shuffle", "next",
-                   "previous", "toggle_browser", "filter", "seek_fraction"}
+                   "previous", "toggle_browser", "filter", "seek_fraction", "find"}
 
     def __init__(self):
         super().__init__()
@@ -130,10 +143,13 @@ class MainScreen(Screen):
             yield Static(id="topbar-right")
         with Horizontal(id="body"):
             with Vertical(id="browser-pane"):
-                root = eng.s.browser_root if os.path.isdir(eng.s.browser_root or "") else _music_dir()
+                root = os.path.abspath(eng.s.browser_root if os.path.isdir(eng.s.browser_root or "") else _music_dir())
                 yield Browser(root, id="browser")
             with Vertical(id="queue-pane"):
                 yield Input(placeholder="filter the queue (title, artist, album)…", id="filter")
+                with Horizontal(id="find-bar"):
+                    yield Input(placeholder="find in the queue…  (enter: next, esc: close)", id="find", compact=True)
+                    yield Static(id="find-count")
                 yield QueueTable(id="queue", cursor_type="row", zebra_stripes=True)
         with Horizontal(id="now"):
             yield CoverArt(id="art")
@@ -154,6 +170,7 @@ class MainScreen(Screen):
         self.query_one("#browser-pane").border_title = "Files"
         self.query_one("#now").border_title = "Now playing"
         self.query_one("#filter").display = False
+        self.query_one("#find-bar").display = False
         self.rebuild_queue()
         self.refresh_now()
         self.refresh_topbar()
@@ -277,7 +294,50 @@ class MainScreen(Screen):
 
     @on(DirectoryTree.FileSelected, "#browser")
     def _file_selected(self, event: DirectoryTree.FileSelected) -> None:
-        self.add_paths([str(event.path)], play=True)
+        self.locate(str(event.path), play=True)   # where it is in the queue, or added
+
+    @work(thread=True, exclusive=True, group="locate")
+    def locate(self, path: str, play: bool) -> None:
+        """Finds a file, folder, cue sheet or playlist in the queue (a cue sheet or playlist by the files it names,
+        read here, off the UI thread)."""
+        kind = library.kind(path)
+        paths = {path}
+        if kind in ("cue", "playlist"):
+            try:
+                paths = {it.path for it in library.expand(path)}
+            except ffaudio.Error:
+                paths = set()
+        self.app.call_from_thread(self._located, path, paths, path if kind == "dir" else None, play)
+
+    def _located(self, path: str, paths: set, folder: Optional[str], play: bool) -> None:
+        found = self.app.engine.find(paths, folder)
+        name = os.path.basename(path.rstrip("/\\")) or path
+        if not found:
+            if play:
+                self.add_paths([path], play=True)
+            else:
+                self.app.notify(f"{name} is not in the queue", severity="warning", timeout=2)
+            return
+        # The first after the selected row, so asking again goes on to the next place it is
+        sel = self.selected_item()
+        after = self.app.engine.items.index(sel) if sel in self.app.engine.items else -1
+        it = next((x for x in found if self.app.engine.items.index(x) > after), found[0])
+        self.jump_to(it)
+        if play:
+            self.app.engine.play_item(it)
+        elif len(found) > 1:
+            self.app.notify(f"{name}: {found.index(it) + 1} of {len(found)} in the queue (f: next)", timeout=2)
+
+    def jump_to(self, it: Item) -> None:
+        """Selects it in the queue and shows it (clearing a filter that hides it)."""
+        if it not in self.row_items:
+            self.filter_text = ""
+            f = self.query_one("#filter", Input)
+            f.value, f.display = "", False
+            self.rebuild_queue()
+        t = self.query_one(QueueTable)
+        t.move_cursor(row=self.row_of(it), scroll=True)
+        t.focus()
 
     @work(thread=True, exclusive=False, group="expand")
     def add_paths(self, paths: list, play: bool = False, next_: bool = False) -> None:
@@ -405,8 +465,8 @@ class MainScreen(Screen):
             parts.append(Text.assemble(("speed ", Style(dim=True)),
                                        (f"×{s.speed:.2f}{'' if s.keep_pitch else ' tape'}", Style(bold=True))))
         parts.append(Text(f"crossfade {s.crossfade:g} s" if s.crossfade > 0 else "gapless", Style(dim=True)))
-        if s.repeat != "off":
-            parts.append(Text(REPEAT_ICONS[s.repeat], Style(color=accent)))
+        parts.append(Text(REPEAT_ICONS[s.repeat], Style(color=accent)) if s.repeat != "off" else
+                     Text("repeat off", Style(dim=True)))
         if s.shuffle:
             parts.append(Text("⇄ shuffle", Style(color=accent)))
         parts.append(Text(eng.effects.describe(), Style(dim=True)))
@@ -481,7 +541,8 @@ class MainScreen(Screen):
 
     def action_repeat(self) -> None:
         self.app.engine.cycle_repeat()
-        self.app.notify(f"Repeat {self.app.engine.s.repeat}", timeout=1.5)
+        self.app.notify({"off": "Repeat off", "all": "Repeat the queue", "one": "Repeat the track"}[
+            self.app.engine.s.repeat], timeout=1.5)
 
     def action_shuffle(self) -> None:
         self.app.engine.toggle_shuffle()
@@ -497,7 +558,41 @@ class MainScreen(Screen):
         f.display = True
         f.focus()
 
+    def action_find(self) -> None:
+        bar = self.query_one("#find-bar")
+        bar.display = True
+        self.query_one("#find", Input).focus()
+
+    def _find(self, text: str, start: int) -> None:
+        """Moves the cursor to the first row from `start` on that matches (wrapping), without playing anything."""
+        t, count = self.query_one(QueueTable), self.query_one("#find-count", Static)
+        f = text.lower().strip()
+        if not f:
+            count.update("")
+            return
+        rows = [i for i, it in enumerate(self.row_items)
+                if any(f in s.lower() for s in (it.display_title, it.display_artist, it.display_album, it.path))]
+        if not rows:
+            count.update(Text("no match", Style(color="#ff8787")))
+            return
+        row = next((r for r in rows if r >= start), rows[0])
+        t.move_cursor(row=row, scroll=True)
+        count.update(Text(f"{rows.index(row) + 1} of {len(rows)}", Style(dim=True)))
+
+    @on(Input.Changed, "#find")
+    def _find_changed(self, event: Input.Changed) -> None:
+        self._find(event.value, max(0, self.query_one(QueueTable).cursor_row))
+
+    @on(Input.Submitted, "#find")
+    def _find_next(self, event: Input.Submitted) -> None:
+        self._find(event.value, self.query_one(QueueTable).cursor_row + 1)
+
     def action_clear_filter(self) -> None:
+        bar = self.query_one("#find-bar")
+        if bar.display:   # esc closes the find bar first, staying where it found
+            bar.display = False
+            self.query_one(QueueTable).focus()
+            return
         f = self.query_one("#filter", Input)
         if f.display:
             f.value = ""

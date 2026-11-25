@@ -349,13 +349,17 @@ HELP = [
         ("← →", "seek 5 s;  shift+← →  or  , .  30 s;  0 – 9  jump to 0 – 90 %;  or click the bar"),
         ("+  -", "volume, up to 200 %;  m  mute"),
         ("[  ]", "slower / faster;  \\  keep the pitch, or tape-style"),
-        ("r  s", "repeat off → all → one;  shuffle"),
+        ("r", "repeat: off → the queue → the track"),
+        ("s", "shuffle the queue as shown (the current track first); off restores your order"),
     ]),
     ("Queue and files", [
-        ("enter", "play the selected track (in the files: play that file)"),
-        ("a  A  i", "in the files: add · play now · play next"),
+        ("enter", "play the selected track"),
+        ("files: g", "go to: play it where it is in the queue (or add it);  enter does the same"),
+        ("files: f", "find it in the queue without playing it;  again: the next place"),
+        ("files: a A i", "add · add and play · play next"),
         ("x  del", "remove from the queue;  ctrl+↑ ↓  or  K J  move it"),
-        ("/", "filter the queue;  esc  clears the filter"),
+        ("f  ctrl+f", "find in the queue: jump to matches (enter: next), nothing hidden"),
+        ("/", "filter the queue: show only matches;  esc  clears it"),
         ("u", "open a file, folder, playlist, cue sheet or URL"),
         ("ctrl+s", "save the queue as a playlist;  ctrl+l  measure its loudness"),
         ("b  tab", "show / hide the files;  next pane"),
@@ -377,7 +381,7 @@ def help_table():
     for title, keys in HELP:
         t = Table(title=title, title_justify="left", title_style="bold", show_header=False, box=None,
                   padding=(0, 2), expand=True)
-        t.add_column(style="bold", width=10, no_wrap=True)
+        t.add_column(style="bold", width=13, no_wrap=True)
         t.add_column()
         for k, v in keys:
             t.add_row(k, v)

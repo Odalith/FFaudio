@@ -172,8 +172,14 @@ class PlayerApp(App):
         yield SystemCommand("Clear the queue", "Remove every track", self.action_clear_queue)
         for key in ("artist", "album", "title", "path"):
             yield SystemCommand(f"Sort the queue by {key}", "", lambda k=key: self.action_sort(k))
-        yield SystemCommand("Repeat: next mode", f"now {e.s.repeat}", e.cycle_repeat)
-        yield SystemCommand("Shuffle on/off", "", e.toggle_shuffle)
+        yield SystemCommand("Repeat the queue", "Start again at the top after the last track",
+                            lambda: e.set_repeat("all"))
+        yield SystemCommand("Repeat the track", "Loop the current track (gaplessly)", lambda: e.set_repeat("one"))
+        yield SystemCommand("Repeat off", "Stop after the last track", lambda: e.set_repeat("off"))
+        yield SystemCommand("Shuffle on/off", "Shuffle the queue as shown; off restores your order",
+                            e.toggle_shuffle)
+        yield SystemCommand("Find in the queue", "Jump to matching tracks without playing them",
+                            lambda: self.main.action_find())
         yield SystemCommand("Stop", "Stop playback", e.stop)
         yield SystemCommand("Log", "Warnings and errors", self.action_log)
         yield SystemCommand("Keys", "Every key", self.action_help)
