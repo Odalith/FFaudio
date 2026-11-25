@@ -823,7 +823,7 @@ static bool failed_since(const char *path, const unsigned mark) {
     return false;
 }
 
-GainWait gain_cache_wait(const char *path, const int timeout_ms, SDL_atomic_t *abort, const unsigned mark) {
+GainWait gain_cache_wait(const char *path, const int timeout_ms, FfAtomic *abort, const unsigned mark) {
     CHAOS("gain_cache_wait");
     if (!path || !path[0]) return GAIN_WAIT_FAILED;
     SDL_mutex *m = cache_mutex();
@@ -836,7 +836,7 @@ GainWait gain_cache_wait(const char *path, const int timeout_ms, SDL_atomic_t *a
         Entry **slot = find_slot(path, hash_path(path));
         if (slot && *slot) { result = GAIN_WAIT_CACHED; break; }
         if (failed_since(path, mark)) { result = GAIN_WAIT_FAILED; break; }
-        if (abort && SDL_AtomicGet(abort)) { result = GAIN_WAIT_ABORTED; break; }
+        if (abort && ffa_load(abort)) { result = GAIN_WAIT_ABORTED; break; }
         const Sint32 left = (Sint32)(deadline - SDL_GetTicks());
         if (left <= 0) { result = GAIN_WAIT_TIMEOUT; break; }
         SDL_CondWaitTimeout(cache_changed, m, (Uint32)(left < 20 ? left : 20)); // re-check abort regularly

@@ -48,7 +48,7 @@ typedef struct Job {
 typedef struct Worker {
     SDL_Thread *thread;
     Job *job;                   // being measured
-    SDL_atomic_t cancel;        // 1 = stop the current job (read without the lock while measuring)
+    FfAtomic cancel;        // 1 = stop the current job (read without the lock while measuring)
     bool exited;                // the thread left (no longer wanted): joining it does not wait, then the slot is free
 } Worker;
 
@@ -63,7 +63,7 @@ static Job *head = NULL, *tail = NULL;
 static Worker workers[MAX_WORKERS];
 static AuGainScanConfig config;
 static int pending = 0;          // paths queued or being measured
-static SDL_atomic_t stopping;    // 1 while au_gain_scan_stop() runs (read without the lock while measuring)
+static FfAtomic stopping;    // 1 while au_gain_scan_stop() runs (read without the lock while measuring)
 
 // Files that could not be measured (not media, no audio stream, unreadable), with their size and modification
 // time: requests skip them until the file changes, instead of reading and failing again on every request.
@@ -333,7 +333,7 @@ typedef struct ProgressCtx {
 
 static int interrupted(void *user) {
     const ProgressCtx *ctx = user;
-    return SDL_AtomicGet(&workers[ctx->index].cancel) || SDL_AtomicGet(&stopping);
+    return ffa_load(&workers[ctx->index].cancel) || ffa_load(&stopping);
 }
 
 static bool keep_going(double fraction, void *user) {
@@ -430,9 +430,9 @@ static int worker_main(void *arg) {
         // The wanted count is read again after every wake-up and job: au_gain_scan_configure() may have lowered it.
         // A worker no longer wanted leaves by itself; nobody waits for it (start_workers() or au_gain_scan_stop()
         // joins it later, at once)
-        while (!head && !SDL_AtomicGet(&stopping) && index < wanted_workers())
+        while (!head && !ffa_load(&stopping) && index < wanted_workers())
             SDL_CondWait(wake, lock);
-        if (SDL_AtomicGet(&stopping)) break;   // au_gain_scan_stop() has taken the slot and joins this thread
+        if (ffa_load(&stopping)) break;   // au_gain_scan_stop() has taken the slot and joins this thread
         if (index >= wanted_workers()) {
             workers[index].exited = true;  // the slot is still this thread's: start_workers() joins it
             break;
@@ -442,7 +442,7 @@ static int worker_main(void *arg) {
         unlink_job(job, NULL);
         job->measuring = true;
         workers[index].job = job;
-        SDL_AtomicSet(&workers[index].cancel, 0);
+        ffa_store(&workers[index].cancel, 0);
         const AuGainScanConfig cfg = config;
         SDL_UnlockMutex(lock);
 
@@ -486,7 +486,7 @@ static int request(const char *const *paths, const int count, const bool urgent,
             if (paths[i] && au_is_network_url(paths[i])) return 0;
     }
     SDL_LockMutex(lock);
-    if (SDL_AtomicGet(&stopping)) {
+    if (ffa_load(&stopping)) {
         // au_gain_scan_stop() is waiting for the workers; new ones started now would never be joined
         SDL_UnlockMutex(lock);
         return 0;
@@ -649,7 +649,7 @@ void au_gain_cache_cancel_requests(void) {
         j = next;
     }
     for (int i = 0; i < MAX_WORKERS; i++)
-        if (workers[i].job && !workers[i].job->from_player) SDL_AtomicSet(&workers[i].cancel, 1);
+        if (workers[i].job && !workers[i].job->from_player) ffa_store(&workers[i].cancel, 1);
     SDL_UnlockMutex(lock);
 }
 
@@ -671,7 +671,7 @@ void au_gain_scan_stop(void) {
     SDL_Thread *threads[MAX_WORKERS];
     int n = 0;
     SDL_LockMutex(lock);
-    SDL_AtomicSet(&stopping, 1);
+    ffa_store(&stopping, 1);
     while (head) {
         Job *j = head;
         unlink_job(j, NULL);
@@ -679,7 +679,7 @@ void au_gain_scan_stop(void) {
         job_drop(j);
     }
     for (int i = 0; i < MAX_WORKERS; i++) {
-        if (workers[i].job) SDL_AtomicSet(&workers[i].cancel, 1);
+        if (workers[i].job) ffa_store(&workers[i].cancel, 1);
         if (workers[i].thread) threads[n++] = workers[i].thread; // also those that left already
         workers[i].thread = NULL;
         workers[i].exited = false;
@@ -690,7 +690,7 @@ void au_gain_scan_stop(void) {
     for (int i = 0; i < n; i++) SDL_WaitThread(threads[i], NULL);
 
     SDL_LockMutex(lock);
-    SDL_AtomicSet(&stopping, 0);
+    ffa_store(&stopping, 0);
     forget_all_failures();
     SDL_UnlockMutex(lock);
 }

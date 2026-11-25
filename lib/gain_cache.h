@@ -28,7 +28,7 @@ bool gain_cache_lookup(const char *path, AuReplayGain *out);
 // passes or *abort becomes non-zero. Take the mark with gain_cache_failure_mark() before the measurement is
 // requested, so a quick failure is not missed.
 typedef enum GainWait { GAIN_WAIT_CACHED, GAIN_WAIT_TIMEOUT, GAIN_WAIT_FAILED, GAIN_WAIT_ABORTED } GainWait;
-GainWait gain_cache_wait(const char *path, int timeout_ms, SDL_atomic_t *abort, unsigned mark);
+GainWait gain_cache_wait(const char *path, int timeout_ms, FfAtomic *abort, unsigned mark);
 unsigned gain_cache_failure_mark(void);
 
 // The scan queue gave up on `path` (an error or a cancellation): wake gain_cache_wait() for it

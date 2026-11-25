@@ -17,10 +17,15 @@
  */
 
 /*
- * 32-bit atomics for state that publishes other data (a flag set after the data it guards is written, the indices of
- * a ring buffer). SDL's atomics are compiled into SDL, out of ThreadSanitizer's sight, so it can not follow what they
- * publish; these are compiler builtins in ffaudio's own code (GCC, Clang). MSVC gets full-barrier equivalents.
- * Plain flags that publish nothing can stay SDL_atomic_t.
+ * The atomics of ffaudio: every value one thread writes and another reads without a lock is an FfAtomic, and every
+ * access goes through these functions (FfAtomic is a struct, so a plain read or write does not compile). They are the
+ * compiler's own builtins in ffaudio's code, so ThreadSanitizer sees them and what they publish; SDL's atomics are
+ * compiled inside SDL, out of its sight, and their ordering is SDL's (SDL 2.30's SDL_AtomicSet() is only an acquire
+ * barrier on GCC).
+ *
+ * ffa_load / ffa_store / ffa_exchange / ffa_fetch_add / ffa_cas are sequentially consistent: the default. The
+ * _acquire / _release / _relaxed ones are for the hand-offs docs/threading.md describes ("Atomics and lock-free
+ * values"), where the weaker order is part of the design.
  */
 #ifndef FFAUDIO_ATOMICS_H
 #define FFAUDIO_ATOMICS_H
@@ -28,31 +33,28 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#if defined(_MSC_VER) && !defined(__clang__)
-#include <intrin.h>
-
-static __inline int32_t ffa_load_acquire(const int32_t *p) { return (int32_t)_InterlockedOr((volatile long *)p, 0); }
-static __inline int32_t ffa_load_relaxed(const int32_t *p) { return *(const volatile int32_t *)p; }
-static __inline void ffa_store_release(int32_t *p, const int32_t v) { _InterlockedExchange((volatile long *)p, v); }
-static __inline void ffa_store_relaxed(int32_t *p, const int32_t v) { *(volatile int32_t *)p = v; }
-static __inline int32_t ffa_fetch_add(int32_t *p, const int32_t v) {
-    return (int32_t)_InterlockedExchangeAdd((volatile long *)p, v);
-}
-static __inline bool ffa_cas(int32_t *p, const int32_t expected, const int32_t desired) {
-    return _InterlockedCompareExchange((volatile long *)p, desired, expected) == expected;
-}
-
-#else
-
-static inline int32_t ffa_load_acquire(const int32_t *p) { return __atomic_load_n(p, __ATOMIC_ACQUIRE); }
-static inline int32_t ffa_load_relaxed(const int32_t *p) { return __atomic_load_n(p, __ATOMIC_RELAXED); }
-static inline void ffa_store_release(int32_t *p, const int32_t v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
-static inline void ffa_store_relaxed(int32_t *p, const int32_t v) { __atomic_store_n(p, v, __ATOMIC_RELAXED); }
-static inline int32_t ffa_fetch_add(int32_t *p, const int32_t v) { return __atomic_fetch_add(p, v, __ATOMIC_ACQ_REL); }
-static inline bool ffa_cas(int32_t *p, int32_t expected, const int32_t desired) {
-    return __atomic_compare_exchange_n(p, &expected, desired, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
-}
-
+#if !defined(__GNUC__) && !defined(__clang__)
+#error "ffaudio is built with GCC or Clang (MinGW on Windows): lib/atomics.h uses their __atomic builtins"
 #endif
+
+typedef struct FfAtomic {
+    int32_t v;
+} FfAtomic;
+
+static inline int32_t ffa_load(const FfAtomic *a) { return __atomic_load_n(&a->v, __ATOMIC_SEQ_CST); }
+static inline void ffa_store(FfAtomic *a, const int32_t v) { __atomic_store_n(&a->v, v, __ATOMIC_SEQ_CST); }
+// The old value
+static inline int32_t ffa_exchange(FfAtomic *a, const int32_t v) { return __atomic_exchange_n(&a->v, v, __ATOMIC_SEQ_CST); }
+// The old value
+static inline int32_t ffa_fetch_add(FfAtomic *a, const int32_t v) { return __atomic_fetch_add(&a->v, v, __ATOMIC_SEQ_CST); }
+// true when it was `expected` and is `desired` now
+static inline bool ffa_cas(FfAtomic *a, int32_t expected, const int32_t desired) {
+    return __atomic_compare_exchange_n(&a->v, &expected, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+static inline int32_t ffa_load_acquire(const FfAtomic *a) { return __atomic_load_n(&a->v, __ATOMIC_ACQUIRE); }
+static inline int32_t ffa_load_relaxed(const FfAtomic *a) { return __atomic_load_n(&a->v, __ATOMIC_RELAXED); }
+static inline void ffa_store_release(FfAtomic *a, const int32_t v) { __atomic_store_n(&a->v, v, __ATOMIC_RELEASE); }
+static inline void ffa_store_relaxed(FfAtomic *a, const int32_t v) { __atomic_store_n(&a->v, v, __ATOMIC_RELAXED); }
 
 #endif //FFAUDIO_ATOMICS_H

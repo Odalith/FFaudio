@@ -34,7 +34,7 @@
  *       au_spectrum_bands(mags, 2048, rate, 30, 16000, bands, 32);
  *
  * The first call turns the meters on (until then, a few ms, they read silence); after that they cost a copy of the
- * mix in the audio callback. Nothing here waits for the audio thread, and any thread may call them. Since 3.2.
+ * mix in the audio callback. Nothing here waits for the audio callback, and any thread may call them. Since 3.2.
  */
 
 #ifndef FFAUDIO_METERS_H

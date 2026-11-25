@@ -56,11 +56,11 @@ typedef struct SampleRing {
     RingMarker markers[RING_MARKERS];
 
     char pad0[RING_CACHE_LINE];
-    int32_t write_marker;             // markers published by the producer (atomics.h)
+    FfAtomic write_marker;            // markers published by the producer (atomics.h)
     uint32_t wpos;                    // producer only: position of the next frame
 
     char pad1[RING_CACHE_LINE];
-    int32_t read_marker;              // markers taken or dropped by the consumer (atomics.h)
+    FfAtomic read_marker;             // markers taken or dropped by the consumer (atomics.h)
     uint32_t rd;                      // consumer only: the same, not atomic
     int32_t rd_offset;                // consumer only: frames of markers[rd] already taken
     char pad2[RING_CACHE_LINE];

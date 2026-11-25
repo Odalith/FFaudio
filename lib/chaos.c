@@ -32,11 +32,7 @@
 #else
 #include <time.h>
 #endif
-#ifdef _MSC_VER
-#define CHAOS_TLS __declspec(thread)
-#else
-#define CHAOS_TLS _Thread_local
-#endif
+#define CHAOS_TLS _Thread_local // GCC and Clang (MinGW too): ffaudio is not built with MSVC
 
 static unsigned chaos_seed = 1, chaos_percent = 0, chaos_max_us = 2000;
 static FfOnce chaos_once = FF_ONCE_INIT;

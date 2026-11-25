@@ -238,7 +238,7 @@ int media_draft_from_context(MediaDraft *d, const AVFormatContext *ic, const int
 
 // The block behind an AuMediaInfo: the reference count, the struct, the tag array, then every string
 typedef struct MediaBlock {
-    SDL_atomic_t refs;
+    FfAtomic refs;
     AuMediaInfo info;
 } MediaBlock;
 
@@ -266,7 +266,7 @@ const AuMediaInfo *media_info_freeze(const MediaDraft *d) {
     const size_t head = sizeof(MediaBlock) + (size_t)n_tags * sizeof(AuTag);
     MediaBlock *b = av_malloc(head + chars);
     if (!b) return NULL;
-    SDL_AtomicSet(&b->refs, 1);
+    ffa_store(&b->refs, 1);
     AuMediaInfo *info = &b->info;
     AuTag *tags = (AuTag *)(b + 1);
     char *arena = (char *)b + head;
@@ -300,7 +300,7 @@ const AuMediaInfo *media_info_freeze(const MediaDraft *d) {
 }
 
 const AuMediaInfo *media_info_retain(const AuMediaInfo *info) {
-    if (info) SDL_AtomicIncRef(&block_of(info)->refs);
+    if (info) ffa_fetch_add(&block_of(info)->refs, 1);
     return info;
 }
 
@@ -353,7 +353,7 @@ end:
 void au_media_info_release(const AuMediaInfo *info) {
     if (!info) return;
     MediaBlock *b = block_of(info);
-    if (SDL_AtomicDecRef(&b->refs)) av_free(b);
+    if (ffa_fetch_add(&b->refs, -1) == 1) av_free(b); // the last reference
 }
 
 // Case-insensitive, like AVDictionary

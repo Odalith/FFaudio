@@ -232,7 +232,7 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 // The track's ReplayGain gain: taken as it is with the first samples, then a linear ramp for every change (10 ms, or
 // 2 s when the value arrived after the track started, e.g. a measurement that missed measure_wait_ms)
 static float track_gain_step(Mixer *m, TrackState *t, float *target_out) {
-    const int packed = SDL_AtomicGet(&t->gain_mb);
+    const int packed = ffa_load(&t->gain_mb);
     if (!t->gain_started || packed != t->gain_packed) {
         t->gain_packed = packed;
         t->gain_target = powf(10.0f, (float)gain_centi_db(packed) / 2000.0f);
@@ -287,7 +287,7 @@ static void mix_block(float *d, const float *s, const int frames, const int chan
 static void add_voice(Mixer *m, TrackState *t, float *dst, const float *src, const int frames, const int channels,
                       const FadeState *fade, const bool fading_out) {
     // A track that has produced nothing yet (its file may not even be open) must not fix its starting gain:
-    // that is read with its first samples, when the read thread has set it
+    // that is read with its first samples, when the worker has set it
     if (frames <= 0) return;
     float target;
     const float step = track_gain_step(m, t, &target);
@@ -471,7 +471,7 @@ static void tap_put(AudioPlayer *ap, const float *src, const int n, const float 
     const float dp = (p1 - p0) / (float)n;
     for (int i = 0; i < n; i++) {
         const float g = p0 + dp * (float)i;
-        int32_t *dst = tp->buf + (size_t)((w + (uint32_t)i) & mask) * ch;
+        FfAtomic *dst = tp->buf + (size_t)((w + (uint32_t)i) & mask) * ch;
         for (int c = 0; c < ch; c++) {
             const float v = src ? src[(size_t)i * ch + c] * g : 0.0f;
             int32_t bits;
@@ -484,7 +484,7 @@ static void tap_put(AudioPlayer *ap, const float *src, const int n, const float 
 
 static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
     Mixer *m = &ap->mixer;
-    const float target = SDL_AtomicGet(&ap->muted) ? 0.0f : atomic_get_float(&ap->volume);
+    const float target = ffa_load(&ap->muted) ? 0.0f : atomic_get_float(&ap->volume);
     const float step = 1.0f / (float)FFMAX(1, m->vol_ramp_frames);
     const int frame_bytes = m->channels * m->bytes_per_sample;
     uint32_t dither = m->dither_state;
@@ -518,7 +518,7 @@ static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
     }
     m->dither_state = dither;
 
-    if (!m->pause_fade.active && m->pause_to == 0.0f && SDL_AtomicGet(&ap->paused))
+    if (!m->pause_fade.active && m->pause_to == 0.0f && ffa_load(&ap->paused))
         m->frozen = true;
 }
 
@@ -534,7 +534,7 @@ static void publish_status(AudioPlayer *ap, const bool advancing, const int fram
     s.advancing = advancing;
     s.speed = t ? t->play_speed : 1.0;
     s.period = m->rate > 0 ? (double)frames / m->rate : 0;
-    s.buffering = t && SDL_AtomicGet(&t->buffering) != 0;
+    s.buffering = t && ffa_load(&t->buffering) != 0;
     s.tap_end = ffa_load_relaxed(&ap->tap.published);
     s.tap_gen = ap->tap.gen;
     // Never waits: while a getter holds the lock (a copy of a few bytes), this period's status is skipped and the
@@ -629,7 +629,7 @@ void output_set_running(AudioPlayer *ap, const bool running) {
 void output_close(AudioPlayer *ap) {
     CHAOS("output_close");
     if (ap->device_id) {
-        SDL_AtomicSet(&ap->open_device, 0);
+        ffa_store(&ap->open_device, 0);
         SDL_CloseAudioDevice(ap->device_id); // waits for a running callback
         ap->device_id = 0;
     }
@@ -679,7 +679,7 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
         }
     }
 
-    // A forced channel count / rate (AuConfig) wins over the device's preference; SDL converts
+    // A forced channel count / rate (au_set_output_format()) wins over the device's preference; SDL converts
     const bool force_channels = ap->output_channels > 0;
     const bool force_rate = ap->output_sample_rate > 0;
     wanted.freq = force_rate ? ap->output_sample_rate : (preferred.freq > 0 ? preferred.freq : 48000);
@@ -730,7 +730,7 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
     }
 
     ap->device_id = id;
-    SDL_AtomicSet(&ap->open_device, (int)id);
+    ffa_store(&ap->open_device, (int)id);
     ap->device_running = false;
 
     SDL_LockMutex(ap->format_mutex);

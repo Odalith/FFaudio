@@ -532,14 +532,14 @@ au_shutdown();   // not from on_event; au_init() may be called again afterwards
 ```
 
 ## Events and threads
-- `on_event` runs on ffaudio's control thread, one event at a time, never on the audio thread. Without it, events
+- `on_event` runs on ffaudio's control thread, one event at a time, never on the audio callback. Without it, events
   are queued for `au_poll_event()` / `au_wait_event()` (4096 at most; when the queue is full, log events are dropped
   first and `AU_EVENT_OVERFLOW` says how many).
 - No `au_*` function waits for the control thread, so every one may be called from `on_event` (except
   `au_shutdown()`); what it changes comes as later events.
 - `AU_EVENT_TRACK_ENDED` comes exactly once for every handle returned by `au_play()` / `au_queue()`.
 - Custom fade curves (`AuFadeCurveFn`) are sampled on the control thread when the fade is set up, never on the
-  audio thread.
+  audio callback.
 - Moving from 2.x: [docs/api-3.0.md](docs/api-3.0.md) has the full list of renamed and replaced functions.
 
 ## Memory use
