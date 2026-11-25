@@ -36,8 +36,8 @@
 #include <stdint.h>
 #include <math.h>
 
-#define FFAUDIO_VERSION_MAJOR 3
-#define FFAUDIO_VERSION_MINOR 2
+#define FFAUDIO_VERSION_MAJOR 4
+#define FFAUDIO_VERSION_MINOR 0
 #define FFAUDIO_VERSION_PATCH 0
 
 #ifdef __cplusplus

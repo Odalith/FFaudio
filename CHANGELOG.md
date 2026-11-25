@@ -1,5 +1,87 @@
 # Changelog
 
+## 4.0.0 (unreleased)
+
+A major release that settles the API: [docs/migrating-3-to-4.md](docs/migrating-3-to-4.md) lists every change with
+its replacement. The soname is `libffaudio.so.4`.
+
+### Removed
+- `AuConfig`: `au_init(app_name, on_event, user_data)` takes only what is fixed for the player's lifetime; every other
+  setting has its setter, and is set in that one place.
+- `AuPlayConfig`: see `AuPlayOptions` below.
+- `au_fb_build()` and `au_free()`: `au_fb_peek()` is the builder's string.
+- Static builds (`BUILD_SHARED_LIBS=OFF`, `FFAUDIO_STATIC`), the `libffaudio.so.3.0` link that let 3.0.0 programs run
+  on later 3.x, and building ffaudio with MSVC (GCC or Clang, MinGW on Windows; applications may use any compiler).
+
+### Changed
+- The output device opens when it is first needed (the first `au_play()`/`au_queue()`, or the new `au_open_device()`),
+  with the device and format chosen until then, so there is one `AU_EVENT_DEVICE` and choosing them never opens it
+  twice. A track that needs a device none can be opened for ends as an error (`AU_ERR_DEVICE`) instead of waiting.
+- `au_skip`, `au_clear_queue`, `au_stop`, `au_pause`, `au_seek`, `au_seek_fraction`, `au_set_volume`,
+  `au_set_muted`, `au_set_loop_count`, `au_shutdown`, `au_gain_scan_stop` and `au_gain_cache_clear` return an
+  `AU_RESULT` instead of nothing, and values out of range are refused rather than ignored (a loop count below -1 was
+  clamped). `au_gain_cache_remove()` returns an `AU_RESULT` instead of a bool. `au_shutdown()` from `on_event` and
+  `au_gain_scan_stop()` from `on_cached` return `AU_ERR_WRONG_THREAD`.
+- Names: `Au*Settings` for runtime settings (`AuNetworkSettings`, `AuReplayGainSettings`, `AuGainScanSettings`),
+  `AuLoudnessOptions`, callback types ending in `Fn` (`AuGainCachedFn`, `AuGainCacheVisitorFn`,
+  `AuLoudnessProgressFn`), `au_set_gain_scan()`, and `au_gain_scan_request/_request_album/_cancel/_pending` for the
+  measurement queue. `measure_streams` moved from `AuNetworkSettings` to `AuGainScanSettings`.
+- `AuEvent` has a fixed size (72 bytes; its union is padded to 64), so 4.x can add event data without breaking the
+  ABI.
+- `AuPlaylistFile.entries` is an array of pointers, so `AuPlaylistEntry` can gain fields.
+- `AU_FADE_EQUAL_POWER` is the zero value, so a fade given without a curve is equal power (it was linear, with a
+  3 dB dip in crossfades). Unknown curves, and `AU_FADE_CUSTOM` without a function, are refused.
+- `au_spectrum_read()` takes the capacity of the output array.
+- Filter builder helpers take NULL as their defaults (the equalizers and stereo refused it).
+- `AU_ERR_FILE` means a file that can not be read; `AU_ERR_UNSUPPORTED` also covers a file with nothing playable in
+  it.
+- Text that is not UTF-8 (tags, playlists, cue sheets, stream titles) is read as Windows-1252, not Latin-1, so its
+  quotes and dashes survive; the UTF-8 check is strict, and container tags (WAV/AIFF chunks) are checked too.
+- Build: SDL2 2.24 is required at configure time; `ffaudio::ffaudio` exists also with `add_subdirectory()`, where
+  tests, tools and install rules default to off; `FFAUDIO_BUILD_MANUAL_PLAYER` is `FFAUDIO_BUILD_TOOLS`; the test
+  fixtures are a CTest fixture, so a missing FFmpeg encoder fails the tests instead of the build.
+
+### Added
+- `AuPlayOptions`: per-track options as an opaque, reusable object (`au_play_options_create()`, `_free()`,
+  `_set_range()`, `_set_filters()`, `_set_fade_in()`, `_set_replaygain()`, `_set_http_headers()`). `au_play()` and
+  `au_queue()` copy it; each setter checks its value at the call.
+- `au_open_device()`.
+- `AU_EVENT_TRACK_ENDED` says why a track failed: `data.ended.error` (an `AU_RESULT`) and `data.ended.message`
+  (the text that was logged).
+- `AU_ERR_NOT_SAVED`: a ReplayGain cache change made in memory whose file could not be written. 3.x reported such
+  writes as `AU_ERR_FILE` (or not at all, from the background queue and `au_gain_cache_remove/clear()`).
+- `au_result_string()`: text for an `AU_RESULT`.
+- `AU_REPLAYGAIN_NONE` works in C++.
+
+### Fixed
+- A track's details could be lost for `au_track_info()` and `au_track_gain_db()` for the track's whole life when its
+  worker opened the file before the control thread had registered the track.
+- A thread logging through FFmpeg (a gain-scan worker, `au_probe()` on an application thread) while `au_shutdown()`
+  ran could use the freed player. A failed `au_init()` left FFmpeg's log callback installed, so FFmpeg's messages,
+  the application's own too, went nowhere; the log level `au_init()` sets is put back.
+- Gain scan: lowering the thread count waited for the workers' current jobs (a whole album), could join its own
+  thread from `on_cached`, and could start two threads on one slot. One network error kept a URL from being
+  measured for the rest of the session, a live station was opened again on every request, and an album with a
+  member that can not be measured was decoded again on every request.
+- An Ogg file with several streams at once (Vorbis with Theora, Opus with a Skeleton) whose streams end at different
+  times was taken for a chained one: not seekable, its seeks ignored. The check ran three times per open; once now.
+- `au_media_picture()` and `au_cue_read()` on a URL reconnect after a network error, as playback does.
+- `au_fb_last_error()` could report the error of an earlier call.
+- With the device opened at the first play, a short first track could ask for its successor (`AU_EVENT_PREPARE_NEXT`)
+  before an `au_queue()` made right after its `au_play()` was handled, so an application that queues on that event
+  replaced the queued track.
+- Log messages named `au_update_filtergraph` and `au_set_global_filtergraph`, which no longer exist.
+
+### Development
+- `scripts/dev/`: building every sanitizer and chaos tree, running every suite against real SDL2 and the system's
+  SDL, chaos campaigns, the lock-order scan, a golden render compared with a git ref, a lint for the real-time code
+  and the exported-symbol list (`abi/ffaudio.symbols`).
+- Forced chaos points (`FFAUDIO_CHAOS_AT`) and `test_races`, one test per race in `docs/threading.md`'s history.
+- One atomics API (`FfAtomic`): every cross-thread flag is a compiler atomic that ThreadSanitizer sees, with its
+  ordering under ffaudio's control.
+- CI: ThreadSanitizer, UndefinedBehaviorSanitizer, the real-time lint, a consumer build from C and C++, the symbol
+  list, the version check on every pull request; a nightly chaos campaign and golden render.
+
 ## 3.2.0 (2026-11-24)
 
 ### Added
@@ -105,7 +187,7 @@
 
 ## 3.0.0 (2026-11-23)
 
-The API is new; `docs/api-3.0.md` describes it and has a migration table from 2.x.
+The API is new; `docs/migrating-2-to-3.md` (then `docs/api-3.0.md`) describes it and has a migration table from 2.x.
 
 ### Changed
 - Events: one `AuEvent` (a type, the track's handle and a union) replaces the ten callbacks. It goes to

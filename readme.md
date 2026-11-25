@@ -1,7 +1,8 @@
 <img width="1815" height="150" alt="banner" src="https://github.com/user-attachments/assets/46466334-645f-4585-a24c-55f315cc892c" />
 
-⚠️ This project is in beta since 2.0.0. 3.0.0 changes the API (events, nothing that waits, plain structs, new
-names); [docs/api-3.0.md](docs/api-3.0.md) maps every 2.x function to its replacement.
+⚠️ This project is in beta since 2.0.0. 4.0.0 changes the API again (`au_init()` with plain parameters, a reusable
+options object per track, `int` results everywhere, fixed-size events): [docs/migrating-3-to-4.md](docs/migrating-3-to-4.md)
+lists every change, [docs/migrating-2-to-3.md](docs/migrating-2-to-3.md) maps 2.x to 3.0.
 
 ### FFaudio is a music playback library for C99, built on FFmpeg & SDL2.
 It started as a heavily modified FFplay, so credit for the original design goes to the FFmpeg team and contributors.
@@ -548,7 +549,9 @@ au_shutdown();   // not from on_event; au_init() may be called again afterwards
 - `AU_EVENT_TRACK_ENDED` comes exactly once for every handle returned by `au_play()` / `au_queue()`.
 - Custom fade curves (`AuFadeCurveFn`) are sampled on the control thread when the fade is set up, never on the
   audio callback.
-- Moving from 2.x: [docs/api-3.0.md](docs/api-3.0.md) has the full list of renamed and replaced functions.
+- Moving from 3.x: [docs/migrating-3-to-4.md](docs/migrating-3-to-4.md) lists every change of 4.0.
+- Moving from 2.x: [docs/migrating-2-to-3.md](docs/migrating-2-to-3.md) has the full list of renamed and replaced
+  functions (then the 3-to-4 list).
 
 ## Memory use
 Free what ffaudio returns with ffaudio's functions (`au_media_info_release()`, `au_free_devices()`,
