@@ -445,8 +445,13 @@ static void update_device_running(AudioPlayer *ap) {
 static TrackState *create_track(AudioPlayer *ap, const Msg *msg) {
     CHAOS("create_track");
     TrackState *t = track_create(ap, msg->handle, msg->str, msg->has_play_config ? &msg->play_config : NULL);
-    if (!t || !registry_add(ap, t)) {
-        if (t) track_destroy(t);
+    // Registered (and published for au_track_info()) before its worker runs: the worker publishes the file's details
+    // as soon as it has them
+    const bool registered = t && registry_add(ap, t);
+    CHAOS("create_track: registered");
+    if (!registered || track_start(t) < 0) {
+        if (registered) registry_remove(ap, t);
+        if (t) track_destroy(t); // never started: no wait
         ff_log(AU_LOG_FATAL, "Failed to create a track for '%s'", msg->str);
         note_add((AuEvent){ .type = AU_EVENT_TRACK_ENDED, .handle = msg->handle, .data.ended.reason = AU_END_ERROR });
         return NULL;

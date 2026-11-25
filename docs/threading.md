@@ -227,7 +227,7 @@ sequenceDiagram
     participant R as Reader (network)
     participant M as Audio callback
     A->>C: au_play / au_queue (Msg)
-    C->>C: create_track: TrackState, worker thread
+    C->>C: create_track: TrackState, registry + TrackPub entry, then the worker thread
     C->>M: set_current_slot / set_next_slot (device lock)
     W->>W: open_track: input, tags, gain, decoder, open_range
     W->>W: ffa_store_release(opened)
@@ -294,6 +294,7 @@ failure, opening, seek, callback end) and at the entry of the functions of the o
 |---|---|---|
 | End of a track | The worker stores `eos_serial` **after** its last frames are in the ring; the callback reads `eos_serial` **before** the ring. | Read the other way round, the last frames could be cut. |
 | A track that fails | `read_thread_fail()` / `fail_track()` store `eos_serial`, then post `MSG_TRACK_FAILED`. The control thread may see the mixer's end event first, or the failure first while the callback has already let the track go. **Whichever comes first asks for the next track** (`ask_for_next_if_idle()`): nothing current or queued, and no prepare-next sent for this track. | In either order the other path found the track dealt with and asked for nothing: playback stopped after a broken file (found on Windows, 3.2). |
+| Creating a track | `create_track()`: `track_create()` (no thread yet), `registry_add()` with its `TrackPub` entry, then `track_start()`. | The worker publishes the file's details (`ff_publish_info()`, `ff_publish_gain()`) as soon as it has them. Started before its entry existed, they were dropped, and `au_track_info()` / `au_track_gain_db()` failed for the whole track (`race_registration`). |
 | Opening | `open_range()` and the decoder are set up, then `ffa_store_release(opened)`, then `MSG_TRACK_OPENED`. `ff_publish_info()` comes before `MSG_TRACK_OPENED`. | `AU_EVENT_TRACK_OPENED` promises `au_track_info()` has the details; the callback reads `duration_s` after `opened`. |
 | Seek target | the handoff is stored after `packet_queue_flush()` and before the first packet of the new serial. | The trimmer must cut to the target for that serial, not the range start. |
 | Starting a track | The callback starts a track only once 1/10 s is decoded, the track has ended (all of it is there), or half the ring's markers are in use (`track_ready()`). | With a filter that holds audio back (adeclip) and SDL3, which asks for a lot when the device starts, the first frames played and a gap followed (3.2). |
@@ -368,3 +369,4 @@ race; everything else it showed was of the expected kinds above, and sample-exac
 | 3.2 | `handle_demux_end()` (network: the reader) wrote the worker's trim state. | Only for local files. |
 | 3.2 | A play/skip crossfade faded the old track out on a clock of its own, so a new track slower to open than the fade left a gap (chaos build on Windows; `test_crossfade_into_slow_open` reproduces it with a FIFO). | The fade-out holds until the incoming track is ready. |
 | 3.2 | `update_device_running()` read the mixer slots without the device lock while the callback did a gapless handover (found by the chaos build with TSan; it had shown up once as an unexplained `test_lifecycle` failure). | The slots are read under the device lock. |
+| after 3.2 | A track was registered for `au_track_info()` only after its worker had started; a worker quicker than the control thread published its details into nothing (found by forcing a delay at a new chaos point; `race_registration`). | Registered first, then started. |

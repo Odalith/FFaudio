@@ -329,19 +329,22 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     if (!(t->continue_read_thread = SDL_CreateCond())) goto fail;
     if (!(t->wait_mutex = SDL_CreateMutex())) goto fail;
     if (!(t->seek_mutex = SDL_CreateMutex())) goto fail;
-
-    char name[32];
-    snprintf(name, sizeof(name), "ffa_track_%d", handle);
-    if (!(t->worker_tid = SDL_CreateThread(track_thread, name, t))) {
-        ff_log(AU_LOG_FATAL, "SDL_CreateThread(): %s", SDL_GetError());
-        goto fail;
-    }
-    CHAOS("create_track: worker started");
     return t;
 
 fail:
     track_destroy(t);
     return NULL;
+}
+
+int track_start(TrackState *t) {
+    char name[32];
+    snprintf(name, sizeof(name), "ffa_track_%d", t->handle);
+    if (!(t->worker_tid = SDL_CreateThread(track_thread, name, t))) {
+        ff_log(AU_LOG_FATAL, "SDL_CreateThread(): %s", SDL_GetError());
+        return -1;
+    }
+    CHAOS("create_track: worker started");
+    return 0;
 }
 
 static void free_stream_meta(StreamMeta *m) {
