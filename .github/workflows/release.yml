@@ -7,6 +7,10 @@ name: Release
 on:
   push:
     tags: [ 'v*' ]
+    # Caches are only shared from the default branch: a run on master after the dependencies change stores the
+    # FFmpeg builds where every pull request and tag finds them (a pull request's own cache is its own)
+    branches: [ master ]
+    paths: [ 'scripts/build-deps.sh', '.github/workflows/release.yml' ]
   pull_request:
     paths: [ '.github/workflows/release.yml', 'scripts/**', 'CMakeLists.txt', 'ffaudio.pc.in', 'tests/release_smoke.c' ]
   workflow_dispatch:
@@ -71,9 +75,11 @@ jobs:
           sudo chown -R "$USER" ~/apt-cache
 
       # FFmpeg and soxr only change with scripts/build-deps.sh
-      - name: Cache dependency builds
+      # Restored and saved in two steps: actions/cache saves only when the whole job succeeds, so a failing test threw
+      # a fresh FFmpeg build away
+      - name: Restore dependency builds
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: deps
           key: deps-linux-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
@@ -83,6 +89,13 @@ jobs:
         run: |
           scripts/build-deps.sh deps/prefix deps/work
           find deps/work -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +   # keep only the source tarballs
+
+      - name: Save dependency builds
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       - name: Build ffaudio
         run: |
@@ -152,9 +165,11 @@ jobs:
             mingw-w64-ucrt-x86_64-libbs2b
             mingw-w64-ucrt-x86_64-ffmpeg
 
-      - name: Cache dependency builds
+      # Restored and saved in two steps: actions/cache saves only when the whole job succeeds, so a failing test threw
+      # a fresh FFmpeg build away
+      - name: Restore dependency builds
         id: deps
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: deps
           key: deps-windows-x86_64-${{ hashFiles('scripts/build-deps.sh') }}
@@ -166,6 +181,13 @@ jobs:
         run: |
           scripts/build-deps.sh deps/prefix deps/work
           find deps/work -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+
+      - name: Save dependency builds
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
 
       - name: Build ffaudio
         run: |
