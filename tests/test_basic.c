@@ -2,6 +2,7 @@
  * Basic behavioural tests: playback to EOF, formats, bad inputs, queueing, pause, seek, stop, loop.
  */
 #include "test_common.h"
+#include "../lib/ffaudio_meters.h"
 #include <math.h>
 
 static void test_play_to_eof(void) {
@@ -73,13 +74,41 @@ static void test_queue_next(void) {
 }
 
 // au_set_prepare_next(): the event comes that long before the end
-static double prepare_position = -1;            // guarded by tc_mutex: written on the control thread
+// The position heard when AU_EVENT_PREPARE_NEXT came, recorded by a hook on the control thread (guarded by tc_mutex).
+// The event counter is bumped before the hook runs, so a test waits for the hook's own value (wait_prepare_position()),
+// not just for the counter: under chaos delays it read the value before the hook wrote it.
+static double prepare_position = -1;
+static bool prepare_recorded = false;
 static void record_prepare_position(void) {
     AuStatus s;
     au_get_status(&s);
     SDL_LockMutex(tc_mutex);
-    prepare_position = s.position;
+    if (!prepare_recorded) {
+        prepare_position = s.position;
+        prepare_recorded = true;
+    }
     SDL_UnlockMutex(tc_mutex);
+}
+
+static void watch_prepare_position(void) {
+    SDL_LockMutex(tc_mutex);
+    prepare_position = -1;
+    prepare_recorded = false;
+    tc_on_prepare_next_hook = record_prepare_position;
+    SDL_UnlockMutex(tc_mutex);
+}
+
+// The recorded position, -1 when no prepare-next came within ms
+static double wait_prepare_position(const int ms) {
+    for (int t = 0; t <= ms; t += 5) {
+        SDL_LockMutex(tc_mutex);
+        const bool got = prepare_recorded;
+        const double at = prepare_position;
+        SDL_UnlockMutex(tc_mutex);
+        if (got) return at;
+        tc_sleep_ms(5);
+    }
+    return -1;
 }
 
 static void test_prepare_next_setter(void) {
@@ -88,17 +117,13 @@ static void test_prepare_next_setter(void) {
     CHECK(au_set_prepare_next(NAN) == AU_ERR_INVALID_ARGUMENT);
     CHECK(au_set_prepare_next(INFINITY) == AU_ERR_INVALID_ARGUMENT);
     CHECK(au_set_prepare_next(1.5) == AU_OK);
-    SDL_LockMutex(tc_mutex);
-    tc_on_prepare_next_hook = record_prepare_position;
-    SDL_UnlockMutex(tc_mutex);
+    watch_prepare_position();
 
     au_play(fx("long_6s.flac"), NULL);           // the default 10 s would send it at the start
     tc_sleep_ms(2500);
     CHECK(tc_snapshot().prepare_next == 0);
     CHECK(TC_WAIT_FIELD(prepare_next, 1, 6000));
-    SDL_LockMutex(tc_mutex);
-    const double at = prepare_position;
-    SDL_UnlockMutex(tc_mutex);
+    const double at = wait_prepare_position(1000);
     printf("   prepare-next at %.2f s of 6\n", at);
     CHECK(at > 4.2 && at < 4.8);
     CHECK(TC_WAIT_FIELD(eof, 1, 4000));
@@ -134,6 +159,111 @@ static void test_output_format_setter(void) {
     CHECK(TC_WAIT_FIELD(eof, 1, 9000));
     const TcEvents e = tc_snapshot();
     CHECK(e.eof_error == 0 && e.device_failed == 0);
+}
+
+// A range plays like its own track: positions, seeks, events and prepare-next count from its start
+static void test_range_time(void) {
+    CHECK(au_set_prepare_next(1.0) == AU_OK);
+    watch_prepare_position();
+    const AuPlayConfig pc = { .start_seconds = 2.0, .length_seconds = 3.0 };
+    const int32_t h = au_play(fx("long_6s.flac"), &pc);
+    CHECK(TC_WAIT_FIELD(opened, 1, 3000));
+    TcEvents e = tc_snapshot();
+    printf("   opened: duration %.3f\n", e.opened_duration);
+    CHECK(fabs(e.opened_duration - 3.0) < 1e-6);
+    tc_sleep_ms(300);
+    AuStatus s;
+    au_get_status(&s);
+    printf("   0.3 s in: position %.3f, duration %.3f\n", s.position, s.duration);
+    CHECK(s.handle == h && s.position >= 0 && s.position < 1.0 && fabs(s.duration - 3.0) < 1e-6);
+
+    au_seek(1.0);
+    CHECK(TC_WAIT_FIELD(restart, 1, 2000));
+    tc_sleep_ms(100);
+    au_get_status(&s);
+    printf("   after seek(1): position %.3f\n", s.position);
+    CHECK(s.position >= 0.95 && s.position < 1.6);
+    au_seek_fraction(0.5);
+    CHECK(TC_WAIT_FIELD(restart, 2, 2000));
+    tc_sleep_ms(100);
+    au_get_status(&s);
+    printf("   after fraction 0.5: position %.3f\n", s.position);
+    CHECK(s.position >= 1.45 && s.position < 2.1);
+
+    CHECK(TC_WAIT_FIELD(prepare_next, 1, 3000));
+    const double at = wait_prepare_position(1000);
+    printf("   prepare-next at %.2f (1 s before the end of 3)\n", at);
+    CHECK(at > 1.8 && at < 2.2);
+    au_seek(5.0);                               // past the end: clamped, the track ends
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    e = tc_snapshot();
+    CHECK(e.eof_error == 0);
+
+    SDL_LockMutex(tc_mutex);
+    tc_on_prepare_next_hook = NULL;
+    SDL_UnlockMutex(tc_mutex);
+    CHECK(au_set_prepare_next(10) == AU_OK);
+
+    // A start past the end of the file plays nothing and ends cleanly
+    const AuPlayConfig past = { .start_seconds = 60.0 };
+    au_play(fx("long_6s.flac"), &past);
+    CHECK(TC_WAIT_FIELD(eof, 2, 3000));
+    CHECK(tc_snapshot().eof_error == 0);
+}
+
+// Readers of the meters while the output format changes under them: the tap is remade for every format
+static SDL_atomic_t meter_stop;
+static int meter_reader(void *arg) {
+    int *reads = arg;
+    AuSpectrum *sp = au_spectrum_create(1024);
+    static float mags[513];
+    while (!SDL_AtomicGet(&meter_stop)) {
+        AuLevels lv;
+        if (au_get_levels(0.02, &lv) == AU_OK) (*reads)++;
+        if (lv.channels > 8 || lv.peak[0] > 2.0f) (*reads) = -1000000;   // garbage
+        int rate;
+        if (sp && au_spectrum_read(sp, -1, mags, &rate) == AU_OK && mags[20] > 2.0f) (*reads) = -1000000;
+        SDL_Delay(1);
+    }
+    au_spectrum_free(sp);
+    return 0;
+}
+
+static void test_meters_during_format_changes(void) {
+    int reads = 0;
+    SDL_AtomicSet(&meter_stop, 0);
+    SDL_Thread *th = SDL_CreateThread(meter_reader, "meter_reader", &reads);
+    REQUIRE(th);
+    au_play(fx("long_6s.flac"), NULL);
+    CHECK(TC_WAIT_FIELD(started, 1, 3000));
+    for (int i = 0; i < 20; i++) {
+        CHECK(au_set_output_format(i % 2 ? 6 : 2, i % 4 < 2 ? 48000 : 44100) == AU_OK);
+        CHECK(TC_WAIT_FIELD(device, i + 1, 3000));
+        tc_sleep_ms(30);
+    }
+    SDL_AtomicSet(&meter_stop, 1);
+    SDL_WaitThread(th, NULL);
+    printf("   %d reads while the format changed 20 times\n", reads);
+    CHECK(reads > 50);
+    au_stop();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+    CHECK(au_set_output_format(0, 0) == AU_OK);
+    CHECK(TC_WAIT_FIELD(device, 21, 3000));
+}
+
+// A track that can not be played (cover art in a music folder) and was started with au_play(), nothing queued: the
+// application must hear AU_EVENT_PREPARE_NEXT to start the next one. Found on Windows: the end of a failed track
+// could reach the control thread before its failure, and then no prepare-next came and playback stopped.
+static void test_failed_track_asks_for_next(void) {
+    int missed = 0;
+    for (int i = 0; i < 40; i++) {
+        tc_reset_events();
+        au_play(fx("not_audio.bin"), NULL);
+        CHECK(TC_WAIT_FIELD(eof, 1, 3000));
+        if (!TC_WAIT_FIELD(prepare_next, 1, 1000)) missed++;
+    }
+    printf("   prepare-next missing after %d of 40 failed tracks\n", missed);
+    CHECK(missed == 0);
 }
 
 static void test_skip_to_next(void) {
@@ -265,8 +395,11 @@ int main(int argc, char **argv) {
     RUN_TEST(test_all_formats);
     RUN_TEST(test_bad_inputs);
     RUN_TEST(test_queue_next);
+    RUN_TEST(test_failed_track_asks_for_next);
     RUN_TEST(test_prepare_next_setter);
     RUN_TEST(test_output_format_setter);
+    RUN_TEST(test_range_time);
+    RUN_TEST(test_meters_during_format_changes);
     RUN_TEST(test_skip_to_next);
     RUN_TEST(test_pause_resume);
     RUN_TEST(test_seek);

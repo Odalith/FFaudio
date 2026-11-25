@@ -19,6 +19,7 @@
  */
 
 #include "packet_queue_utils.h"
+#include "chaos.h"
 
 int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
 {
@@ -45,6 +46,7 @@ int packet_queue_put_private(PacketQueue *q, AVPacket *pkt)
 
 int packet_queue_put(PacketQueue *q, AVPacket *pkt)
 {
+    CHAOS("packet_queue_put");
     AVPacket *pkt1;
     int ret;
 
@@ -96,6 +98,7 @@ int packet_queue_init(PacketQueue *q)
 
 void packet_queue_flush(PacketQueue *q)
 {
+    CHAOS("packet_queue_flush");
     MyAVPacketList pkt1;
 
     SDL_LockMutex(q->mutex);
@@ -123,6 +126,7 @@ void packet_queue_destroy(PacketQueue *q)
 
 void packet_queue_abort(PacketQueue *q)
 {
+    CHAOS("packet_queue_abort");
     SDL_LockMutex(q->mutex);
 
     q->abort_request = 1;
@@ -146,6 +150,7 @@ void packet_queue_start(PacketQueue *q)
 /* return < 0 if aborted, 0 if no packet and > 0 if packet.  */
 int packet_queue_get(PacketQueue *q, AVPacket *pkt, int block, int *serial)
 {
+    CHAOS("packet_queue_get");
     MyAVPacketList pkt1;
     int ret;
 

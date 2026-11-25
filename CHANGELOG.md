@@ -1,5 +1,69 @@
 # Changelog
 
+## 3.2.0 (2026-11-24)
+
+### Added
+- Level meters (`ffaudio_meters.h`): `au_get_levels(window_seconds, &levels)` gives peak and RMS per channel of what is
+  being heard (the device's latency taken off): the mix after ReplayGain, fades and crossfades, before the master
+  volume and mute, silent while paused or idle. The audio callback copies the mix into a history buffer it never
+  waits on; readers on any thread copy from it and check it was not overwritten. The first call turns this on.
+- Spectrum: `au_spectrum_create(fft_size)` makes an analyzer (FFmpeg's `av_tx` real FFT, a Hann window, 256 to 16384
+  points) that `au_spectrum_read()` runs over the same heard signal, per channel or all channels at once (their power
+  averaged), as magnitudes scaled so a full-scale sine reads 1.0; `au_spectrum_bands()` groups them into log-spaced
+  bands for bar visualizers. The FFT runs on the caller's thread.
+- Cue sheets and chapters (`ffaudio_playlist.h`): `au_cue_read()` reads the tracks of a `.cue` file, of an audio file
+  with an embedded cue sheet (the `CUESHEET` tag, or a FLAC `CUESHEET` block, read for its exact `INDEX 01`), or of an
+  audio file's chapters (M4B/M4A, Matroska, MP3 `CHAP`), as an `AuCueSheet` of `AuCueTrack`s: path, start and length
+  for `AuPlayConfig`, title, performer, songwriter, ISRC and the sheet's `REM REPLAYGAIN_*` values. `au_cue_parse()`
+  takes text in memory, `au_cue_release()` frees it. Tracks are reached through pointers (`tracks[i]`), so
+  `AuCueTrack` can gain fields. A FILE that is missing is looked for with other audio extensions next to it.
+
+### Development
+- `docs/threading.md`: the threading reference. Every thread, lock, condition, semaphore and atomic, the lock order,
+  ownership, lifecycles and the hand-offs that must happen in order; kept up to date with the code.
+- A chaos build (`-DFFAUDIO_CHAOS=ON`, testing only): random delays at the points where threads hand state over
+  (`FFAUDIO_CHAOS="seed:percent:max_us"`), to make races show up in tests.
+
+### Changed
+- FFmpeg's own messages (its errors, e.g. "Failed to send close message" when a TLS stream is stopped) come as
+  `AU_EVENT_LOG` warnings, as "FFmpeg <part>: ...", instead of being printed to the application's stderr. ffaudio
+  sets FFmpeg's log callback in `au_init()` and puts the default back in `au_shutdown()`.
+- The manual test player (`tests/manual_player.c`) builds and runs on Windows too: single keys in the console,
+  UTF-8 paths and arguments.
+
+### Fixed
+- Writing to the ReplayGain cache on Windows (`au_gain_cache_set()`, each measurement) opened and closed the cache
+  file for every entry, about 19 ms each on a slower laptop (20000 entries took 6 minutes). The file now stays open
+  between entries as on Linux, shared so that another program's compaction can still replace it, and each write
+  checks it is still the file at the path. The two-process cache test now runs on Windows too.
+- A crossfade on play or skip (`AuCrossfade.on_play` / `.on_skip`) into a track slower to open than the fade (a network
+  stream, a slow disk, a busy machine) faded the old track out before the new one started, leaving silence. The old
+  track now holds at the gain its fade has reached until the new one can play. Found with the chaos build on Windows.
+- A data race: the control thread decided whether the output device should run from the mixer slots read without the
+  device lock, while the audio callback changed them in a gapless handover. Found with the new chaos build under
+  ThreadSanitizer.
+- Play ranges (`AuPlayConfig.start_seconds` / `.length_seconds`) and seeks are exact to the sample. A range used to
+  start at the nearest packet and end up to a packet late; now consecutive ranges of one file join with nothing
+  missing or doubled, also when the file is resampled to the device's rate (each side of the join keeps a little
+  audio for the resampler and the exact cut is made after it). Lossy files decode from a little earlier (their
+  preroll), so seeks and range starts match playing straight through.
+- A range now plays like a track of its own: the position, `au_seek()`, `AU_EVENT_RESTARTED`, prepare-next and the
+  end crossfade count from the range's start, as the duration and `au_seek_fraction()` already did (positions used to
+  be file time).
+- Loops of tracks shorter than half a second are reported (`AU_EVENT_RESTARTED` with `from_loop`).
+- A track that could not be played (cover art in a music folder, a damaged file) and was the current one with
+  nothing queued could end without `AU_EVENT_PREPARE_NEXT`, so a player that queues on that event stopped there. Its
+  end and its failure reach the control thread separately, and in either order one of them found the track already
+  dealt with and asked nothing. Now whichever comes first asks for the next track when nothing plays or is queued and
+  nobody asked yet. Found on Windows.
+- A track no longer starts with only its first frames decoded: it waits for 1/10 s (or all of it, if shorter). With
+  a filter that holds audio back (`adeclip`) and SDL3 (or sdl2-compat, as the Windows release uses), which asks for
+  a lot of audio at once when the device starts, the first frames played and then 33 ms of silence followed.
+- A seek the demuxer can not do (some FLAC files without a seek table, close to their end) decodes from the start up
+  to the target instead of playing nothing.
+- `au_playlist_read()` / `au_playlist_parse()` refuse cue sheets with `AU_ERR_UNSUPPORTED` (their lines used to be
+  read as paths).
+
 ## 3.1.0 (2026-11-23)
 
 ### Added

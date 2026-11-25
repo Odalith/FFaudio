@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ffAudio VERSION 3.1.0 LANGUAGES C)
+project(ffAudio VERSION 3.2.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -8,8 +8,9 @@ include(GNUInstallDirs)
 
 option(BUILD_SHARED_LIBS "Build ffaudio as a shared library" ON)
 option(FFAUDIO_BUILD_TESTS "Build the headless test suite" ON)
-option(FFAUDIO_BUILD_MANUAL_PLAYER "Build the interactive manual test player (POSIX only)" ON)
+option(FFAUDIO_BUILD_MANUAL_PLAYER "Build the interactive manual test player (and, on POSIX, the soak test)" ON)
 option(FFAUDIO_INSTALL "Generate install rules" ON)
+option(FFAUDIO_CHAOS "Testing only: random delays at the points where threads hand state over (lib/chaos.h), to find races" OFF)
 option(FFAUDIO_RELOCATABLE "Linux/macOS: look for dependencies next to libffaudio first (RUNPATH $ORIGIN), for archives that bundle them" OFF)
 set(FFAUDIO_SANITIZER "" CACHE STRING "Sanitizer to build with: address, thread, undefined, none or empty")
 
@@ -55,7 +56,8 @@ set(FFAUDIO_PUBLIC_HEADERS
         lib/ffaudio.h
         lib/ffaudio_filters.h
         lib/ffaudio_loudness.h
-        lib/ffaudio_playlist.h)
+        lib/ffaudio_playlist.h
+        lib/ffaudio_meters.h)
 
 add_library(ffaudio
         ${FFAUDIO_PUBLIC_HEADERS}
@@ -70,6 +72,9 @@ add_library(ffaudio
         lib/input.c
         lib/ogg_chain.c
         lib/playlist.c
+        lib/text_list.c
+        lib/cue.c
+        lib/meters.c
         lib/picture.c
         lib/numbers.c
         lib/events.c
@@ -108,6 +113,10 @@ if(NOT WIN32)
 endif()
 
 target_compile_definitions(ffaudio PRIVATE FFAUDIO_BUILDING)
+if(FFAUDIO_CHAOS)
+    target_sources(ffaudio PRIVATE lib/chaos.c)
+    target_compile_definitions(ffaudio PRIVATE FFAUDIO_CHAOS)
+endif()
 if(NOT BUILD_SHARED_LIBS)
     target_compile_definitions(ffaudio PUBLIC FFAUDIO_STATIC)
 endif()
@@ -200,8 +209,10 @@ function(ffaudio_test_exe name src)
     set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 endfunction()
 
-if(FFAUDIO_BUILD_MANUAL_PLAYER AND NOT WIN32)
+if(FFAUDIO_BUILD_MANUAL_PLAYER)
     ffaudio_test_exe(manual_player tests/manual_player.c)
+endif()
+if(FFAUDIO_BUILD_MANUAL_PLAYER AND NOT WIN32)
     # Long-running soak test with memory sampling (Linux /proc); not part of CTest
     ffaudio_test_exe(soak tests/soak.c)
     target_link_libraries(soak PRIVATE Threads::Threads)
@@ -239,7 +250,7 @@ if(FFAUDIO_BUILD_TESTS)
         if(WIN32)
             string(APPEND FFAUDIO_TEST_DATA_ENV ";LOCALAPPDATA=${CMAKE_BINARY_DIR}/localappdata")
         endif()
-        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network test_playlist)
+        foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network test_playlist test_cue)
             ffaudio_test_exe(${t} tests/${t}.c)
             add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})

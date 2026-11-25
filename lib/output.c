@@ -19,7 +19,8 @@
 /*
  * Output device and mixer.
  *
- * The SDL callback runs with the device lock held. It never blocks, allocates, frees or signals: it
+ * The SDL callback runs with the device lock held. It never blocks, allocates or frees (it posts the control
+ * thread's semaphore, which never blocks, only when it has an event for it): it
  * takes float frames from the rings of the tracks in the mixer slots (lib/sample_ring.c), applies fades
  * and gain, and converts to the device format (with TPDF dither for integer formats). The status for the
  * getters goes out with a try-lock that skips a period rather than wait. Slot changes it makes itself (gapless
@@ -30,6 +31,7 @@
 #include "track.h"
 #include <limits.h>
 #include <math.h>
+#include "chaos.h"
 
 #define VOLUME_RAMP_SECONDS 0.010
 
@@ -171,8 +173,8 @@ static double planned_end_fade(Mixer *m, const FadeCurve **curve_out, double *re
 
     // Everything below is in output (wall clock) seconds: file seconds / playback speed
     const double speed = cur->play_speed > 0 ? cur->play_speed : 1.0;
-    const double end = track_end_position(cur);
-    const double cur_len = track_duration(cur) / speed;
+    const double end = track_duration(cur); // positions count from 0: the track ends at its duration
+    const double cur_len = end / speed;
     if (end < 0 || cur_len < 0) return 0; // unknown length: play gapless instead
 
     const double min_len = m->min_track_seconds > 0 ? m->min_track_seconds : 2.0 * fade->seconds;
@@ -201,6 +203,7 @@ static int frames_until_end_crossfade(Mixer *m) {
 }
 
 static void maybe_start_end_crossfade(AudioPlayer *ap) {
+    CHAOS_RT("maybe_start_end_crossfade");
     Mixer *m = &ap->mixer;
     const FadeCurve *curve = NULL;
     double remaining = 0;
@@ -222,6 +225,8 @@ static void maybe_start_end_crossfade(AudioPlayer *ap) {
 // Frames per gain step: gains are exact at the edges of a block and linear in between (a 0.5 s equal-power fade is
 // then within 3e-6 of its curve), so the inner loops are a multiply-add per sample
 #define GAIN_BLOCK 64
+// How much slower a held fade runs (render_outgoing()): its gain then stays put for a block
+#define FADE_HOLD_SCALE ((int64_t)1 << 20)
 
 // The track's ReplayGain gain: taken as it is with the first samples, then a linear ramp for every change (10 ms, or
 // 2 s when the value arrived after the track started, e.g. a measurement that missed measure_wait_ms)
@@ -298,11 +303,30 @@ static void add_voice(Mixer *m, TrackState *t, float *dst, const float *src, con
 }
 
 static void render_outgoing(AudioPlayer *ap, const int frames) {
+    CHAOS_RT("render_outgoing");
     Mixer *m = &ap->mixer;
     TrackState *t = m->outgoing;
     if (!t) return;
 
     bool eos = false, looped = false;
+    // The track it crossfades into can not play yet (its file may still be opening, a stream still buffering): the
+    // old one goes on at the gain its fade has reached, instead of fading out into silence first. A queued track that
+    // is ready (an end crossfade) does not hold it.
+    // The fade copy runs a million times slower, so its gain stays put within the block without a step.
+    const bool hold = m->current && !track_ready(m->current, m->rate, m->channels);
+    if (hold) {
+        FadeState held = m->out_fade;
+        held.pos *= FADE_HOLD_SCALE;
+        held.len *= FADE_HOLD_SCALE;
+        const int got = track_pull(t, m->voice_buf, frames, m->rate, m->channels, &eos, &looped);
+        add_voice(m, t, m->mix_buf, m->voice_buf, got, m->channels, &held, true);
+        if (eos) {
+            m->out_fade.active = false;
+            m->outgoing = NULL;
+            push_event(m, MIX_EV_FADE_DONE, t, t->position);
+        }
+        return;
+    }
     const int64_t left = m->out_fade.len - m->out_fade.pos;
     const int want = (int)FFMIN((int64_t)frames, FFMAX(0, left));
     const int got = want > 0 ? track_pull(t, m->voice_buf, want, m->rate, m->channels, &eos, &looped) : 0;
@@ -318,6 +342,7 @@ static void render_outgoing(AudioPlayer *ap, const int frames) {
 
 // Returns the number of frames the current track(s) produced
 static int render_current(AudioPlayer *ap, const int frames) {
+    CHAOS_RT("render_current");
     Mixer *m = &ap->mixer;
     int pos = 0;
 
@@ -348,6 +373,7 @@ static int render_current(AudioPlayer *ap, const int frames) {
             m->current = NULL;
             m->in_fade.active = false;
             push_event(m, MIX_EV_TRACK_ENDED, t, t->position);
+            CHAOS_RT("callback: track ended, next not current yet");
             if (m->next) {
                 m->current = m->next;
                 m->next = NULL;
@@ -431,6 +457,30 @@ static inline float pause_gain_at(const Mixer *m, const int64_t k) {
 }
 
 // Volume (with its 10 ms ramp), the pause fade, clamping and the device format, in one pass over the mix
+// Copy n mixed frames (NULL = silence) into the meter tap at a pause gain going from p0 to p1. Never waits.
+static void tap_put(AudioPlayer *ap, const float *src, const int n, const float p0, const float p1) {
+    CHAOS_RT("tap_put");
+    MeterTap *tp = &ap->tap;
+    if (!tp->buf || n <= 0 || tp->channels != ap->mixer.channels || tp->rate != ap->mixer.rate) return;
+    const uint32_t w = (uint32_t)ffa_load_relaxed(&tp->written);
+    // Counted first: a reader that sees any of the new data then sees this too, and knows what was overwritten
+    ffa_store_relaxed(&tp->written, (int32_t)(w + (uint32_t)n));
+    const int ch = tp->channels;
+    const uint32_t mask = tp->frames - 1;
+    const float dp = (p1 - p0) / (float)n;
+    for (int i = 0; i < n; i++) {
+        const float g = p0 + dp * (float)i;
+        int32_t *dst = tp->buf + (size_t)((w + (uint32_t)i) & mask) * ch;
+        for (int c = 0; c < ch; c++) {
+            const float v = src ? src[(size_t)i * ch + c] * g : 0.0f;
+            int32_t bits;
+            memcpy(&bits, &v, sizeof(bits));
+            ffa_store_release(&dst[c], bits);
+        }
+    }
+    ffa_store_release(&tp->published, (int32_t)(w + (uint32_t)n));
+}
+
 static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
     Mixer *m = &ap->mixer;
     const float target = SDL_AtomicGet(&ap->muted) ? 0.0f : atomic_get_float(&ap->volume);
@@ -445,10 +495,12 @@ static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
         if (v0 != target) n = FFMIN(n, FFMAX(1, (int)ceilf(fabsf(target - v0) / step)));
         if (m->pause_fade.active) n = (int)FFMIN((int64_t)n, FFMAX(1, m->pause_fade.len - m->pause_fade.pos));
         const float vstep = v0 < target ? step : -step;
-        const float g0 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, 1) * pause_gain_at(m, 0);
-        const float g1 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, n + 1) * pause_gain_at(m, n);
+        const float p0 = pause_gain_at(m, 0), p1 = pause_gain_at(m, n);
+        const float g0 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, 1) * p0;
+        const float g1 = ramp_at(v0, v0 == target ? 0.0f : vstep, target, n + 1) * p1;
         write_block(m, out + (size_t)b * frame_bytes, m->mix_buf + (size_t)b * m->channels, n, g0,
                     (g1 - g0) / (float)n, &dither);
+        tap_put(ap, m->mix_buf + (size_t)b * m->channels, n, p0, p1); // the meters: before volume and mute
 
         m->vol_gain = ramp_at(v0, v0 == target ? 0.0f : vstep, target, n);
         if (m->pause_fade.active) {
@@ -470,6 +522,7 @@ static void output_pass(AudioPlayer *ap, Uint8 *out, const int frames) {
 }
 
 static void publish_status(AudioPlayer *ap, const bool advancing, const int frames) {
+    CHAOS_RT("publish_status");
     Mixer *m = &ap->mixer;
     TrackState *t = m->current;
     StatusSnapshot s;
@@ -481,6 +534,8 @@ static void publish_status(AudioPlayer *ap, const bool advancing, const int fram
     s.speed = t ? t->play_speed : 1.0;
     s.period = m->rate > 0 ? (double)frames / m->rate : 0;
     s.buffering = t && SDL_AtomicGet(&t->buffering) != 0;
+    s.tap_end = ffa_load_relaxed(&ap->tap.published);
+    s.tap_gen = ap->tap.gen;
     // Never waits: while a getter holds the lock (a copy of a few bytes), this period's status is skipped and the
     // next one, a period later, is published instead
     if (SDL_TryLockMutex(ap->status_mutex) == 0) {
@@ -490,6 +545,7 @@ static void publish_status(AudioPlayer *ap, const bool advancing, const int fram
 }
 
 static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
+    CHAOS_RT("sdl_audio_callback");
     AudioPlayer *ap = opaque;
     Mixer *m = &ap->mixer;
     const int frame_bytes = m->channels * m->bytes_per_sample;
@@ -520,6 +576,7 @@ static void sdl_audio_callback(void *opaque, Uint8 *stream, int len) {
         else {
             // Paused and faded out: silence, without dither noise
             memset(stream + (size_t)done * frame_bytes, m->format == AUDIO_U8 ? 0x80 : 0, (size_t)n * frame_bytes);
+            tap_put(ap, NULL, n, 0.0f, 0.0f); // the meters keep time with the device
         }
         done += n;
     }
@@ -561,12 +618,14 @@ static bool format_supported(const SDL_AudioFormat f) {
 }
 
 void output_set_running(AudioPlayer *ap, const bool running) {
+    CHAOS("output_set_running");
     if (!ap->device_id || ap->device_running == running) return;
     ap->device_running = running;
     SDL_PauseAudioDevice(ap->device_id, running ? 0 : 1);
 }
 
 void output_close(AudioPlayer *ap) {
+    CHAOS("output_close");
     if (ap->device_id) {
         SDL_AtomicSet(&ap->open_device, 0);
         SDL_CloseAudioDevice(ap->device_id); // waits for a running callback
@@ -585,6 +644,7 @@ void output_close(AudioPlayer *ap) {
 }
 
 int output_open(AudioPlayer *ap, const bool use_default, const char *device_name, const int device_index) {
+    CHAOS("output_open");
     SDL_AudioSpec preferred = {0}, wanted = {0}, obtained = {0};
     char *in_use = NULL;
 

@@ -41,6 +41,7 @@
 #include "once.h"
 #include "numbers.h"
 #include "events.h"
+#include "chaos.h"
 
 
 // The control thread sleeps until a message or a mixer event wakes it, or for this long: while tracks are loaded
@@ -70,6 +71,7 @@ static void msg_free(Msg *m) {
 }
 
 static void msg_post(AudioPlayer *ap, Msg *m) {
+    CHAOS("msg_post");
     SDL_LockMutex(ap->msg_mutex);
     m->next = NULL;
     if (ap->msg_tail) ap->msg_tail->next = m;
@@ -98,6 +100,7 @@ static SDL_mutex *lifecycle_mutex(void) {
 }
 
 void ff_gain_cache_changed(const char *path) {
+    CHAOS("ff_gain_cache_changed");
     SDL_mutex *lock = lifecycle_mutex();
     if (!lock) return;
     SDL_LockMutex(lock);
@@ -113,7 +116,29 @@ void ff_gain_cache_changed(const char *path) {
     SDL_UnlockMutex(lock);
 }
 
+// FFmpeg's own messages, as AU_EVENT_LOG instead of lines on the application's stderr. Their levels are one step
+// down: an FFmpeg error (a damaged packet, a TLS close the server did not answer) is something a player gets past.
+// Only what av_log_get_level() lets through (errors, see au_init()) comes here.
+static void ffmpeg_log(void *avcl, const int level, const char *fmt, va_list vl) {
+    if (level > av_log_get_level() || !audio_player) return;
+    char msg[1024];
+    vsnprintf(msg, sizeof(msg), fmt, vl);
+    size_t n = strlen(msg);
+    while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r' || msg[n - 1] == ' ')) msg[--n] = '\0';
+    if (n == 0) return;
+    const AVClass *cls = avcl ? *(const AVClass *const *)avcl : NULL;
+    const char *name = cls && cls->item_name ? cls->item_name(avcl) : NULL;
+    const AU_LOG_LEVEL l = level <= AV_LOG_FATAL ? AU_LOG_ERROR : level <= AV_LOG_ERROR ? AU_LOG_WARNING : AU_LOG_INFO;
+    if (name && name[0]) ff_log(l, "FFmpeg %s: %s", name, msg);
+    else ff_log(l, "FFmpeg: %s", msg);
+}
+
+AudioPlayer *ff_player(void) {
+    return audio_player;
+}
+
 void ff_post_track_msg(const MsgType type, const int32_t handle, const double d) {
+    CHAOS("ff_post_track_msg");
     AudioPlayer *ap = audio_player;
     if (!ap) return;
     Msg *m = msg_new(type);
@@ -165,6 +190,7 @@ typedef struct NoteList {
 static NoteList notes;  // control thread only
 
 static void note_add_owned(const AuEvent ev, char *s1, char *s2) {
+    CHAOS("note_add_owned");
     if (notes.n == notes.cap) {
         const int cap = notes.cap ? notes.cap * 2 : 32;
         Note *items = av_realloc_array(notes.items, cap, sizeof(Note));
@@ -180,6 +206,7 @@ static void note_add(const AuEvent ev) {
 }
 
 static void dispatch_notes(AudioPlayer *ap) {
+    CHAOS("dispatch_notes");
     // Each note is copied out before it is delivered: the list may grow meanwhile (notes added during this pass are
     // delivered in it too)
     for (int i = 0; i < notes.n; i++) {
@@ -250,6 +277,7 @@ static void pub_clear(AudioPlayer *ap) {
 }
 
 void ff_publish_info(AudioPlayer *ap, const int32_t handle, const AuMediaInfo *info) {
+    CHAOS("ff_publish_info");
     const AuMediaInfo *ref = media_info_retain(info);
     SDL_LockMutex(ap->pub_mutex);
     TrackPub *p = pub_find(ap, handle);
@@ -265,6 +293,7 @@ void ff_publish_info(AudioPlayer *ap, const int32_t handle, const AuMediaInfo *i
 }
 
 void ff_publish_gain(AudioPlayer *ap, const int32_t handle, const double gain_db) {
+    CHAOS("ff_publish_gain");
     SDL_LockMutex(ap->pub_mutex);
     TrackPub *p = pub_find(ap, handle);
     if (p) {
@@ -307,6 +336,7 @@ static void registry_remove(AudioPlayer *ap, const TrackState *t) {
 // Mark a track finished and report it. It is destroyed at the end of the control loop iteration,
 // after the mixer events that may still reference it have been drained.
 static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
+    CHAOS("end_track");
     if (!t || t->ended) return;
     if (reason == END_NATURAL && SDL_AtomicGet(&t->had_error))
         reason = END_ERROR;
@@ -316,11 +346,13 @@ static void end_track(AudioPlayer *ap, TrackState *t, TrackEndReason reason) {
 }
 
 static void lock_mixer(AudioPlayer *ap);
+static void tap_install(AudioPlayer *ap);
 static void unlock_mixer(AudioPlayer *ap);
 
 // Ended tracks are stopped here and freed once their worker has returned (MSG_TRACK_EXITED wakes the loop): the control
 // thread never waits for a worker
 static void destroy_ended_tracks(AudioPlayer *ap) {
+    CHAOS("destroy_ended_tracks");
     for (int i = ap->n_tracks - 1; i >= 0; i--) {
         TrackState *t = ap->tracks[i];
         if (!t->ended) continue;
@@ -359,6 +391,7 @@ static void lock_mixer(AudioPlayer *ap) { if (ap->device_id) SDL_LockAudioDevice
 static void unlock_mixer(AudioPlayer *ap) { if (ap->device_id) SDL_UnlockAudioDevice(ap->device_id); }
 
 static void remove_from_mixer(AudioPlayer *ap, TrackState *t) {
+    CHAOS("remove_from_mixer");
     Mixer *m = &ap->mixer;
     if (!t) return;
     if (m->current == t) { m->current = NULL; m->in_fade.active = false; }
@@ -394,11 +427,15 @@ static void publish_idle_status(AudioPlayer *ap) {
 }
 
 static void update_device_running(AudioPlayer *ap) {
+    CHAOS("update_device_running");
+    // The slots under the device lock: the callback moves next to current (gapless) and ends tracks by itself
+    lock_mixer(ap);
     const Mixer *m = &ap->mixer;
     const bool want = m->current || m->next || m->outgoing;
+    const bool idle = !m->current && !m->outgoing;
+    unlock_mixer(ap);
     output_set_running(ap, want);
-    if (!m->current && !m->outgoing)
-        publish_idle_status(ap);
+    if (idle) publish_idle_status(ap);
 }
 
 //+-----------------------------------------------------+
@@ -406,6 +443,7 @@ static void update_device_running(AudioPlayer *ap) {
 //+-----------------------------------------------------+
 
 static TrackState *create_track(AudioPlayer *ap, const Msg *msg) {
+    CHAOS("create_track");
     TrackState *t = track_create(ap, msg->handle, msg->str, msg->has_play_config ? &msg->play_config : NULL);
     if (!t || !registry_add(ap, t)) {
         if (t) track_destroy(t);
@@ -419,6 +457,7 @@ static TrackState *create_track(AudioPlayer *ap, const Msg *msg) {
 static void cmd_pause(AudioPlayer *ap, bool value);
 
 static void cmd_play(AudioPlayer *ap, const Msg *msg) {
+    CHAOS("cmd_play");
     TrackState *t = create_track(ap, msg);
     if (!t) return;
 
@@ -444,6 +483,7 @@ static void cmd_play(AudioPlayer *ap, const Msg *msg) {
 }
 
 static void cmd_set_next(AudioPlayer *ap, const Msg *msg) {
+    CHAOS("cmd_set_next");
     TrackState *t = create_track(ap, msg);
     if (!t) return;
 
@@ -467,6 +507,7 @@ static void cmd_set_next(AudioPlayer *ap, const Msg *msg) {
 }
 
 static void cmd_skip(AudioPlayer *ap) {
+    CHAOS("cmd_skip");
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
     TrackState *cur = m->current, *next = m->next;
@@ -486,6 +527,7 @@ static void cmd_skip(AudioPlayer *ap) {
 }
 
 static void cmd_clear_next(AudioPlayer *ap) {
+    CHAOS("cmd_clear_next");
     lock_mixer(ap);
     TrackState *next = ap->mixer.next;
     if (next) {
@@ -500,6 +542,7 @@ static void cmd_clear_next(AudioPlayer *ap) {
 }
 
 static void cmd_stop(AudioPlayer *ap) {
+    CHAOS("cmd_stop");
     TrackState *removed[3];
     int n_removed = 0;
 
@@ -542,6 +585,7 @@ static void pause_state_set(AudioPlayer *ap, const bool paused) {
 }
 
 static void cmd_pause(AudioPlayer *ap, const bool value) {
+    CHAOS("cmd_pause");
     if ((SDL_AtomicGet(&ap->paused) != 0) == value) return;
     SDL_AtomicSet(&ap->paused, value);
     lock_mixer(ap);
@@ -551,6 +595,7 @@ static void cmd_pause(AudioPlayer *ap, const bool value) {
 }
 
 static void cancel_outgoing(AudioPlayer *ap) {
+    CHAOS("cancel_outgoing");
     lock_mixer(ap);
     TrackState *o = ap->mixer.outgoing;
     if (o) remove_from_mixer(ap, o);
@@ -559,6 +604,7 @@ static void cancel_outgoing(AudioPlayer *ap) {
 }
 
 static void cmd_seek(AudioPlayer *ap, const Msg *msg) {
+    CHAOS("cmd_seek");
     // A seek always cuts: a running crossfade is finished immediately
     cancel_outgoing(ap);
     lock_mixer(ap);
@@ -566,7 +612,7 @@ static void cmd_seek(AudioPlayer *ap, const Msg *msg) {
     ap->mixer.in_fade.active = false;
     unlock_mixer(ap);
     if (!cur) return;
-    if (msg->type == CMD_SEEK_US) track_request_seek(cur, msg->i64);
+    if (msg->type == CMD_SEEK) track_request_seek(cur, msg->d);
     else track_request_seek_percent(cur, msg->d);
 }
 
@@ -604,6 +650,7 @@ static TrackState *track_for_handle(AudioPlayer *ap, const int32_t handle) {
 }
 
 static void cmd_filters(AudioPlayer *ap, const Msg *msg) {
+    CHAOS("cmd_filters");
     switch (msg->type) {
         case CMD_SET_GLOBAL_FILTERS: {
             SDL_LockMutex(ap->format_mutex);
@@ -670,6 +717,7 @@ static void cmd_filters(AudioPlayer *ap, const Msg *msg) {
 // Re-open the output. When the format changes, the tracks are re-synchronised by seeking them to
 // where they are, which flushes audio decoded for the old format.
 static int reopen_output(AudioPlayer *ap, const bool use_default, const char *name, const int index) {
+    CHAOS("reopen_output");
     Mixer *m = &ap->mixer;
     const int old_rate = m->rate, old_channels = m->channels;
     const bool had_device = ap->device_id != 0;
@@ -709,15 +757,15 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
         }
         if (cur) {
             SDL_AtomicSet(&cur->filter_reconfigure, 1);
-            if (cur->started) track_request_seek(cur, SecondsToMicroseconds(cur_pos));
-            else track_request_seek(cur, SecondsToMicroseconds(track_start_position(cur)));
+            track_request_seek(cur, cur->started ? cur_pos : 0.0); // positions are track time
         }
         if (next) {
             SDL_AtomicSet(&next->filter_reconfigure, 1);
-            track_request_seek(next, SecondsToMicroseconds(track_start_position(next)));
+            track_request_seek(next, 0.0);
         }
     }
 
+    if (ap->tap_enabled) tap_install(ap); // for the new format
     note_add_owned((AuEvent){ .type = AU_EVENT_DEVICE,
                               .data.device = { .ok = true, .fell_back = fell_back, .sample_rate = m->rate,
                                                .channels = m->channels } },
@@ -726,8 +774,48 @@ static int reopen_output(AudioPlayer *ap, const bool use_default, const char *na
     return AU_OK;
 }
 
+// The meter tap for the current output format (the first time a reader asks, and after every device change). Readers
+// may be copying from the old buffer: tap_mutex keeps it until they are done.
+static void tap_install(AudioPlayer *ap) {
+    CHAOS("tap_install");
+    const Mixer *m = &ap->mixer;
+    ap->tap_enabled = true;
+    if (m->rate <= 0 || m->channels <= 0) return;
+    SDL_LockMutex(ap->tap_mutex);
+    MeterTap *tp = &ap->tap;
+    if (tp->buf && tp->rate == m->rate && tp->channels == m->channels) {
+        SDL_UnlockMutex(ap->tap_mutex);
+        return;
+    }
+    const int64_t want = FFMAX((int64_t)m->rate / 2, 16384) + 4 * (int64_t)FFMAX(m->buf_frames, 1024);
+    uint32_t frames = 1;
+    while ((int64_t)frames < want) frames <<= 1;
+    int32_t *buf = av_calloc((size_t)frames * (size_t)m->channels, sizeof(int32_t));
+    if (!buf) ff_log(AU_LOG_ERROR, "No memory for the level meters");
+    lock_mixer(ap);
+    int32_t *old = tp->buf;
+    tp->buf = buf;
+    tp->frames = buf ? frames : 0;
+    tp->channels = m->channels;
+    tp->rate = m->rate;
+    tp->gen++;
+    ffa_store_relaxed(&tp->written, 0);
+    ffa_store_relaxed(&tp->published, 0);
+    unlock_mixer(ap);
+    SDL_UnlockMutex(ap->tap_mutex);
+    av_free(old);
+}
+
+void ff_request_tap(AudioPlayer *ap) {
+    CHAOS("ff_request_tap");
+    if (SDL_AtomicGet(&ap->tap_requested) || !SDL_AtomicCAS(&ap->tap_requested, 0, 1)) return;
+    Msg *msg = msg_new(CMD_ENABLE_TAP);
+    if (msg) msg_post(ap, msg);
+}
+
 // msg->str: the device's name, NULL = the system default
 static int cmd_configure_device(AudioPlayer *ap, const Msg *msg) {
+    CHAOS("cmd_configure_device");
     const bool use_default = !msg->str;
     if (ap->device_id) {
         if (use_default && ap->use_default_device)
@@ -752,6 +840,7 @@ static bool valid_output_format(const int channels, const int rate) {
 
 // A new requested output format: open the device again in it (the same device, or the default)
 static int cmd_set_output_format(AudioPlayer *ap, const Msg *msg) {
+    CHAOS("cmd_set_output_format");
     const int channels = (int)msg->i64, rate = (int)msg->d;
     if (ap->device_id && channels == ap->output_channels && rate == ap->output_sample_rate)
         return AU_ERR_NOTHING_TO_DO;
@@ -764,7 +853,22 @@ static int cmd_set_output_format(AudioPlayer *ap, const Msg *msg) {
 //| Track messages and mixer events                     |
 //+-----------------------------------------------------+
 
+// A track that was current has ended and nothing plays or waits after it: ask the application for the next one, unless
+// it was asked already for this track (prepare-next before the end). Called from both ends of a track, whichever
+// comes first: its failure message, or the mixer's end event.
+static void ask_for_next_if_idle(AudioPlayer *ap, TrackState *t) {
+    CHAOS("ask_for_next_if_idle");
+    lock_mixer(ap);
+    const bool idle = !ap->mixer.current && !ap->mixer.next;
+    unlock_mixer(ap);
+    if (idle && !t->prepare_next_sent) {
+        t->prepare_next_sent = true;
+        note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = 0 });
+    }
+}
+
 static void msg_track_failed(AudioPlayer *ap, TrackState *t) {
+    CHAOS("msg_track_failed");
     if (!t || t->ended) return;
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
@@ -778,9 +882,13 @@ static void msg_track_failed(AudioPlayer *ap, TrackState *t) {
 
     end_track(ap, t, END_ERROR);
 
-    // Give the application a chance to queue something else
-    if ((was_next || was_current) && !have_next)
+    // Give the application a chance to queue something else. A failed current track the mixer has let go of already
+    // (it saw the end first) is in no slot any more: then its end event is skipped, so this is the only chance.
+    if ((was_next || was_current) && !have_next) {
+        t->prepare_next_sent = true;
         note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = cur ? cur->handle : 0 });
+    }
+    else if (!was_next && !was_current) ask_for_next_if_idle(ap, t);
     update_device_running(ap);
 }
 
@@ -795,6 +903,7 @@ static void report_duration(TrackState *t) {
 }
 
 static void handle_track_msg(AudioPlayer *ap, const Msg *msg) {
+    CHAOS("handle_track_msg");
     TrackState *t = registry_find(ap, msg->handle);
     if (!t || t->ended) return;
 
@@ -833,6 +942,7 @@ static void handle_track_msg(AudioPlayer *ap, const Msg *msg) {
 }
 
 static void process_mixer_events(AudioPlayer *ap) {
+    CHAOS("process_mixer_events");
     MixerEvent events[MIXER_EVENT_CAPACITY];
     lock_mixer(ap);
     const int n = ap->mixer.n_events;
@@ -854,9 +964,13 @@ static void process_mixer_events(AudioPlayer *ap) {
                 note_add((AuEvent){ .type = AU_EVENT_RESTARTED, .handle = t->handle,
                                     .data.restarted = { e->position, true, SDL_AtomicGet(&t->loops_remaining) } });
                 break;
-            case MIX_EV_TRACK_ENDED:
+            case MIX_EV_TRACK_ENDED: {
                 end_track(ap, t, END_NATURAL);
+                // The application may never have been asked for the next track: one that failed before it opened
+                // (its failure message can come after this), or one too short for the usual warning
+                ask_for_next_if_idle(ap, t);
                 break;
+            }
             case MIX_EV_FADE_DONE:
                 end_track(ap, t, t->fade_reason ? t->fade_reason : END_SKIPPED);
                 break;
@@ -891,6 +1005,7 @@ static void free_device_list(char **list, const int n) {
 // Comparing (instead of trusting the events) also ignores the "added" events SDL sends for every
 // device at start-up.
 static void check_device_list(AudioPlayer *ap) {
+    CHAOS("check_device_list");
     ap->devices_checked_at = SDL_GetTicks();
     const int n = SDL_GetNumAudioDevices(0);
     if (n < 0) return;
@@ -924,6 +1039,7 @@ static void check_device_list(AudioPlayer *ap) {
 // the queue for the application (taking them used to swallow the keyboard, mouse and window events of applications
 // that also use SDL).
 static int SDLCALL device_event_watch(void *userdata, SDL_Event *e) {
+    CHAOS("device_event_watch");
     AudioPlayer *ap = userdata;
     if ((e->type == SDL_AUDIODEVICEADDED || e->type == SDL_AUDIODEVICEREMOVED) && !e->adevice.iscapture) {
         SDL_AtomicSet(&ap->device_events, 1);
@@ -935,6 +1051,7 @@ static int SDLCALL device_event_watch(void *userdata, SDL_Event *e) {
 }
 
 static void housekeeping(AudioPlayer *ap) {
+    CHAOS("housekeeping");
     lock_mixer(ap);
     TrackState *cur = ap->mixer.current;
     const bool have_next = ap->mixer.next != NULL;
@@ -943,7 +1060,7 @@ static void housekeeping(AudioPlayer *ap) {
 
     if (cur && !have_next && !cur->prepare_next_sent && ffa_load_acquire(&cur->opened)
         && SDL_AtomicGet(&cur->loops_remaining) == 0) {
-        const double end = track_end_position(cur);
+        const double end = track_duration(cur); // positions count from 0, so the track ends at its duration
         const double lead = ap->prepare_next_seconds + FFMAX(0.0, ap->crossfade.on_track_end.seconds);
         SDL_LockMutex(ap->format_mutex);
         const double speed = ap->speed > 0 ? ap->speed : 1.0;
@@ -1010,6 +1127,7 @@ static void finish_sync(Msg *msg) {
 }
 
 static bool handle_msg(AudioPlayer *ap, Msg *msg) {
+    CHAOS("handle_msg");
     switch (msg->type) {
         case CMD_PLAY:             cmd_play(ap, msg); break;
         case CMD_SET_NEXT:         cmd_set_next(ap, msg); break;
@@ -1017,7 +1135,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_CLEAR_NEXT:       cmd_clear_next(ap); break;
         case CMD_STOP:             cmd_stop(ap); break;
         case CMD_PAUSE:            cmd_pause(ap, msg->b); break;
-        case CMD_SEEK_US:
+        case CMD_SEEK:
         case CMD_SEEK_PERCENT:     cmd_seek(ap, msg); break;
         case CMD_SET_LOOP:         cmd_set_loop(ap, (int)msg->i64); break;
         case CMD_SET_CROSSFADE:    apply_crossfade_config(ap, &msg->crossfade); break;
@@ -1029,6 +1147,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
         case CMD_CONFIGURE_DEVICE: cmd_configure_device(ap, msg); break;
         case CMD_SET_OUTPUT_FORMAT: cmd_set_output_format(ap, msg); break;
+        case CMD_ENABLE_TAP:       tap_install(ap); break;
         case CMD_SET_PREPARE_NEXT: ap->prepare_next_seconds = msg->d; break;
         case CMD_GAIN_CACHE_CHANGED:
             for (int i = 0; i < ap->n_tracks; i++) {
@@ -1062,6 +1181,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
 }
 
 static void shutdown_tracks(AudioPlayer *ap) {
+    CHAOS("shutdown_tracks");
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
     for (int i = 0; i < ap->n_tracks; i++)
@@ -1189,12 +1309,14 @@ int au_init(const AuConfig *config) {
     ap->ring_pool_mutex = SDL_CreateMutex();
     ap->started_sem = SDL_CreateSemaphore(0);
     ap->pub_mutex = SDL_CreateMutex();
-    if (!ap->pub_mutex || !ap->msg_mutex || !ap->wake_sem || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
+    ap->tap_mutex = SDL_CreateMutex();
+    if (!ap->tap_mutex || !ap->pub_mutex || !ap->msg_mutex || !ap->wake_sem || !ap->format_mutex || !ap->format_cond || !ap->status_mutex ||
         !ap->ring_pool_mutex || !ap->started_sem)
         goto fail_sync;
     publish_idle_status(ap);
 
     av_log_set_level(AV_LOG_ERROR);
+    av_log_set_callback(ffmpeg_log);   // FFmpeg's messages come as AU_EVENT_LOG (until au_shutdown())
 
     // A library must not take over the host's Ctrl-C / SIGTERM handling
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
@@ -1259,11 +1381,13 @@ fail_sync:
     SDL_DestroyMutex(ap->ring_pool_mutex);
     SDL_DestroySemaphore(ap->started_sem);
     SDL_DestroyMutex(ap->pub_mutex);
+    SDL_DestroyMutex(ap->tap_mutex);
     av_free(ap);
     return AU_ERR_SDL;
 }
 
 void au_shutdown(void) {
+    CHAOS("au_shutdown");
     AudioPlayer *ap = audio_player;
     if (!ap) return;
     if (on_control_thread(ap)) {
@@ -1285,6 +1409,7 @@ void au_shutdown(void) {
     SDL_WaitThread(ap->control_thread, NULL);
     SDL_DelEventWatch(device_event_watch, ap); // returns once a watch call in progress has finished
 
+    av_log_set_callback(av_log_default_callback); // every thread of the player has ended
     SDL_mutex *lock = lifecycle_mutex();
     SDL_LockMutex(lock);
     audio_player = NULL;
@@ -1317,6 +1442,8 @@ void au_shutdown(void) {
     SDL_DestroyMutex(ap->ring_pool_mutex);
     SDL_DestroySemaphore(ap->started_sem);
     SDL_DestroyMutex(ap->pub_mutex);
+    SDL_DestroyMutex(ap->tap_mutex);
+    av_free(ap->tap.buf); // the device is closed: nothing writes it
     av_free(ap);
 
     avformat_network_deinit();
@@ -1420,16 +1547,19 @@ static int32_t post_track_command(const MsgType type, const char *filename, cons
 }
 
 int32_t au_play(const char *path, const AuPlayConfig *config) {
+    CHAOS("au_play");
     const int32_t handle = post_track_command(CMD_PLAY, path, config);
     if (handle > 0) pause_state_set(audio_player, false); // playing unpauses
     return handle;
 }
 
 int32_t au_queue(const char *path, const AuPlayConfig *config) {
+    CHAOS("au_queue");
     return post_track_command(CMD_SET_NEXT, path, config);
 }
 
 static void post_simple(const MsgType type, const int64_t i64, const double d, const bool b) {
+    CHAOS("post_simple");
     AudioPlayer *ap = audio_player;
     if (!ap) return;
     SDL_AtomicIncRef(&ap->request_count);
@@ -1456,7 +1586,7 @@ void au_pause(const bool paused) {
 
 void au_seek(const double seconds) {
     if (!isfinite(seconds) || seconds < 0) return;
-    post_simple(CMD_SEEK_US, llround(seconds * 1e6), 0, false);
+    post_simple(CMD_SEEK, 0, seconds, false);
 }
 
 void au_seek_fraction(const double fraction) {
@@ -1578,33 +1708,38 @@ int au_set_replaygain(const AuReplayGainConfig *config) {
     return AU_OK;
 }
 
-// handle 0 = the current track; pub_mutex held
-static TrackPub *pub_for(AudioPlayer *ap, int32_t handle) {
-    if (handle == 0) {
-        SDL_LockMutex(ap->status_mutex);
-        handle = ap->status.handle;
-        SDL_UnlockMutex(ap->status_mutex);
-        if (!handle) return NULL;
-    }
-    return pub_find(ap, handle);
+// handle 0 = the current track (the audible one, from the status). Called before taking pub_mutex, which is held
+// alone (docs/threading.md).
+static int32_t resolve_handle(AudioPlayer *ap, const int32_t handle) {
+    if (handle != 0) return handle;
+    SDL_LockMutex(ap->status_mutex);
+    const int32_t h = ap->status.handle;
+    SDL_UnlockMutex(ap->status_mutex);
+    return h;
 }
 
 const AuMediaInfo *au_track_info(const int32_t handle) {
+    CHAOS("au_track_info");
     AudioPlayer *ap = audio_player;
     if (!ap || handle < 0) return NULL;
+    const int32_t h = resolve_handle(ap, handle);
+    if (!h) return NULL;
     SDL_LockMutex(ap->pub_mutex);
-    const TrackPub *p = pub_for(ap, handle);
+    const TrackPub *p = pub_find(ap, h);
     const AuMediaInfo *ref = p ? media_info_retain(p->info) : NULL;
     SDL_UnlockMutex(ap->pub_mutex);
     return ref;
 }
 
 int au_track_gain_db(const int32_t handle, double *out_db) {
+    CHAOS("au_track_gain_db");
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
     if (handle < 0 || !out_db) return AU_ERR_INVALID_ARGUMENT;
+    const int32_t h = resolve_handle(ap, handle);
+    if (!h) return AU_ERR_NOTHING_TO_DO;
     SDL_LockMutex(ap->pub_mutex);
-    const TrackPub *p = pub_for(ap, handle);
+    const TrackPub *p = pub_find(ap, h);
     const bool known = p && p->gain_known && p->info;
     if (known) *out_db = p->gain_db;
     SDL_UnlockMutex(ap->pub_mutex);
@@ -1727,6 +1862,7 @@ void au_set_loop_count(const int count) {
 }
 
 static StatusSnapshot read_status(AudioPlayer *ap) {
+    CHAOS("read_status");
     SDL_LockMutex(ap->status_mutex);
     const StatusSnapshot s = ap->status;
     SDL_UnlockMutex(ap->status_mutex);
@@ -1745,6 +1881,7 @@ static double audible_position(const StatusSnapshot *s) {
 }
 
 void au_get_status(AuStatus *out) {
+    CHAOS("au_get_status");
     if (!out) return;
     memset(out, 0, sizeof(*out));
     out->position = out->duration = -1;

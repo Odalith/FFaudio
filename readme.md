@@ -26,6 +26,11 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
   tracks or by probing a file without playing it, and embedded cover art (FLAC, MP3, M4A, Ogg/Opus, APE)
 - **Playlist files**: `.m3u`, `.m3u8` and `.pls`, local or from a URL (internet radio stations), read into a list
   of entries for the player
+- **Cue sheets and chapters**: albums in one file with a `.cue` sheet (or one embedded in the file) and audiobooks
+  with chapters play as separate tracks that join without a gap and without a sample lost; any range of a file plays
+  like a track of its own, and seeks are exact to the sample
+- **Level meters and spectrum**: peak and RMS per channel and an FFT spectrum of what is being heard, for VU meters
+  and visualizers, read from any thread without ever holding up the audio
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers for
   graphic and parametric EQ (AutoEq / EqualizerAPO profiles), bass/treble, balance, width, mono, channel swap,
   crossfeed, bs2b, compressor and limiter, and click and clipping repair for damaged sources
@@ -112,7 +117,7 @@ Everything the player reports is an `AuEvent`: a type, the track's handle and pe
 int32_t handle = au_play("/music/song.flac", NULL);
 
 const AuPlayConfig cfg = { .start_seconds = 30, .length_seconds = 60 };
-au_queue("/music/next.mp3", &cfg);    // starts gaplessly when song.flac ends
+au_queue("/music/next.mp3", &cfg);    // starts gaplessly when song.flac ends; plays 0:30 to 1:30 as a 60 s track
 
 au_pause(true);
 au_seek(90);                          // seconds; au_seek_fraction(0.5) jumps to the middle
@@ -128,8 +133,13 @@ au_get_status(&st);                   // the audible track, its position and dur
 No function waits for the player: changes are queued and done in order on ffaudio's control thread, and what follows
 from them comes as events (`AU_EVENT_TRACK_STARTED`, `AU_EVENT_TRACK_OPENED`, ...). `au_get_status()` is a snapshot;
 the settings in it are the last ones set, also before the control thread has applied them. At other speeds,
-positions and durations stay in file time, while crossfade lengths and `prepare_next_seconds` stay in wall clock
-time; a speed change is heard within about half a second and never leaves a gap.
+positions and durations stay in the file's own seconds, while crossfade lengths and `prepare_next_seconds` stay in
+wall clock time; a speed change is heard within about half a second and never leaves a gap.
+
+Ranges and seeks are exact to the sample. A range plays like a track of its own (its position, duration, seeks and
+events count from its start), and consecutive ranges of one file join with nothing missing or doubled, also when the
+file is resampled to the device's rate. Lossy files start each range or seek a little earlier, so the decoder has
+settled by the first sample that plays.
 
 Devices: `au_list_devices()` lists the outputs (free the list with `au_free_devices()`), `au_get_device_name()` names
 the one in use, `au_set_device(name)` switches (NULL = follow the system default), and `AU_EVENT_DEVICES_CHANGED`
@@ -278,6 +288,41 @@ URL and `file://` URIs become paths. Text that is not UTF-8 is read as Latin-1, 
 playlist (`#EXT-X-` lines) is a stream rather than a list, so it gives one entry: itself. A playlist read from a URL
 may only list URLs (local paths in it are left out), the same rule the player applies to streams.
 `au_playlist_parse()` takes text already in memory. Neither needs `au_init()`.
+
+### Cue sheets and chapters
+Albums ripped to one file with a `.cue` sheet, files with an embedded cue sheet, and audiobooks or mixes with
+chapters all list tracks inside one file. `au_cue_read()` reads any of them; each track is a range of a file:
+```c
+#include <ffaudio_playlist.h>
+
+static const AuCueSheet *album;
+static int next_track;
+
+static AuPlayConfig track_config(const AuCueTrack *t) {
+    const AuPlayConfig pc = { .start_seconds = t->start_seconds, .length_seconds = t->length_seconds,
+                              .replaygain = &t->replaygain };   // the sheet's REM REPLAYGAIN_* values, if any
+    return pc;
+}
+
+// in on_event, case AU_EVENT_PREPARE_NEXT:
+if (next_track < album->count) {
+    const AuCueTrack *t = album->tracks[next_track++];
+    const AuPlayConfig pc = track_config(t);
+    au_queue(t->path, &pc);
+}
+
+album = au_cue_read("/music/Album/album.cue", NULL);   // or the .flac / .m4b itself
+const AuCueTrack *first = album->tracks[next_track++];
+const AuPlayConfig pc = track_config(first);
+au_play(first->path, &pc);
+printf("%d. %s - %s\n", first->number, first->performer, first->title);
+// au_cue_release(album) once nothing uses its strings any more (the ReplayGain values are copied by au_play())
+```
+The tracks join without a gap and without a sample missing or doubled. A track starts at its `INDEX 01`; a pregap
+(`INDEX 00`) plays at the end of the track before, so the album plays straight through. For an audio file, the
+embedded `CUESHEET` tag (FLAC, WavPack, APE) comes first, then a FLAC `CUESHEET` block, then chapters (M4B/M4A,
+Matroska, MP3 `CHAP` frames). A sheet written for a `.wav` that was later encoded finds the `.flac` (or `.wv`, `.ape`,
+...) next to it. `au_playlist_read()` refuses cue sheets (`AU_ERR_UNSUPPORTED`), as their lines are not paths.
 
 ### 5. ReplayGain and metadata
 ```c
@@ -432,6 +477,29 @@ au_gain_cache_request_album(album_paths, n, AU_SCAN_PREFETCH);
 The cache and the queue work without `au_init()`, survive `au_shutdown()`, are thread-safe, and paths are
 compared as exact strings (pass them the same way every time, e.g. always absolute).
 
+### Level meters and spectrum
+```c
+#include <ffaudio_meters.h>
+
+// On a UI timer, 30 to 60 times a second
+AuLevels lv;
+au_get_levels(0.05, &lv);                       // the last 50 ms heard
+for (int c = 0; c < lv.channels; c++)
+    draw_meter(c, lv.peak[c], lv.rms[c]);       // linear, 1.0 = full scale; add your own ballistics
+
+AuSpectrum *sp = au_spectrum_create(2048);      // once per visualizer
+float mags[2048 / 2 + 1], bars[32];
+int rate;
+au_spectrum_read(sp, -1, mags, &rate);           // all channels; bin k is k * rate / 2048 Hz
+au_spectrum_bands(mags, 2048, rate, 30, 16000, bars, 32);   // 32 log-spaced bars
+au_spectrum_free(sp);
+```
+They show the music, not the volume knob: the mix after ReplayGain, fades and crossfades, before the master volume and
+mute, and silence while paused or when nothing plays. What they read is what is being heard (the device's latency is
+taken off). The audio callback copies the mix into a history buffer without ever waiting; readers copy from it and
+check nothing was overwritten meanwhile, so any thread can read, as often as it likes. The first call turns this on;
+programs that never call them pay nothing. The FFT runs on the thread that calls `au_spectrum_read()`.
+
 ### 7. Surround files and the output format
 By default the output uses the device's own channel count and sample rate. Files with more channels than the
 output are mixed down; files with fewer are spread onto the matching speakers.
@@ -524,6 +592,9 @@ All of these change the whole process, which is why ffaudio leaves the choice to
 macOS allocators return memory to the system more readily.
 
 ## Architecture
+The threads, every lock, condition, semaphore and lock-free channel, the lock order and the hand-offs that must
+happen in order are in [docs/threading.md](docs/threading.md), the reference for any change that touches more than
+one thread.
 ```
  app ──au_*()──▶ control thread ──creates/destroys──▶ tracks (one thread each; streams also a reader)
                   │  ▲ events                            │ demux → decode → convert graph → user graph
@@ -538,7 +609,8 @@ macOS allocators return memory to the system more readily.
 - `lib/events.c`: the event queue behind `au_poll_event()`.
 - `lib/track.c`: the per-track worker (and a reader thread for network streams), filter graphs, and the
   non-blocking `track_pull()`.
-- `lib/output.c`: device handling and the mixer (SDL callback). It never blocks, allocates, frees or signals.
+- `lib/output.c`: device handling and the mixer (SDL callback). It never blocks, allocates or frees; it only posts the
+  control thread's semaphore (which never blocks) when it has an event for it.
 - `lib/sample_ring.c`: the lock-free ring between a track's decoder and the mixer.
 - `lib/filtergraph.c`: the convert graph (decoder format → output format) and the user graph (filters).
 - `lib/filters.c`: the filter-string builder (`ffaudio_filters.h`).
@@ -568,8 +640,11 @@ macOS allocators return memory to the system more readily.
 without anything depending on timing, so a render from before a change can be compared with one after it.
 
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
-`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]`
-plays a folder on real hardware for listening tests.
+`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir | sheet.cue | audio file> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]`
+plays a folder on real hardware for listening tests (Linux and Windows), or the tracks of a cue sheet (or of an audio file with one inside,
+or with chapters). `scripts/make_cue_album.sh <album-dir> <out-dir> [rate]` makes a test album for that from an
+album's tracks: one FLAC image (tracks at another sample rate are resampled) and its `album.cue`; the album's files are
+only read.
 
 ## Roadmap
 - [x] ReplayGain / R128 read from tags automatically (track/album mode, preamp, clipping prevention)
@@ -577,11 +652,11 @@ plays a folder on real hardware for listening tests.
 - [x] Embedded cover art
 - [x] Playlist files (.m3u, .m3u8, .pls)
 - [ ] Playlist organizer (an ordered list with append/insert helpers and history)
-- [ ] Level meters and spectrum
+- [x] Level meters and spectrum
 - [x] Measure R128 / ReplayGain values for files (loudness analysis; read only)
 - [x] Playback speed (tempo with and without pitch change)
 - [x] Network streams: HTTP(S) files, HLS, Icecast/SHOUTcast with "now playing", buffering, reconnects
-- [ ] Cue sheets / gapless playback of track ranges inside one file
+- [x] Cue sheets and chapters, sample-exact gapless playback of track ranges inside one file
 - [x] Verified multichannel (5.1/7.1) playback, configurable downmixing and upmixing
 - [x] Device added/removed notifications for the application
 - [ ] SDL3 port, or native audio backends instead of SDL

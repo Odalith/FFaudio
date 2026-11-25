@@ -21,13 +21,14 @@
 /*
  * Internal data structures shared by the library's modules. Not part of the public API.
  *
- * Threading model (see ARCHITECTURE in readme.md):
+ * Threading model, in short. The full reference (every thread, lock, condition, semaphore and atomic, the lock order and
+ * the ordered hand-offs) is docs/threading.md: keep it in step with any change to what is shared between threads.
  *  - control thread : owns every TrackState (creation, slot changes, destruction) and runs user callbacks
  *  - worker thread  : one per track: opens it, reads it (local files), decodes and filters into its SampleRing
  *                     (float32 at the output rate/layout)
  *  - reader thread  : network tracks only: reads ahead into audio_queue, so a stalled connection does not stop the
  *                     worker from decoding what is queued
- *  - SDL callback   : mixer, takes from the rings without locks, never allocates, frees or signals
+ *  - SDL callback   : mixer, takes from the rings without locks, never blocks, allocates or frees; fills the meter tap
  * Mixer slots (Mixer.current/next/outgoing) are only changed while holding the SDL audio device lock.
  */
 
@@ -162,13 +163,28 @@ static inline int gain_pack(const int centi_db, const bool slow) { return centi_
 static inline int gain_centi_db(const int packed) { return (packed - (packed & 1)) / 2; }
 static inline bool gain_is_slow(const int packed) { return (packed & 1) != 0; }
 
+// Worker only: what the trimmer keeps of the decoded frames of one serial (sample-exact ranges and seeks)
+typedef struct TrimState {
+    int32_t serial;                     // the serial these values are for, -1 = none yet
+    bool active;                        // anything to cut or count in this serial
+    bool seek_floor;                    // floor is a seek target: back to the range start once it is reached
+    bool end_armed;                     // a frame before the range end was seen: reaching the end ends (or loops)
+    int64_t floor;                      // first sample to keep, INT64_MIN = no limit
+    int64_t next;                       // the sample expected next, AV_NOPTS_VALUE = unknown
+    int64_t base;                       // where a frame without a timestamp starts after a seek
+    // Resampled output: the file-rate cut keeps `margin` samples more on each side (its start on a sample that is
+    // also one of the output rate's, every `align` samples), so the resampler is settled at both ends of a range and
+    // two ranges of a file meet on the same output samples; the exact cut is then made at the output rate
+    int64_t margin, align;
+} TrimState;
+
 typedef struct TrackState {
     struct AudioPlayer *ap;
     int32_t handle;
     char *filename;
     char *filtergraph_str;              // per-track user filters, may be NULL
-    int64_t start_time;                 // AV_TIME_BASE units, AV_NOPTS_VALUE = from the start
-    int64_t play_duration;              // AV_TIME_BASE units, AV_NOPTS_VALUE = to the end
+    double range_start_s;               // AuPlayConfig.start_seconds as given (0 = from the start)
+    double range_len_s;                 // AuPlayConfig.length_seconds as given (0 = to the end)
     AuFade fade_in_override;            // only used when has_fade_in_override
     FadeCurve fade_in_curve;            // its curve, sampled when the track is created
     bool has_fade_in_override;
@@ -198,11 +214,15 @@ typedef struct TrackState {
     SDL_atomic_t worker_exited;         // 1 = the worker has returned (joining it does not wait)
 
     // ---- seek requests (control thread -> read thread), guarded by seek_mutex ----
-    SDL_mutex *seek_mutex;              // also guards filtergraph_str, filter_cmds and end_pos_us
+    SDL_mutex *seek_mutex;              // also guards filtergraph_str, filter_cmds and the seek handoff below
     FilterCmd *filter_cmds;             // pending avfilter_graph_send_command() calls
     bool seek_req;
-    int64_t seek_pos;                   // AV_TIME_BASE units
+    double seek_pos;                    // seconds into the track (the range)
     double pending_seek_percent;        // < 0 = none; resolved by the read thread once the duration is known
+    // The seek that started serial seek_done_serial (-1 = none): the sample it aims for and where the demuxer was
+    // asked to go (the trimmer cuts to the first, and counts from the second when frames have no timestamps)
+    int32_t seek_done_serial;
+    int64_t seek_done_sample, seek_done_base;
 
     // ---- demux / decode (read + audio threads) ----
     AVFormatContext *ic;
@@ -235,6 +255,18 @@ typedef struct TrackState {
     bool chained_ogg;                   // read thread: a chained Ogg file, which FFmpeg can not seek past its first part
     double pts_offset;                  // read thread, before the decoder starts: the container's start time (s),
                                         // taken off frame timestamps so positions count from 0
+    // The play range, exact to the sample at the file's rate. Set by the worker before `opened` (fixed after it):
+    bool has_range;                     // a start or a length, on a file that is not live
+    int32_t range_rate;                 // the decoder's sample rate the samples count in
+    int64_t range_start_sample;         // first sample, counted from the container's start
+    int64_t range_end_sample;           // first sample past the range, INT64_MAX = to the end of the file
+    int64_t pts_offset_samples;         // pts_offset in range_rate samples
+    int64_t ts_tol;                     // timestamp jitter that is counted through: the stream time base, + 1 sample
+    double origin_s;                    // range_start_sample / range_rate: taken off positions (they count from 0)
+    double preroll_s;                   // decoded before a seek target or the range start and dropped (lossy codecs)
+    double duration_s;                  // what plays: the range, or the file; < 0 = unknown
+    bool range_end_hit;                 // worker: the trimmer reached the range end (local files end or loop there)
+    TrimState trim;                     // worker only
     SDL_atomic_t buffering;             // 1 = waiting for data: the mixer takes nothing, the position holds
     SDL_atomic_t buffered_ms;           // read thread: audio queued, for on_buffering
     SDL_atomic_t read_ended;            // 1 = the reader is at the end (demux_eof, for the worker to see)
@@ -257,14 +289,13 @@ typedef struct TrackState {
     bool demux_eof;                     // read thread only
 
     // ---- status published by the worker threads ----
-    int32_t opened;                     // atomics.h: 1 once the stream is open and end_pos_us is valid (and fixed)
+    int32_t opened;                     // atomics.h: 1 once the stream is open and the range is set (and fixed)
     int32_t eos_serial;                 // atomics.h: serial whose last frame is in the ring, -1 = none
     SDL_atomic_t loops_remaining;       // -1 infinite, 0 none
     SDL_atomic_t loops_started;         // read thread: loops it has seeked back for (the mixer reports each once)
     SDL_atomic_t filter_reconfigure;    // 1 = rebuild the convert graph before the next frame (device changed)
     SDL_atomic_t user_filters_changed;  // 1 = rebuild the user graph before the next frame
     SDL_atomic_t had_error;             // 1 = the track ends as an error, even if some audio played
-    int64_t end_pos_us;                 // file position where playback ends, written before `opened` is set
 
     // ---- playback cursor, SDL callback only ----
     double position;                    // seconds, position of the next sample to be played
@@ -369,7 +400,7 @@ typedef enum MsgType {
     CMD_CLEAR_NEXT,
     CMD_STOP,
     CMD_PAUSE,
-    CMD_SEEK_US,
+    CMD_SEEK,
     CMD_SEEK_PERCENT,
     CMD_SET_LOOP,
     CMD_CONFIGURE_DEVICE,
@@ -380,6 +411,7 @@ typedef enum MsgType {
     CMD_SET_SOURCE_FILTERS,
     CMD_SET_PREPARE_NEXT,
     CMD_SET_OUTPUT_FORMAT,
+    CMD_ENABLE_TAP,
     CMD_SET_REPLAYGAIN,
     CMD_GAIN_CACHE_CHANGED,
     CMD_UPDATE_TRACK_FILTERS,
@@ -430,7 +462,23 @@ typedef struct StatusSnapshot {
     double speed;                   // playback speed of the audible audio
     double period;                  // seconds of audio per callback (SDL's buffer), 0 = no callback yet
     bool buffering;                 // the track waits for network data
+    int32_t tap_end;                // MeterTap.published at callback_time
+    int32_t tap_gen;                // MeterTap.gen it counts for
 } StatusSnapshot;
+
+// What the mixer plays, for level meters and the spectrum (au_get_levels(), au_spectrum_read()): the mix after
+// ReplayGain and fades, with the pause fade, before master volume and mute; zeros while paused. A history the audio
+// callback overwrites as it goes, never waiting for a reader; readers copy what they need and check it was not
+// overwritten meanwhile. buf, frames, channels, rate and gen change only on the control thread with tap_mutex and the
+// device lock held: the callback reads them under the device lock, readers under tap_mutex.
+typedef struct MeterTap {
+    int32_t *buf;                   // float bits, interleaved, frames * channels (atomics.h stores: TSan sees them)
+    uint32_t frames;                // a power of two
+    int32_t channels, rate;         // the output format it was made for (the callback writes nothing otherwise)
+    int32_t gen;                    // bumped with every new buffer
+    int32_t written;                // atomics.h: frames counted as written, before their data (wraps)
+    int32_t published;              // atomics.h: frames whose data is in (wraps)
+} MeterTap;
 
 // A float kept in an SDL_atomic_t (its bits)
 static inline void atomic_set_float(SDL_atomic_t *a, const float v) {
@@ -541,10 +589,20 @@ typedef struct AudioPlayer {
     // ---- status for getters ----
     SDL_mutex *status_mutex;            // a mutex (not a spinlock) so ThreadSanitizer can follow it
     StatusSnapshot status;
+
+    // ---- meters ----
+    MeterTap tap;
+    SDL_mutex *tap_mutex;               // readers and the control thread; never the callback. Taken before the device lock
+    SDL_atomic_t tap_requested;         // 1 once a reader asked for the tap (CMD_ENABLE_TAP is posted once)
+    bool tap_enabled;                   // control thread: the tap is kept, and remade for every output format
 } AudioPlayer;
 
 // Shared helpers implemented in ffaudio.c
 void ff_log(enum AU_LOG_LEVEL level, const char *fmt, ...);
+// Any thread: ask the control thread to start the meter tap (once)
+void ff_request_tap(struct AudioPlayer *ap);
+// The player, NULL without one; like au_get_status(), a getter may not race au_shutdown()
+struct AudioPlayer *ff_player(void);
 void ff_post_track_msg(MsgType type, int32_t handle, double d);
 // Publish a track's info (copied) or gain for au_track_info() / au_track_gain_db(); any thread
 void ff_publish_info(struct AudioPlayer *ap, int32_t handle, const AuMediaInfo *info);

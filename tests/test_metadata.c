@@ -240,6 +240,32 @@ static void watch_ffmpeg_log(void *ptr, int level, const char *fmt, va_list vl) 
     av_log_default_callback(ptr, level, fmt, vl);
 }
 
+// FFmpeg's messages come as AU_EVENT_LOG while a player exists, one level down, named by their component
+static const char *probe_item_name(void *ctx) { (void)ctx; return "probe"; }
+static const AVClass probe_class = { .class_name = "probe", .item_name = probe_item_name,
+                                     .version = LIBAVUTIL_VERSION_INT };
+
+static void test_ffmpeg_log_routed(void) {
+    REQUIRE(tc_init_player(0) == 0);
+    const AVClass *ctx = &probe_class;
+    av_log(&ctx, AV_LOG_ERROR, "something failed %d\n", 42);
+    av_log(&ctx, AV_LOG_WARNING, "below the level: not passed on\n");
+    bool got = false;
+    char msg[512] = "";
+    int level = -1;
+    for (int i = 0; i < 100 && !got; i++) {
+        SDL_LockMutex(tc_mutex);
+        got = tc_ffmpeg_log_level >= 0;
+        snprintf(msg, sizeof(msg), "%s", tc_ffmpeg_log);
+        level = tc_ffmpeg_log_level;
+        SDL_UnlockMutex(tc_mutex);
+        if (!got) tc_sleep_ms(20);
+    }
+    printf("   routed: [%d] %s\n", level, msg);
+    CHECK(got && !strcmp(msg, "FFmpeg probe: something failed 42") && level == AU_LOG_WARNING);
+    au_shutdown();
+}
+
 static void test_non_audio_opens_no_decoder(void) {
     // not_audio.bin is damaged JPEG data, detected as a raw video stream like encrypted cache files often are.
     // Probing it used to open the video decoder, which printed warnings ("[vvc] SPS id 9 not available", ...).
@@ -253,7 +279,8 @@ static void test_non_audio_opens_no_decoder(void) {
     CHECK(au_loudness_analyze(fx("not_audio.bin"), NULL, &l) == AU_ERR_FILE);
 
     REQUIRE(tc_init_player(0) == 0);
-    av_log_set_level(AV_LOG_WARNING); // au_initialize() sets AV_LOG_ERROR
+    av_log_set_level(AV_LOG_WARNING); // au_init() sets AV_LOG_ERROR
+    av_log_set_callback(watch_ffmpeg_log); // and routes FFmpeg's messages into AU_EVENT_LOG
     au_play(fx("not_audio.bin"), NULL);
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
     CHECK(tc_snapshot().eof_error == 1);
@@ -274,6 +301,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_chained_ogg_duration);
     RUN_TEST(test_pictures);
     RUN_TEST(test_track_info_while_playing);
+    RUN_TEST(test_ffmpeg_log_routed);
     RUN_TEST(test_non_audio_opens_no_decoder);
     return tc_finish("test_metadata");
 }

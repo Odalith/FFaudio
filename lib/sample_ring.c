@@ -89,6 +89,15 @@ int32_t ring_offset(const SampleRing *r) {
     return r->rd_offset;
 }
 
+bool ring_has_frames(SampleRing *r, const uint32_t frames) {
+    const uint32_t w = (uint32_t)ffa_load_acquire(&r->write_marker);  // the markers before it are written
+    if (w - r->rd >= RING_MARKERS / 2) return true;
+    uint64_t have = 0;
+    for (uint32_t i = r->rd; i != w && have < frames; i++)
+        have += (uint64_t)r->markers[i & MARKER_MASK].frames - (i == r->rd ? (uint32_t)r->rd_offset : 0);
+    return have >= frames;
+}
+
 static void advance(SampleRing *r) {
     r->rd++;
     r->rd_offset = 0;
