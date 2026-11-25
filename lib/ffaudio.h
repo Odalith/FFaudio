@@ -527,7 +527,8 @@ extern "C" {
     } AuTag;
 
     // Everything about a file, in one immutable block: it never changes after it was made, and every pointer in it
-    // stays valid until au_media_info_release(). Strings are UTF-8 and never NULL ("" when unknown).
+    // stays valid until au_media_info_release(). Strings are UTF-8 and never NULL ("" when unknown); tags stored in
+    // another encoding (WAV and AIFF chunks) are read as Windows-1252.
     typedef struct AuMediaInfo {
         const char *path;            // as given to au_probe() / au_play()
         const char *container;       // e.g. "flac", "mp3", "ogg", "mov,mp4,m4a,3gp,3g2,mj2"

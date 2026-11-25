@@ -174,6 +174,17 @@ static void test_pictures(void) {
     au_shutdown();
 }
 
+// Tags in a legacy encoding (a WAV INFO title in Windows-1252) come out as UTF-8, as AuMediaInfo promises: they used to
+// be passed on as raw bytes
+static void test_legacy_tag_encoding(void) {
+    const AuMediaInfo *info = au_probe(fx("legacy_tag.wav"), NULL);
+    REQUIRE(info);
+    const char *title = au_media_tag(info, "title");
+    printf("   title: %s\n", title ? title : "(none)");
+    CHECK(title && !strcmp(title, "Caf\xc3\xa9 \xe2\x80\x9cLive\xe2\x80\x9d"));
+    au_media_info_release(info);
+}
+
 static void test_probe_untagged_and_bad(void) {
     const AuMediaInfo *info = au_probe(fx("rg_untagged.flac"), NULL);
     REQUIRE(info);
@@ -341,6 +352,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_probe_r128);
     RUN_TEST(test_probe_untagged_and_bad);
     RUN_TEST(test_chained_ogg_duration);
+    RUN_TEST(test_legacy_tag_encoding);
     RUN_TEST(test_pictures);
     RUN_TEST(test_track_info_while_playing);
     RUN_TEST(test_ffmpeg_log_routed);

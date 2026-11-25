@@ -20,6 +20,8 @@ sine s44_mono.wav      330 1 44100 1
 sine s48_51.flac       770 1 48000 6
 sine s44_flt.wav       880 1 44100 2 -c:a pcm_f32le
 sine s48_stereo.ogg    990 1 48000 2 -c:a libvorbis
+# A tag stored in a legacy encoding (WAV INFO chunks are not UTF-8): "Caf\xe9" in Windows-1252
+ff -f lavfi -i "sine=frequency=440:sample_rate=44100:duration=1" -metadata title=$'Caf\xe9 \x93Live\x94' legacy_tag.wav
 sine s44_stereo.m4a    220 1 44100 2 -c:a aac
 
 # Longer track for seek / pause / crossfade tests

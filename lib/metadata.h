@@ -39,7 +39,8 @@ typedef struct MediaDraft {
     int picture_count;          // attached pictures (cover art)
 } MediaDraft;
 
-// UTF-8 copy of text that may be Latin-1 (old Icecast servers): valid UTF-8 is kept, anything else is read as Latin-1
+// UTF-8 copy of text that may be in a legacy encoding (old Icecast servers, playlists and cue sheets from Windows
+// tools): valid UTF-8 is kept, anything else is read as Windows-1252 (Latin-1 plus quotes, dashes, the euro sign)
 char *text_to_utf8(const char *s);
 
 // Describe the audio stream `stream_index` of an opened (and probed) input. < 0 on failure (nothing to free).

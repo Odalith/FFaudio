@@ -55,7 +55,7 @@ extern "C" {
     } AuPlaylistFile;
 
     // Read a playlist file or URL. The format comes from the content ("[playlist]" = PLS, otherwise M3U); text that is
-    // not UTF-8 is read as Latin-1. An HLS playlist (.m3u8 with #EXT-X- lines) is a stream, not a list of tracks: it
+    // not UTF-8 is read as Windows-1252 (Latin-1 with quotes and dashes). An HLS playlist (.m3u8 with #EXT-X- lines) is a stream, not a list of tracks: it
     // gives one entry, itself. A playlist from a URL may only list URLs: local paths in it are left out, as streams may
     // not reach local files either. NULL on error: *out_error (may be NULL) is AU_ERR_FILE (can not be read, or not text),
     // AU_ERR_UNSUPPORTED (a cue sheet: since 3.2, read those with au_cue_read()), AU_ERR_INVALID_ARGUMENT or

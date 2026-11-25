@@ -67,6 +67,19 @@ static void test_latin1(void) {
     CHECK_STR(pl->entries[0].title, "Caf\xc3\xa9 Band");
     CHECK_STR(pl->entries[0].path, "/m/Caf\xc3\xa9.mp3");
     au_playlist_file_release(pl);
+    // Windows-1252's quotes and dashes (0x80..0x9F): a right quote, not the invisible control U+0092 that made the path
+    // point at no file
+    const char *quotes = "Don\x92t Stop \x96 Live.flac\n";
+    pl = parse(quotes, "/m/x.m3u", NULL);
+    REQUIRE(pl && pl->count == 1);
+    CHECK_STR(pl->entries[0].path, "/m/Don\xe2\x80\x99t Stop \xe2\x80\x93 Live.flac");
+    au_playlist_file_release(pl);
+    // Not UTF-8 although it looks like it: an overlong '/' (C0 AF) and a surrogate (ED A0 80) are read byte by byte
+    const char *overlong = "a\xc0\xaf" "b.flac\n";
+    pl = parse(overlong, NULL, NULL);
+    REQUIRE(pl && pl->count == 1);
+    CHECK_STR(pl->entries[0].path, "a\xc3\x80\xc2\xaf" "b.flac");
+    au_playlist_file_release(pl);
 }
 
 static void test_pls(void) {
