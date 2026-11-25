@@ -361,7 +361,9 @@ extern "C" {
     // prepare_next_seconds stay in wall clock time.
     FFAUDIO_API int au_set_speed(double speed, bool keep_pitch);
 
-    // Linear gain 0..1 for everything played (AU_ERR_INVALID_ARGUMENT for anything else)
+    // Linear gain 0..2 for everything played: 1 = as decoded (100 %), 2 = +6 dB. Above 1 loud parts can clip; that is
+    // the caller's choice (a limiter in au_set_filters() prevents it). AU_ERR_INVALID_ARGUMENT for anything else.
+    // (0..1 before 4.0.)
     FFAUDIO_API int au_set_volume(float gain);
 
     FFAUDIO_API int au_set_muted(bool muted);
@@ -639,7 +641,7 @@ extern "C" {
         bool buffering;                // the audible track waits for network data (its position holds)
         // The settings as last set, also before the control thread has applied them
         bool paused, muted;
-        float volume;
+        float volume;                  // 0..2, 1 = 100 %
         double speed;
         bool keep_pitch;
         int loop_count;

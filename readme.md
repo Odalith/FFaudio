@@ -35,7 +35,7 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - **Filters**: any FFmpeg filtergraph per track and/or globally, changeable while playing, with helpers for
   graphic and parametric EQ (AutoEq / EqualizerAPO profiles), bass/treble, balance, width, mono, channel swap,
   crossfeed, bs2b, compressor and limiter, and click and clipping repair for damaged sources
-- Volume with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
+- Volume up to 200 % with smooth ramps (no zipper noise), mute, pause, seek by time or percentage, looping
 - Playback speed 0.25x to 4x, keeping the pitch or tape-style, changeable while playing without gaps
 - Events for track open/start/end, prepare-next, restarts (seek/loop), duration, buffering, "now playing", device
   changes and logs: to a callback, or queued for polling on the application's own thread
@@ -106,7 +106,7 @@ static void on_event(const AuEvent *e, void *user) {
 au_init("My Player", on_event, NULL);
 
 // Every setting has a setter, usable any time after au_init(), also before anything plays
-au_set_volume(0.8f);         // linear gain 0..1
+au_set_volume(0.8f);         // linear gain 0..2: 1 = 100 %, above that loud parts can clip
 au_set_device(NULL);         // or a name from au_list_devices(); NULL = the system default, followed when it changes
 au_open_device();            // optional: open it now rather than with the first track; AU_EVENT_DEVICE says how it went
 ```

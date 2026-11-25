@@ -424,6 +424,26 @@ static float pause_fade_halfway(const AuFade pause) {
     return ratio;
 }
 
+// Volume goes up to 2 (+6 dB): the level doubles, nothing holds it at full scale
+static void test_volume_above_unity(void) {
+    start_capture("volume2");
+    CHECK(au_set_volume(1.0f) == AU_OK);
+    au_play(fx("long_6s.flac"), NULL);
+    tc_sleep_ms(800);
+    CHECK(au_set_volume(2.0f) == AU_OK);
+    CHECK(tc_status().volume == 2.0f);
+    tc_sleep_ms(1000);
+    au_stop();
+    wait_until_idle(1, 3000);
+    Capture c = stop_capture();
+    size_t first, last;
+    audible_range(&c, &first, &last);
+    const float at1 = window_peak(&c, first, 0.2, 0.6), at2 = window_peak(&c, first, 1.2, 1.6);
+    printf("   volume 1: peak %.3f, volume 2: peak %.3f (x%.3f)\n", at1, at2, at2 / at1);
+    CHECK(at1 > 0.05f && fabsf(at2 / at1 - 2.0f) < 0.02f);
+    free(c.samples);
+}
+
 static void test_pause_fade_curve(void) {
     CHECK(fabsf(pause_fade_halfway((AuFade){ .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER }) - 0.707f) < 0.05f);
 }
@@ -1448,6 +1468,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_crossfade_at_end);
     RUN_TEST(test_fade_out_on_stop);
     RUN_TEST(test_volume_ramp);
+    RUN_TEST(test_volume_above_unity);
     RUN_TEST(test_user_filter);
     RUN_TEST(test_user_filter_comma_locale);
     RUN_TEST(test_crossfade_on_skip);

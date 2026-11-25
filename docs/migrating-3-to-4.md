@@ -138,7 +138,9 @@ compiles but now means "it failed". Compare with `AU_OK`.
 - **Equal power is the default fade curve.** `AU_FADE_EQUAL_POWER` is 0, so a zeroed or designated-initialized
   `AuFade{ .seconds = 3 }` crossfades with equal power instead of linear (which dips about 3 dB in the middle). Code
   that names its curve is unaffected; code that stored curves as numbers must map them (`AU_FADE_LINEAR` is 1 now).
-- **Values out of range are refused:** `au_set_volume()` outside 0..1 or NaN, `au_seek()` below 0 or not finite,
+- **Volume goes up to 2** (+6 dB; 1 is still 100 %): above 1, loud parts can clip, which is the application's choice
+  (a limiter filter prevents it). 3.x took 0..1.
+- **Values out of range are refused:** `au_set_volume()` outside 0..2 or NaN, `au_seek()` below 0 or not finite,
   `au_seek_fraction()` outside 0..1, `au_set_loop_count()` below -1 (3.x clamped it to -1), a fade with seconds that
   are not finite or an unknown curve, `AU_FADE_CUSTOM` without a function (3.x played those as linear).
 - **`AU_ERR_NOT_SAVED`** (new): a ReplayGain cache change was made in memory, but the cache file could not be

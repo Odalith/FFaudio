@@ -910,7 +910,7 @@ int main(int argc, char **argv) {
                 break;
             case '+':
             case '=': {
-                const float v = fminf(1.0f, status().volume + 0.05f);
+                const float v = fminf(2.0f, status().volume + 0.05f);
                 au_set_volume(v);
                 printf("  volume %.0f%%\n", v * 100);
                 break;

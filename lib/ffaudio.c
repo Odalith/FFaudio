@@ -1873,7 +1873,7 @@ int au_send_filter_command(const int32_t handle, const char *target, const char 
 int au_set_volume(const float gain) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
-    if (!(gain >= 0.0f && gain <= 1.0f)) return AU_ERR_INVALID_ARGUMENT;
+    if (!(gain >= 0.0f && gain <= 2.0f)) return AU_ERR_INVALID_ARGUMENT;
     ffa_fetch_add(&ap->request_count, 1);
     atomic_set_float(&ap->volume, gain);
     return AU_OK;

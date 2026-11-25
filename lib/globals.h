@@ -506,7 +506,7 @@ typedef struct TrackPub {
 
 typedef struct AudioPlayer {
     // ---- configuration ----
-    FfAtomic volume;                // linear gain 0..1, a float (atomic_get_float())
+    FfAtomic volume;                // linear gain 0..2, a float (atomic_get_float())
     FfAtomic muted;
     FfAtomic paused;                // applied (control thread)
     // For au_get_status(): bit 0 = paused as last set (au_pause(), au_play() unpausing); the other bits count the

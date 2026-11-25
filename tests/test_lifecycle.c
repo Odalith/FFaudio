@@ -36,10 +36,11 @@ static void test_result_strings(void) {
     CHECK(strcmp(au_result_string(AU_ERR_NOT_SAVED - 1), "unknown result") == 0);
 }
 
-// Values out of range are refused, and change nothing (au_set_volume(2.0f) used to do nothing without a word)
+// Values out of range are refused, and change nothing (au_set_volume(3.0f) used to do nothing without a word)
 static void test_invalid_values(void) {
     REQUIRE(tc_init_player(0) == 0);
-    CHECK(au_set_volume(2.0f) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_volume(2.01f) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_volume(-0.01f) == AU_ERR_INVALID_ARGUMENT);
     CHECK(au_set_volume(NAN) == AU_ERR_INVALID_ARGUMENT);
     CHECK(tc_status().volume == 0.5f);
     CHECK(au_seek(-1) == AU_ERR_INVALID_ARGUMENT);
@@ -165,7 +166,7 @@ static void test_status_reflects_settings(void) {
     au_pause(true);
     st = tc_status();
     CHECK(st.volume == 0.333f && st.speed == 1.5 && !st.keep_pitch && st.loop_count == 3 && st.muted && st.paused);
-    au_set_volume(2.0f);                 // out of range: ignored
+    au_set_volume(2.5f);                 // out of range: ignored
     CHECK(tc_status().volume == 0.333f);
     au_set_loop_count(0);
     au_set_speed(1.0, true);
