@@ -186,6 +186,7 @@ void au_free(void *ptr) {
 
 int au_fb_add(AuFilterBuilder *fb, const char *filter) {
     if (!fb) return AU_ERR_INVALID_ARGUMENT;
+    fb->error[0] = '\0'; // au_fb_last_error() is about this call only
     if (!filter || !filter[0]) return finish(fb, fail(fb, "empty filter"));
     return finish(fb, append(fb, filter));
 }
@@ -195,8 +196,10 @@ bool au_filter_available(const char *name) {
 }
 
 // The start of every au_fb_add_*() call with a name: check it and use it for the filters of this call (finish()
-// clears it). NULL or "" = no name.
+// clears it). NULL or "" = no name. It also clears the last error: au_fb_last_error() is about this call only, also
+// when it succeeds without adding anything (default settings).
 static int begin(AuFilterBuilder *fb, const char *name) {
+    fb->error[0] = '\0';
     fb->name[0] = '\0';
     if (!name || !name[0]) return AU_OK;
     const size_t n = strlen(name);

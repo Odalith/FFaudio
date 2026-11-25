@@ -27,6 +27,13 @@ static void test_gain(void) {
     CHECK(au_fb_add_volume_db(fb, NULL, 99) == AU_ERR_INVALID_ARGUMENT);
     CHECK_STR(au_fb_peek(fb), "volume=-6.5dB");   // unchanged on error
     CHECK(strlen(au_fb_last_error(fb)) > 0);
+    // A later call that succeeds without adding anything (default settings) clears it; it used to stay
+    const AuStereo stereo = au_stereo_defaults();
+    CHECK(au_fb_add_stereo(fb, NULL, &stereo) == AU_OK);
+    CHECK_STR(au_fb_last_error(fb), "");
+    CHECK(au_fb_add_volume_db(fb, NULL, 99) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_fb_add(fb, "anull") == AU_OK);
+    CHECK_STR(au_fb_last_error(fb), "");
     au_fb_clear(fb);
     CHECK(au_fb_add_volume_db(fb, NULL, 0.91515) == AU_OK);
     CHECK_STR(au_fb_peek(fb), "volume=0.91515dB");
