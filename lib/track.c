@@ -942,6 +942,7 @@ static int result_of(const int averror) {
         case AVERROR_FILTER_NOT_FOUND:
         case AVERROR_PATCHWELCOME:
         case AVERROR(ENOSYS):
+        case AVERROR(EINVAL):   // avformat_open_input() with nothing it recognises (FFmpeg 6.1 on Ubuntu 24.04)
             return AU_ERR_UNSUPPORTED;
         default:
             return AU_ERR_FILE;

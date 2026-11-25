@@ -14,6 +14,7 @@
 
 #include "SDL2/SDL.h"
 #include "../lib/ffaudio.h"
+#include "../lib/ffaudio_loudness.h"
 
 /* ---------- assertions ---------- */
 
@@ -335,6 +336,12 @@ static void tc_setup(int argc, char **argv) {
 }
 
 static int tc_finish(const char *name) {
+    // Nothing may call back into the harness any more: scan workers outlive the player, and call on_cached
+    au_gain_scan_stop();
+    SDL_DestroyCond(tc_cond);
+    SDL_DestroyMutex(tc_mutex);
+    tc_cond = NULL;
+    tc_mutex = NULL;
     if (tc_failures) {
         fprintf(stderr, "%s: %d check(s) failed\n", name, tc_failures);
         return 1;
