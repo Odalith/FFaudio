@@ -112,7 +112,7 @@ static void test_errors_and_timeouts(void) {
     CHECK(tc_snapshot().eof_error == 2);
 
     // A server that never answers: the timeout ends the track
-    const AuNetworkConfig quick = { .timeout_seconds = 1 };
+    const AuNetworkSettings quick = { .timeout_seconds = 1 };
     CHECK(au_set_network(&quick) == AU_OK);
     const uint32_t t0 = SDL_GetTicks();
     play_and_wait(url("/hang"), NULL, 3, 6000);
@@ -122,7 +122,7 @@ static void test_errors_and_timeouts(void) {
     CHECK(took >= 900 && took < 5000);
 
     // Stopping a track that is still connecting does not wait for the timeout
-    const AuNetworkConfig slow = { .timeout_seconds = 60 };
+    const AuNetworkSettings slow = { .timeout_seconds = 60 };
     CHECK(au_set_network(&slow) == AU_OK);
     au_play(url("/hang"), NULL);
     tc_sleep_ms(300);
@@ -132,7 +132,7 @@ static void test_errors_and_timeouts(void) {
     printf("   stopped while connecting: %u ms\n", SDL_GetTicks() - t1);
     CHECK(au_set_network(NULL) == AU_OK);
 
-    const AuNetworkConfig bad = { .timeout_seconds = -1 };
+    const AuNetworkSettings bad = { .timeout_seconds = -1 };
     CHECK(au_set_network(&bad) == AU_ERR_INVALID_ARGUMENT);
 }
 
@@ -144,7 +144,7 @@ static void test_headers_and_user_agent(void) {
     play_and_wait(url("/auth/s44_stereo.flac"), &with_token, 2, 6000);
     CHECK(tc_snapshot().eof_error == 1);           // played
 
-    const AuNetworkConfig ua = { .user_agent = "soak-test/1" };
+    const AuNetworkSettings ua = { .user_agent = "soak-test/1" };
     CHECK(au_set_network(&ua) == AU_OK);
     play_and_wait(url("/files/s44_stereo.flac"), NULL, 3, 6000);
     char seen[256];
@@ -194,18 +194,18 @@ static void test_no_measuring_by_default(void) {
     remove(cache);
     CHECK(au_gain_cache_set_file(cache) == AU_OK);
     const char *paths[1] = { url("/files/long_6s.flac") };
-    CHECK(au_gain_cache_request(paths, 1, AU_SCAN_URGENT) == 0);   // skipped: it would download the file
+    CHECK(au_gain_scan_request(paths, 1, AU_SCAN_URGENT) == 0);   // skipped: it would download the file
     // An album with a network track is skipped as a whole: measured without that track it would be wrong
     const char *album[2] = { fx("s44_stereo.flac"), url("/files/long_6s.flac") };
-    CHECK(au_gain_cache_request_album(album, 2, AU_SCAN_URGENT) == 0);
+    CHECK(au_gain_scan_request_album(album, 2, AU_SCAN_URGENT) == 0);
 
-    const AuNetworkConfig measure = { .measure_streams = true };
-    CHECK(au_set_network(&measure) == AU_OK);
-    CHECK(au_gain_cache_request(paths, 1, AU_SCAN_URGENT) == 1);
-    for (int i = 0; i < 300 && au_gain_cache_pending() > 0; i++) tc_sleep_ms(20);
+    const AuGainScanSettings measure = { .measure_streams = true };
+    CHECK(au_set_gain_scan(&measure) == AU_OK);
+    CHECK(au_gain_scan_request(paths, 1, AU_SCAN_URGENT) == 1);
+    for (int i = 0; i < 300 && au_gain_scan_pending() > 0; i++) tc_sleep_ms(20);
     AuReplayGain rg;
     CHECK(au_gain_cache_get(paths[0], &rg) && !isnan(rg.track_gain_db));
-    CHECK(au_set_network(NULL) == AU_OK);
+    CHECK(au_set_gain_scan(NULL) == AU_OK);
     au_gain_scan_stop();
     au_gain_cache_set_file("");
     remove(cache);
@@ -240,7 +240,7 @@ static void test_live_stream(void) {
 
 static void test_preroll(void) {
     // 1.5 s of audio must be in before the first sample plays; at twice real time that takes ~0.75 s
-    const AuNetworkConfig net = { .buffer_seconds = 1.5 };
+    const AuNetworkSettings net = { .buffer_seconds = 1.5 };
     CHECK(au_set_network(&net) == AU_OK);
     char path[64];
     snprintf(path, sizeof(path), "/live/live.mp3?bps=%d", 2 * LIVE_BPS);
@@ -259,7 +259,7 @@ static void test_preroll(void) {
 
 static void test_stall(void) {
     // Data at 0.6x real time: playback has to wait again and again, and its position never runs ahead of the data
-    const AuNetworkConfig net = { .buffer_seconds = 0.5 };
+    const AuNetworkSettings net = { .buffer_seconds = 0.5 };
     CHECK(au_set_network(&net) == AU_OK);
     char path[64];
     snprintf(path, sizeof(path), "/live/live.mp3?bps=%d", LIVE_BPS * 6 / 10);
@@ -296,7 +296,7 @@ static void test_reconnect(void) {
     CHECK(TC_WAIT_FIELD(eof, 2, 3000));
 
     // Without reconnects the drop ends it
-    const AuNetworkConfig never = { .reconnect_attempts = -1 };
+    const AuNetworkSettings never = { .reconnect_attempts = -1 };
     CHECK(au_set_network(&never) == AU_OK);
     au_play(url("/live/live.mp3?drop=40000&n=2"), NULL);
     CHECK(TC_WAIT_FIELD(eof, 3, 10000));
@@ -355,7 +355,7 @@ static void test_icy_with_file_tags(void) {
 // A transfer that breaks off fails the measurement instead of measuring the part that arrived, which would be
 // stored as the file's loudness
 static void test_no_analysis_of_broken_transfer(void) {
-    const AuNetworkConfig never = { .reconnect_attempts = -1 };
+    const AuNetworkSettings never = { .reconnect_attempts = -1 };
     CHECK(au_set_network(&never) == AU_OK);
     AuLoudness l;
     CHECK(au_loudness_analyze(url("/files/long_6s.flac?drop=40000&n=broken"), NULL, &l) == AU_ERR_FILE);
@@ -372,9 +372,9 @@ static void test_failed_measurement_ends_wait(void) {
     snprintf(cache, sizeof(cache), "%s/test_network_wait.cache", tc_fixture_dir);
     remove(cache);
     CHECK(au_gain_cache_set_file(cache) == AU_OK);
-    const AuNetworkConfig measure = { .measure_streams = true };
-    CHECK(au_set_network(&measure) == AU_OK);
-    const AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK, .measure_missing = true, .measure_wait_seconds = 8 };
+    const AuGainScanSettings measure = { .measure_streams = true };
+    CHECK(au_set_gain_scan(&measure) == AU_OK);
+    const AuReplayGainSettings rg = { .mode = AU_REPLAYGAIN_TRACK, .measure_missing = true, .measure_wait_seconds = 8 };
     CHECK(au_set_replaygain(&rg) == AU_OK);
 
     const uint32_t t0 = SDL_GetTicks();
@@ -387,7 +387,7 @@ static void test_failed_measurement_ends_wait(void) {
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
 
     CHECK(au_set_replaygain(NULL) == AU_OK);
-    CHECK(au_set_network(NULL) == AU_OK);
+    CHECK(au_set_gain_scan(NULL) == AU_OK);
     au_gain_scan_stop();
     au_gain_cache_set_file("");
     remove(cache);
@@ -397,7 +397,7 @@ static void test_failed_measurement_ends_wait(void) {
 // on the next request (it has no size or time to see a change by, and was skipped for the whole session); a live
 // stream is not opened again on every request (it was never remembered)
 static void wait_scans(void) {
-    for (int i = 0; i < 400 && au_gain_cache_pending() > 0; i++) tc_sleep_ms(20);
+    for (int i = 0; i < 400 && au_gain_scan_pending() > 0; i++) tc_sleep_ms(20);
 }
 
 static void test_failed_urls_are_tried_again(void) {
@@ -405,23 +405,23 @@ static void test_failed_urls_are_tried_again(void) {
     snprintf(cache, sizeof(cache), "%s/test_network_retry.cache", tc_fixture_dir);
     remove(cache);
     CHECK(au_gain_cache_set_file(cache) == AU_OK);
-    const AuNetworkConfig measure = { .measure_streams = true };
-    CHECK(au_set_network(&measure) == AU_OK);
+    const AuGainScanSettings measure = { .measure_streams = true };
+    CHECK(au_set_gain_scan(&measure) == AU_OK);
 
     const char *missing[1] = { url("/status/404?n=retry") };
-    CHECK(au_gain_cache_request(missing, 1, AU_SCAN_URGENT) == 1);
+    CHECK(au_gain_scan_request(missing, 1, AU_SCAN_URGENT) == 1);
     wait_scans();
-    CHECK(au_gain_cache_request(missing, 1, AU_SCAN_URGENT) == 1);   // tried again
+    CHECK(au_gain_scan_request(missing, 1, AU_SCAN_URGENT) == 1);   // tried again
     wait_scans();
     printf("   failing URL: %d requests to the server\n", ts_count(&srv, "/status/404?n=retry"));
 
     const char *live[1] = { url("/live/live.mp3?n=scan") };
-    CHECK(au_gain_cache_request(live, 1, AU_SCAN_URGENT) == 1);
+    CHECK(au_gain_scan_request(live, 1, AU_SCAN_URGENT) == 1);
     wait_scans();
-    CHECK(au_gain_cache_request(live, 1, AU_SCAN_URGENT) == 0);      // known to be live
+    CHECK(au_gain_scan_request(live, 1, AU_SCAN_URGENT) == 0);      // known to be live
     printf("   live stream: %d requests to the server\n", ts_count(&srv, "/live/live.mp3?n=scan"));
 
-    CHECK(au_set_network(NULL) == AU_OK);
+    CHECK(au_set_gain_scan(NULL) == AU_OK);
     au_gain_scan_stop();
     au_gain_cache_set_file("");
     remove(cache);

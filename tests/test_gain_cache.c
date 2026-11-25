@@ -174,7 +174,7 @@ static double applied_gain(const int32_t handle) {
 static void start_player(void) {
     tc_reset_events();
     REQUIRE(tc_init_player(0) == 0);
-    const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings cfg = { .mode = AU_REPLAYGAIN_TRACK };
     REQUIRE(au_set_replaygain(&cfg) == AU_OK);
 }
 

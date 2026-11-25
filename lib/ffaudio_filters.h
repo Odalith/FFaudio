@@ -199,7 +199,7 @@ extern "C" {
 
     // A look-ahead peak limiter: a safety net after equalizer boosts, widening or compression. It does not raise
     // quiet audio. It runs before ffaudio's volume and ReplayGain stage, so with ReplayGain boosts also enable
-    // AuReplayGainConfig.prevent_clipping. config NULL = defaults. Filter: alimiter@<name>; commands limit
+    // AuReplayGainSettings.prevent_clipping. config NULL = defaults. Filter: alimiter@<name>; commands limit
     // (linear 0.0625..1), attack, release.
     FFAUDIO_API int au_fb_add_limiter(AuFilterBuilder *fb, const char *name, const AuLimiter *config);
 

@@ -60,6 +60,6 @@ const AuMediaInfo *media_info_retain(const AuMediaInfo *info);
 AuReplayGain replaygain_from_tags(const AVDictionary *tags);
 
 // Gain in dB that the ReplayGain settings give a track with these values (0 when off)
-double replaygain_gain_db(const AuReplayGainConfig *config, const AuReplayGain *rg);
+double replaygain_gain_db(const AuReplayGainSettings *config, const AuReplayGain *rg);
 
 #endif //FFAUDIO_METADATA_H

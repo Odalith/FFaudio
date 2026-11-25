@@ -15,7 +15,7 @@ void loudness_meter_clear(AuLoudnessMeter *m);
 // it connects, reads and waits between reconnects, so a measurement of a stalled stream stops right away instead of
 // after its timeouts; it then returns AU_ERR_CANCELLED. The callback runs often on the measuring thread and must be
 // quick. On error the meter is empty.
-int loudness_measure_into(AuLoudnessMeter *m, const char *path, const AuLoudnessConfig *config,
+int loudness_measure_into(AuLoudnessMeter *m, const char *path, const AuLoudnessOptions *config,
                           const AVIOInterruptCB *interrupt);
 
 #endif //FFAUDIO_LOUDNESS_INTERNAL_H

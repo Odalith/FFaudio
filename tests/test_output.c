@@ -1047,7 +1047,7 @@ static void test_spectrum(void) {
 /* ---------- ReplayGain ---------- */
 
 // Play `file` at volume 100 with the given ReplayGain settings, return the left channel peak in dB
-static float replaygain_level(const char *file, const AuReplayGainConfig *cfg, const AuReplayGain *override) {
+static float replaygain_level(const char *file, const AuReplayGainSettings *cfg, const AuReplayGain *override) {
     start_capture("replaygain");
     au_set_volume(1.0f);
     if (cfg) CHECK(au_set_replaygain(cfg) == AU_OK);
@@ -1066,11 +1066,11 @@ static float replaygain_level(const char *file, const AuReplayGainConfig *cfg, c
     CHECK(fabsf(a_ - e_) < (tol)); } while (0)
 
 static void test_replaygain_levels(void) {
-    const AuReplayGainConfig track = { .mode = AU_REPLAYGAIN_TRACK };
-    const AuReplayGainConfig album = { .mode = AU_REPLAYGAIN_ALBUM };
-    const AuReplayGainConfig preamp = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 2 };
-    const AuReplayGainConfig fallback = { .mode = AU_REPLAYGAIN_TRACK, .fallback_gain_db = -6 };
-    const AuReplayGainConfig safe = { .mode = AU_REPLAYGAIN_TRACK, .prevent_clipping = true };
+    const AuReplayGainSettings track = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings album = { .mode = AU_REPLAYGAIN_ALBUM };
+    const AuReplayGainSettings preamp = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 2 };
+    const AuReplayGainSettings fallback = { .mode = AU_REPLAYGAIN_TRACK, .fallback_gain_db = -6 };
+    const AuReplayGainSettings safe = { .mode = AU_REPLAYGAIN_TRACK, .prevent_clipping = true };
 
     CHECK_LEVEL(replaygain_level("rg_tagged.flac", NULL, NULL), SINE_DB, 0.1f);            // off by default
     CHECK_LEVEL(replaygain_level("rg_tagged.flac", &track, NULL), SINE_DB - 6, 0.1f);
@@ -1119,7 +1119,7 @@ static void test_gain_change_after_unchanged_late_value(void) {
     CHECK(au_gain_cache_set_file("") == AU_OK); // memory only
     start_capture("late_unchanged");
     au_set_volume(1.0f);
-    const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK }; // no tags, nothing cached: the fallback, 0 dB
+    const AuReplayGainSettings cfg = { .mode = AU_REPLAYGAIN_TRACK }; // no tags, nothing cached: the fallback, 0 dB
     CHECK(au_set_replaygain(&cfg) == AU_OK);
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(800);
@@ -1127,7 +1127,7 @@ static void test_gain_change_after_unchanged_late_value(void) {
     same.track_gain_db = 0;
     CHECK(au_gain_cache_set(fx("long_6s.flac"), &same) == AU_OK);
     tc_sleep_ms(300);
-    const AuReplayGainConfig quieter = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = -6 };
+    const AuReplayGainSettings quieter = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = -6 };
     CHECK(au_set_replaygain(&quieter) == AU_OK);
     tc_sleep_ms(1500);
     au_stop();
@@ -1190,7 +1190,7 @@ static void test_replaygain_from_first_sample(void) {
 
     start_capture("replaygain_first_sample");
     au_set_volume(1.0f);
-    const AuReplayGainConfig cfg = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings cfg = { .mode = AU_REPLAYGAIN_TRACK };
     CHECK(au_set_replaygain(&cfg) == AU_OK);
     SDL_Thread *writer = SDL_CreateThread(feed_fifo, "fifo", src);
     au_play(fifo_path, NULL);
@@ -1216,7 +1216,7 @@ static void test_replaygain_live_change(void) {
     au_set_volume(1.0f);
     au_play(fx("rg_long.flac"), NULL);
     tc_sleep_ms(1000);
-    const AuReplayGainConfig track = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings track = { .mode = AU_REPLAYGAIN_TRACK };
     CHECK(au_set_replaygain(&track) == AU_OK);
     wait_until_idle(1, 5000);
     Capture c = stop_capture();
@@ -1282,7 +1282,7 @@ static void test_speed(void) {
     CHECK(fabs(r.seconds - 2.0) < 0.1);
     CHECK(fabs(r.frequency - 440) < 5);
 
-    CHECK(au_init(NULL) != AU_OK); // (no player: the setter below must refuse)
+    au_shutdown(); // no player: the setter must refuse
     CHECK(au_set_speed(2.0, true) == AU_ERR_NOT_INITIALIZED);
 }
 

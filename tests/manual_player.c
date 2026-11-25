@@ -447,7 +447,7 @@ static void prefetch_upcoming(void) {
     for (size_t i = next_index; i < file_count && i < max_tracks && n < PREFETCH_COUNT; i++)
         upcoming[n++] = files[i];
     unlock(&files_lock);
-    au_gain_cache_request(upcoming, n, AU_SCAN_PREFETCH);
+    au_gain_scan_request(upcoming, n, AU_SCAN_PREFETCH);
 }
 
 static void queue_next_file(void) {
@@ -808,13 +808,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    const AuConfig config = {
-        .app_name = "ffaudio manual player",
-        .volume = 0.6f,
-        .output_channels = channels,
-        .on_event = on_event,
-    };
-    if (au_init(&config) != AU_OK) return 1;
+    if (au_init("ffaudio manual player", on_event, NULL) != AU_OK) return 1;
+    au_set_volume(0.6f);
+    if (channels) au_set_output_format(channels, 0);
+    au_open_device(); // show the device at start
 
     int n = 0;
     char **devs = au_list_devices(&n);
@@ -822,7 +819,7 @@ int main(int argc, char **argv) {
     au_free_devices(devs, n);
 
     if (replaygain) {
-        const AuReplayGainConfig rg = {
+        const AuReplayGainSettings rg = {
             .mode = !strcmp(replaygain, "album") ? AU_REPLAYGAIN_ALBUM : AU_REPLAYGAIN_TRACK,
             .fallback_gain_db = -6.0,
             .prevent_clipping = true,
@@ -839,8 +836,8 @@ int main(int argc, char **argv) {
         au_gain_cache_get_file(where, sizeof(where));
         printf("ReplayGain cache: %s (%d entries); uncached files are measured in the background\n",
                where[0] ? where : "memory only", au_gain_cache_count());
-        const AuGainScanConfig scan = { .on_cached = on_cached };
-        au_gain_scan_configure(&scan);
+        const AuGainScanSettings scan = { .on_cached = on_cached };
+        au_set_gain_scan(&scan);
     }
 
     if (downmix) {

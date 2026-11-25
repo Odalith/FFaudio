@@ -38,8 +38,10 @@ void gain_cache_note_failure(const char *path);
 void ff_gain_cache_changed(const char *path);
 
 // Implemented by the scan queue: measure `path` as soon as possible for a track that is starting
-// (not affected by au_gain_cache_cancel_requests()). false when the file could not be measured before and has
+// (not affected by au_gain_scan_cancel()). false when the file could not be measured before and has
 // not changed since: nothing is queued, so there is nothing to wait for.
 bool gain_scan_request_for_player(const char *path);
+// Whether network files are measured (AuGainScanSettings.measure_streams)
+bool gain_scan_measures_streams(void);
 
 #endif //FFAUDIO_GAIN_CACHE_H

@@ -66,7 +66,7 @@ static void test_peaks(void) {
     CHECK_NEAR(db(l.sample_peak), -9.03, 0.05);
     CHECK(db(l.true_peak) > -6.2 && db(l.true_peak) < -5.0);
 
-    const AuLoudnessConfig fast = { .skip_true_peak = true };
+    const AuLoudnessOptions fast = { .skip_true_peak = true };
     AuLoudness s;
     CHECK(au_loudness_analyze(fx("ld_truepeak.wav"), &fast, &s) == AU_OK);
     CHECK(s.true_peak == s.sample_peak);
@@ -172,7 +172,7 @@ static bool on_progress(double fraction, void *user) {
 }
 
 static void test_progress_and_cancel(void) {
-    const AuLoudnessConfig cfg = { .progress = on_progress };
+    const AuLoudnessOptions cfg = { .progress = on_progress };
     AuLoudnessMeter *m = NULL;
     CHECK(au_loudness_measure(fx("ld_gate.flac"), &cfg, &m) == AU_OK);
     au_loudness_meter_free(m);

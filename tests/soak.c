@@ -19,7 +19,7 @@
  *     -d minutes   write malloc_info() (glibc: every arena's free blocks by size) to malloc-<seconds>.xml this often
  *     -m           call malloc_trim(0) after every sample (glibc), to see how much of the growth is memory that
  *                  malloc has freed but kept
- *     -B seconds   network read-ahead (AuNetworkConfig.max_buffer_seconds; default: ffaudio's)
+ *     -B seconds   network read-ahead (AuNetworkSettings.max_buffer_seconds; default: ffaudio's)
  *     -w percent   play this share of picks over HTTP from a local server (tests/http_server.h, in a child process
  *                  so its threads and memory are not measured): files with range
  *                  requests, and MP3s also as endless live streams with "now playing" titles, sometimes throttled
@@ -294,7 +294,7 @@ static void random_crossfade(void) {
 }
 
 static void random_replaygain(void) {
-    const AuReplayGainConfig rg = {
+    const AuReplayGainSettings rg = {
         .mode = (AU_REPLAYGAIN_MODE)rnd_int(3),
         .preamp_db = chance(0.5) ? 0 : rnd_real(-6, 6),
         .fallback_gain_db = chance(0.5) ? 0 : -6,
@@ -421,16 +421,12 @@ static void on_event(const AuEvent *e, void *ud) {
 }
 
 static void init_player(void) {
-    const AuConfig config = {
-        .app_name = "ffaudio soak",
-        .volume = 0.3f,
-        .prepare_next_seconds = rnd_real(2, 15),
-        .on_event = on_event,
-    };
-    if (au_init(&config) != AU_OK) {
+    if (au_init("ffaudio soak", on_event, NULL) != AU_OK) {
         fprintf(stderr, "could not start the player\n");
         exit(1);
     }
+    au_set_volume(0.3f);
+    au_set_prepare_next(rnd_real(2, 15));
     random_crossfade();
     random_replaygain();
     random_filters();
@@ -452,7 +448,7 @@ static void *analysis_thread(void *arg) {
             atomic_fetch_add(&n_probes, 1);
         }
         else {
-            const AuLoudnessConfig cfg = { .skip_true_peak = chance(0.5) };
+            const AuLoudnessOptions cfg = { .skip_true_peak = chance(0.5) };
             AuLoudness l;
             if (au_loudness_analyze(f, &cfg, &l) == AU_OK) atomic_fetch_add(&n_analyses, 1);
             else atomic_fetch_add(&n_analysis_failed, 1);
@@ -540,7 +536,7 @@ static void record(void) {
     fprintf(csv, "%.0f,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%ld,%d,%d,%ld,%ld\n", s.t, s.rss_kb,
             s.anon_kb, s.heap_kb, s.heap_free_kb, s.heap_total_kb, s.threads, s.fds, atomic_load(&n_started), atomic_load(&n_ended), atomic_load(&n_ended_error),
             atomic_load(&n_actions), atomic_load(&n_analyses), atomic_load(&n_probes), atomic_load(&n_reinits),
-            atomic_load(&n_logs_error), atomic_load(&n_cached), au_gain_cache_count(), au_gain_cache_pending(),
+            atomic_load(&n_logs_error), atomic_load(&n_cached), au_gain_cache_count(), au_gain_scan_pending(),
             atomic_load(&n_buffering), atomic_load(&n_titles));
     fflush(csv);
     printf("[%6.0f s] rss %6ld KB  heap %6ld KB (held %6ld KB)  threads %3ld  fds %3ld  tracks %ld (%ld failed)  actions %ld  "
@@ -630,13 +626,13 @@ static void one_action(void) {
         ACTION("prefetch");
         const char *paths[10];
         for (int i = 0; i < 10; i++) paths[i] = pick_audio();
-        au_gain_cache_request(paths, 10, chance(0.2) ? AU_SCAN_URGENT : AU_SCAN_PREFETCH);
-        if (chance(0.1)) au_gain_cache_cancel_requests();
+        au_gain_scan_request(paths, 10, chance(0.2) ? AU_SCAN_URGENT : AU_SCAN_PREFETCH);
+        if (chance(0.1)) au_gain_scan_cancel();
     }
     else if (r < 820) {
         ACTION("album");
         const char *paths[4] = { pick_audio(), pick_audio(), pick_audio(), pick_audio() };
-        au_gain_cache_request_album(paths, 4, AU_SCAN_PREFETCH);
+        au_gain_scan_request_album(paths, 4, AU_SCAN_PREFETCH);
     }
     else if (r < 860) {
         ACTION("track_info");
@@ -715,7 +711,7 @@ int main(int argc, char **argv) {
            junk.n, hours, (unsigned long long)base_seed, scale > 0 ? "disk driver (fast)" : "real device", csv_path);
 
     if (max_buffer_seconds > 0) {
-        const AuNetworkConfig net = { .max_buffer_seconds = max_buffer_seconds };
+        const AuNetworkSettings net = { .max_buffer_seconds = max_buffer_seconds };
         au_set_network(&net);
         printf("network read-ahead: %.1f s\n", max_buffer_seconds);
     }
@@ -728,8 +724,8 @@ int main(int argc, char **argv) {
     t0 = now_s();
     if (!keep_cache) remove(cache_file);
     au_gain_cache_set_file(cache_file);   // never the user's own cache
-    const AuGainScanConfig scan = { .threads = 2, .on_cached = on_cached };
-    au_gain_scan_configure(&scan);
+    const AuGainScanSettings scan = { .threads = 2, .on_cached = on_cached };
+    au_set_gain_scan(&scan);
     init_player();
     play_random(false);
 

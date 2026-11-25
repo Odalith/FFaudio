@@ -717,6 +717,9 @@ int output_open(AudioPlayer *ap, const bool use_default, const char *device_name
     m->format = obtained.format;
     m->bytes_per_sample = SDL_AUDIO_BITSIZE(obtained.format) / 8;
     m->vol_ramp_frames = FFMAX(1, (int)(VOLUME_RAMP_SECONDS * obtained.freq));
+    // Nothing has played on this device yet: start at the volume set (it may have been set after au_init(), before
+    // the device opened), not with a ramp from an older value
+    m->vol_gain = ffa_load(&ap->muted) ? 0.0f : atomic_get_float(&ap->volume);
     m->buf_frames = FFMAX(1024, obtained.samples);
     m->mix_buf = av_malloc_array((size_t)m->buf_frames * m->channels, sizeof(float));
     m->voice_buf = av_malloc_array((size_t)m->buf_frames * m->channels, sizeof(float));

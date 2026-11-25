@@ -80,7 +80,7 @@ AuReplayGain replaygain_from_tags(const AVDictionary *tags) {
     return rg;
 }
 
-double replaygain_gain_db(const AuReplayGainConfig *cfg, const AuReplayGain *rg) {
+double replaygain_gain_db(const AuReplayGainSettings *cfg, const AuReplayGain *rg) {
     if (!cfg || cfg->mode == AU_REPLAYGAIN_OFF) return 0.0;
 
     const bool album = cfg->mode == AU_REPLAYGAIN_ALBUM;

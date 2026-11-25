@@ -405,6 +405,7 @@ typedef enum MsgType {
     CMD_SEEK_PERCENT,
     CMD_SET_LOOP,
     CMD_CONFIGURE_DEVICE,
+    CMD_OPEN_DEVICE,
     CMD_SET_CROSSFADE,
     CMD_SET_GLOBAL_FILTERS,
     CMD_SET_DOWNMIX,
@@ -437,7 +438,7 @@ typedef struct Msg {
     AuFade fade_in_override;
     bool has_fade_in_override;
     AuCrossfade crossfade;
-    AuReplayGainConfig replaygain;
+    AuReplayGainSettings replaygain;
     AuReplayGain replaygain_override;
     bool has_replaygain_override;
     int64_t i64;
@@ -555,7 +556,7 @@ typedef struct AudioPlayer {
     bool output_ready;                  // guarded by format_mutex
     char *global_filters;               // guarded by format_mutex, applied after each track's own filters
     AU_DOWNMIX downmix;                 // guarded by format_mutex
-    AuReplayGainConfig replaygain;      // guarded by format_mutex
+    AuReplayGainSettings replaygain;      // guarded by format_mutex
     double speed;                       // guarded by format_mutex, playback speed (1 = normal)
     bool keep_pitch;                    // guarded by format_mutex
     int32_t speed_gen;                  // guarded by format_mutex, bumped on every change

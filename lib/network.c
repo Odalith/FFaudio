@@ -43,7 +43,7 @@
 
 static SDL_mutex *lock = NULL;
 static FfOnce lock_once = FF_ONCE_INIT;
-static AuNetworkConfig settings;      // guarded by lock; user_agent is owned (av_strdup)
+static AuNetworkSettings settings;      // guarded by lock; user_agent is owned (av_strdup)
 
 static void create_lock(void) {
     lock = SDL_CreateMutex();
@@ -66,7 +66,7 @@ bool au_is_network_url(const char *path) {
     return !(p - path == 4 && !av_strncasecmp(path, "file", 4));
 }
 
-int au_set_network(const AuNetworkConfig *config) {
+int au_set_network(const AuNetworkSettings *config) {
     if (config) {
         if (!isfinite(config->timeout_seconds) || config->timeout_seconds < 0 || config->timeout_seconds > 600)
             return AU_ERR_INVALID_ARGUMENT;
@@ -91,8 +91,8 @@ int au_set_network(const AuNetworkConfig *config) {
     return AU_OK;
 }
 
-AuNetworkConfig network_config(char *ua, const size_t ua_size) {
-    AuNetworkConfig c;
+AuNetworkSettings network_config(char *ua, const size_t ua_size) {
+    AuNetworkSettings c;
     memset(&c, 0, sizeof(c));
     if (locked()) {
         c = settings;
@@ -141,7 +141,7 @@ void network_input_options(AVDictionary **opts, const char *path, const char *ht
     if (!net) return;
 
     char ua[256];
-    const AuNetworkConfig c = network_config(ua, sizeof(ua));
+    const AuNetworkSettings c = network_config(ua, sizeof(ua));
     char us[32];
     snprintf(us, sizeof(us), "%lld", (long long)llround(c.timeout_seconds * 1e6));
     av_dict_set(opts, "rw_timeout", us, 0);   // every read and write (microseconds)

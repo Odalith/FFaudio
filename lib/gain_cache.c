@@ -898,7 +898,7 @@ int au_gain_cache_count(void) {
     return n;
 }
 
-int au_gain_cache_foreach(const AuGainCacheVisitor visitor, void *user) {
+int au_gain_cache_foreach(const AuGainCacheVisitorFn visitor, void *user) {
     if (!visitor) return 0;
     SDL_mutex *m = cache_mutex();
     if (!m) return 0;
@@ -932,7 +932,7 @@ int au_gain_cache_foreach(const AuGainCacheVisitor visitor, void *user) {
     return visited;
 }
 
-int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGain *out) {
+int au_gain_cache_scan(const char *path, const AuLoudnessOptions *config, AuReplayGain *out) {
     if (!path || !path[0]) return AU_ERR_INVALID_ARGUMENT;
     AuReplayGain rg;
     if (gain_cache_lookup(path, &rg)) {

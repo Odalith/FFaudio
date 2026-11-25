@@ -259,18 +259,16 @@ static void tc_sleep_ms(uint32_t ms) { SDL_Delay(ms); }
 static int tc_output_channels = 0;
 static int tc_output_rate = 0;
 
-// Start a player; it opens the system default device (AU_EVENT_DEVICE)
+// Start a player with the tests' settings, and open the system default device in the format asked for (one
+// AU_EVENT_DEVICE)
 static int tc_initialize(int loop_count, double prepare_next_seconds) {
-    const AuConfig config = {
-        .app_name = "ffaudio-tests",
-        .output_channels = tc_output_channels,
-        .output_sample_rate = tc_output_rate,
-        .volume = 0.5f,
-        .loop_count = loop_count,
-        .prepare_next_seconds = prepare_next_seconds,
-        .on_event = tc_event_cb,
-    };
-    return au_init(&config);
+    const int ret = au_init("ffaudio-tests", tc_event_cb, NULL);
+    if (ret != AU_OK) return ret;
+    au_set_volume(0.5f);
+    au_set_loop_count(loop_count);
+    if (prepare_next_seconds > 0) au_set_prepare_next(prepare_next_seconds);
+    if (au_set_output_format(tc_output_channels, tc_output_rate) != AU_OK) return AU_ERR_INVALID_ARGUMENT;
+    return au_open_device();
 }
 
 // A player with its device open: waits for the first AU_EVENT_DEVICE (the tests count from a known state)

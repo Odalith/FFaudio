@@ -231,13 +231,13 @@ static void test_track_info_while_playing(void) {
 
     double gain = 99;
     CHECK(au_track_gain_db(h, &gain) == AU_OK && gain == 0.0); // ReplayGain is off by default
-    const AuReplayGainConfig rg = { .mode = AU_REPLAYGAIN_TRACK };
+    const AuReplayGainSettings rg = { .mode = AU_REPLAYGAIN_TRACK };
     CHECK(au_set_replaygain(&rg) == AU_OK);
     tc_sleep_ms(100);
     CHECK(au_track_gain_db(0, &gain) == AU_OK && fabs(gain + 6.0) < 0.01);
     CHECK(au_track_gain_db(h + 1000, &gain) == AU_ERR_NOTHING_TO_DO);
 
-    const AuReplayGainConfig bad = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 40 };
+    const AuReplayGainSettings bad = { .mode = AU_REPLAYGAIN_TRACK, .preamp_db = 40 };
     CHECK(au_set_replaygain(&bad) == AU_ERR_INVALID_ARGUMENT);
 
     au_stop();

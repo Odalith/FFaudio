@@ -64,13 +64,13 @@ extern "C" {
 
     // Called while a file is scanned; fraction is 0..1 (or < 0 when the duration is unknown).
     // Return false to cancel the scan of this file.
-    typedef bool (*AuLoudnessProgress)(double fraction, void *user);
+    typedef bool (*AuLoudnessProgressFn)(double fraction, void *user);
 
-    typedef struct AuLoudnessConfig {
+    typedef struct AuLoudnessOptions {
         bool skip_true_peak;          // only measure the sample peak (the true peak adds about 15% to a scan)
-        AuLoudnessProgress progress;  // optional
+        AuLoudnessProgressFn progress;  // optional
         void *progress_user;
-    } AuLoudnessConfig;
+    } AuLoudnessOptions;
 
     // A measurement: one file, or several merged (an album). About 320 KB (two histograms of 0.01 LU bins).
     typedef struct AuLoudnessMeter AuLoudnessMeter;
@@ -79,7 +79,7 @@ extern "C" {
     // (defaults: true peak on, no progress callback). Returns AU_OK, AU_ERR_FILE (can not be opened/decoded),
     // AU_ERR_CANCELLED, AU_ERR_UNSUPPORTED (a live stream: it never ends), AU_ERR_INVALID_ARGUMENT or
     // AU_ERR_NO_MEMORY; *out is NULL on error. URLs work too (the file is downloaded).
-    FFAUDIO_API int au_loudness_measure(const char *path, const AuLoudnessConfig *config, AuLoudnessMeter **out);
+    FFAUDIO_API int au_loudness_measure(const char *path, const AuLoudnessOptions *config, AuLoudnessMeter **out);
 
     // Add what `other` measured to `into` (an album is its tracks merged); `other` is unchanged. Exact: merging
     // gives the same result as measuring everything in one go.
@@ -94,7 +94,7 @@ extern "C" {
     FFAUDIO_API void au_loudness_meter_free(AuLoudnessMeter *meter);
 
     // au_loudness_measure() and au_loudness_result() in one, for a single file
-    FFAUDIO_API int au_loudness_analyze(const char *path, const AuLoudnessConfig *config, AuLoudness *out);
+    FFAUDIO_API int au_loudness_analyze(const char *path, const AuLoudnessOptions *config, AuLoudness *out);
 
     // ReplayGain values for AuPlayConfig.replaygain. album may be NULL. Peaks are the true peaks
     // (the sample peaks when true peak was skipped). Silent results give no gain.
@@ -105,7 +105,7 @@ extern "C" {
     // second per song) and the result is stored, which also updates the track if it is already queued or playing.
     // out may be NULL. Returns AU_OK or an error from au_loudness_analyze(); nothing is stored on error.
     // Avoid calling it from player callbacks: they run on the player's control thread, which would be held up.
-    FFAUDIO_API int au_gain_cache_scan(const char *path, const AuLoudnessConfig *config, AuReplayGain *out);
+    FFAUDIO_API int au_gain_cache_scan(const char *path, const AuLoudnessOptions *config, AuReplayGain *out);
 
     //+-----------------------------------------------------+
     //| Background measurement queue                        |
@@ -115,9 +115,9 @@ extern "C" {
     // paths that are cached, queued or being measured are skipped, so it is fine to re-send a playlist window
     // whenever the position changes:
     //
-    //   AU_EVENT_TRACK_STARTED: au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
+    //   AU_EVENT_TRACK_STARTED: au_gain_scan_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
     //
-    // With AuReplayGainConfig.measure_missing the player also measures a starting track that has no value at
+    // With AuReplayGainSettings.measure_missing the player also measures a starting track that has no value at
     // all, and holds its start for up to measure_wait_seconds. Works without au_init(); paths are only read.
 
     typedef enum AU_SCAN_PRIORITY {
@@ -127,39 +127,42 @@ extern "C" {
 
     // A requested file was measured and stored (result AU_OK, rg set), could not be measured (AU_ERR_FILE, ...,
     // rg NULL) or was cancelled while being measured (AU_ERR_CANCELLED). Runs on a worker thread: keep it short.
-    typedef void (*NotifyOfGainCached)(const char *path, int result, const AuReplayGain *rg, void *user);
+    typedef void (*AuGainCachedFn)(const char *path, int result, const AuReplayGain *rg, void *user);
 
-    typedef struct AuGainScanConfig {
+    typedef struct AuGainScanSettings {
         int threads;                  // worker threads, 1..16; 0 = default (2, or 1 on single-core machines)
         bool skip_true_peak;          // faster; the sample peak is stored as the peak
-        NotifyOfGainCached on_cached; // optional
+        AuGainCachedFn on_cached;     // optional
         void *user;
-    } AuGainScanConfig;
+        // Measure network files too (requests, and AuReplayGainSettings.measure_missing). false (default): they are
+        // skipped, since measuring downloads the whole file. (In AuNetworkSettings before 4.0.)
+        bool measure_streams;
+    } AuGainScanSettings;
 
     // Optional; NULL restores the defaults. Can be called at any time, also from on_cached, and never waits: workers
     // above a lowered count leave after their current file or album.
-    FFAUDIO_API int au_gain_scan_configure(const AuGainScanConfig *config);
+    FFAUDIO_API int au_set_gain_scan(const AuGainScanSettings *config);
 
     // Measure these files (track values). Returns the number of paths queued (skipped ones not counted).
     // Skipped: paths already cached, already queued, and files that could not be measured before (not audio,
     // unreadable) and have not changed since (same size and modification time). Those failures are remembered
     // until au_gain_scan_stop(), so a playlist can be requested again and again without re-reading bad files.
-    FFAUDIO_API int au_gain_cache_request(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
+    FFAUDIO_API int au_gain_scan_request(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
 
     // Measure these files as one album: each gets its track values and the album values. Skipped only when
     // every path already has album values in the cache. Returns the number of paths queued.
-    FFAUDIO_API int au_gain_cache_request_album(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
+    FFAUDIO_API int au_gain_scan_request_album(const char *const *paths, int count, AU_SCAN_PRIORITY priority);
 
     // Drop every queued request and stop the measurement in progress (the player's own requests stay)
-    FFAUDIO_API void au_gain_cache_cancel_requests(void);
+    FFAUDIO_API void au_gain_scan_cancel(void);
 
     // Paths queued or being measured
-    FFAUDIO_API int au_gain_cache_pending(void);
+    FFAUDIO_API int au_gain_scan_pending(void);
 
     // Cancel everything (including the player's requests) and stop the worker threads, waiting for them; they start
-    // again on the next request. Call it before unloading the library, or let the process exit. Not from on_cached
-    // (it would wait for its own thread): it then does nothing.
-    FFAUDIO_API void au_gain_scan_stop(void);
+    // again on the next request. Call it before unloading the library, or let the process exit. AU_ERR_WRONG_THREAD
+    // from on_cached (it would wait for its own thread), and nothing happens.
+    FFAUDIO_API int au_gain_scan_stop(void);
 
 #ifdef __cplusplus
 } // extern "C"

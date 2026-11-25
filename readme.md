@@ -96,18 +96,18 @@ static void on_event(const AuEvent *e, void *user) {
     }
 }
 
-const AuConfig config = {
-    .app_name = "My Player",
-    .on_event = on_event,    // or NULL, and take events with au_poll_event() on a thread of your choice
-};
-au_init(&config);            // also opens the output device; AU_EVENT_DEVICE says how it went
+// The name the system's sound settings show; on_event (or NULL, and take events with au_poll_event() on a thread of
+// your choice); user data for on_event
+au_init("My Player", on_event, NULL);
 
-// Every setting has a setter, usable any time after au_init()
+// Every setting has a setter, usable any time after au_init(), also before anything plays
 au_set_volume(0.8f);         // linear gain 0..1
 au_set_device(NULL);         // or a name from au_list_devices(); NULL = the system default, followed when it changes
+au_open_device();            // optional: open it now rather than with the first track; AU_EVENT_DEVICE says how it went
 ```
-`AuConfig` only needs what is fixed for the player's lifetime (`app_name`, `on_event`, `user_data`). Its other fields
-are initial values for settings that have setters, kept for 3.0 programs.
+`au_init()` takes only what is fixed for the player's lifetime. The output device opens when the first track is played
+or queued, with the device and format chosen until then (or at `au_open_device()`), so choosing them never opens it
+twice.
 Everything the player reports is an `AuEvent`: a type, the track's handle and per-type data (`data.ended`,
 `data.restarted`, `data.device`, ...). Without `on_event`, events wait in a queue for `au_poll_event()` (or
 `au_wait_event()` on a thread of its own), which suits UI loops and languages that want them on their own thread.
@@ -243,7 +243,7 @@ core per track.
 URLs work wherever paths do: files on web and music servers (seekable when the server supports range requests),
 Icecast/SHOUTcast internet radio and HLS (`.m3u8`).
 ```c
-const AuNetworkConfig net = { .user_agent = "myplayer/1.0", .timeout_seconds = 15 };
+const AuNetworkSettings net = { .user_agent = "myplayer/1.0", .timeout_seconds = 15 };
 au_set_network(&net);                                   // optional; also applies to au_probe() and analysis
 
 au_play("https://radio.example.com/stream.mp3", NULL);
@@ -251,7 +251,7 @@ au_play("https://radio.example.com/stream.mp3", NULL);
 const AuPlayConfig cfg = { .http_headers = "Authorization: Bearer abc123" };
 au_queue("https://music.example.com/rest/stream?id=42", &cfg);
 ```
-Network tracks buffer before they start (`AuNetworkConfig.buffer_seconds`, default 2 s) and read ahead up to
+Network tracks buffer before they start (`AuNetworkSettings.buffer_seconds`, default 2 s) and read ahead up to
 `max_buffer_seconds` (10 s). When the network falls behind, the track waits for a full buffer again instead of
 stuttering: its position holds, and it fades back in. `AU_EVENT_BUFFERING` (`data.buffering.active`,
 `.buffered_seconds`) reports both, for a "buffering..." display. Live streams (internet radio, live HLS) have no
@@ -264,7 +264,7 @@ headers as tags. Latin-1 titles from old servers are converted to UTF-8. A dropp
 Local paths may only open local files and URLs only network protocols, so a playlist can not make FFmpeg read
 local files. A server that stops answering ends the track with an error after the timeout; stopping or skipping
 a track that is still connecting interrupts it. Network files are not measured for ReplayGain unless
-`AuNetworkConfig.measure_streams` is set (it downloads the whole file). The release archives use the system's
+`AuGainScanSettings.measure_streams` is set (it downloads the whole file). The release archives use the system's
 GnuTLS for https on Linux and Windows' own TLS.
 
 ### Playlist files
@@ -326,7 +326,7 @@ Matroska, MP3 `CHAP` frames). A sheet written for a `.wav` that was later encode
 
 ### 5. ReplayGain and metadata
 ```c
-const AuReplayGainConfig rg = {
+const AuReplayGainSettings rg = {
     .mode = AU_REPLAYGAIN_ALBUM,    // or AU_REPLAYGAIN_TRACK; each falls back to the other gain
     .preamp_db = 0.0,               // added to tagged gains
     .fallback_gain_db = -6.0,       // files without tags
@@ -412,7 +412,7 @@ au_play(album_files[0], &cfg);
 The measurement follows ITU-R BS.1770-4 / EBU R128 (K-weighting at any sample rate, 400 ms gating blocks with
 the -70 LUFS absolute and -10 LU relative gates, EBU Tech 3342 loudness range, 4x oversampled true peak,
 surround channels weighted +1.5 dB) and agrees with FFmpeg's `ebur128` filter. A progress callback in
-`AuLoudnessConfig` reports the position and can cancel a measurement; `skip_true_peak` makes it faster. It runs at a
+`AuLoudnessOptions` reports the position and can cancel a measurement; `skip_true_peak` makes it faster. It runs at a
 few hundred times real time per thread. Meters merge exactly, in any order, so an album's tracks can be measured in
 parallel. `au_loudness_analyze()` measures a single file in one call. `tests/loudness_scan.c` is a small command-line
 example (`loudness_scan [-t] [-c] files...`).
@@ -446,7 +446,7 @@ already queued or playing, so a value may arrive after the track was queued.
 #### Measuring in the background
 ffaudio fills the cache itself on low-priority worker threads; the application only says what is coming:
 ```c
-const AuReplayGainConfig rg = {
+const AuReplayGainSettings rg = {
     .mode = AU_REPLAYGAIN_TRACK,
     .fallback_gain_db = -6,
     .measure_missing = true,       // a starting track with no value at all is measured right away
@@ -457,10 +457,10 @@ au_set_replaygain(&rg);
 // in on_event, case AU_EVENT_TRACK_STARTED:
 //   keep the next part of the playlist measured; cached, queued and running paths are skipped,
 //   so re-sending the window every time is cheap
-au_gain_cache_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
+au_gain_scan_request(next_ten_paths, 10, AU_SCAN_PREFETCH);
 
 // A whole album, so album gains are stored as well
-au_gain_cache_request_album(album_paths, n, AU_SCAN_PREFETCH);
+au_gain_scan_request_album(album_paths, n, AU_SCAN_PREFETCH);
 ```
 - **Prefetch** covers the normal flow and skips within the window: the values are in the cache before the
   tracks start.
@@ -468,9 +468,9 @@ au_gain_cache_request_album(album_paths, n, AU_SCAN_PREFETCH);
   the front of the queue and holds its start until the value is there, at most `measure_wait_seconds`. Most songs
   are measured in well under that. If the wait runs out, the track starts at `fallback_gain_db` and the measured
   value is faded in over 2 s instead of jumping.
-- `AU_SCAN_URGENT` puts requests before everything else (newest first); `au_gain_cache_cancel_requests()` drops
-  the application's queued requests when the playlist changes; `au_gain_cache_pending()` reports progress.
-- `au_gain_scan_configure()` sets the number of worker threads (default 2) and an optional `on_cached`
+- `AU_SCAN_URGENT` puts requests before everything else (newest first); `au_gain_scan_cancel()` drops
+  the application's queued requests when the playlist changes; `au_gain_scan_pending()` reports progress.
+- `au_set_gain_scan()` sets the number of worker threads (default 2) and an optional `on_cached`
   callback, which runs on a worker thread. `au_gain_scan_stop()` stops them; they start again on demand.
 - `au_gain_cache_scan()` is the synchronous version for tools and batch jobs.
 
@@ -561,7 +561,7 @@ stayed at a few MB, while the process' RSS rose to about 145 MB in the first hou
 off at 300-350 MB). A plain player, with one track and no background measurement, needs less.
 AddressSanitizer runs of the same test found no leaks.
 
-Network streams are where glibc's defaults cost the most. They read ahead (`AuNetworkConfig.max_buffer_seconds`,
+Network streams are where glibc's defaults cost the most. They read ahead (`AuNetworkSettings.max_buffer_seconds`,
 10 s; a hi-res stream over HTTP is several MB per 10 s), and when a program frees blocks that large, glibc raises
 its thresholds for giving memory back (the "dynamic mmap threshold"), so its pools keep more and more. With a third
 of the tracks streamed over HTTP, 2-hour soak runs with the same seed gave:

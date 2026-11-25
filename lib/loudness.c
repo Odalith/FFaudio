@@ -465,7 +465,7 @@ static int meter_finish(Meter *m) {
 //+-----------------------------------------------------+
 
 // Decode `filename` into `m`. Returns 0, AU_ERR_* on failure.
-static int measure_file(const AuLoudnessConfig *cfg, const AVIOInterruptCB *interrupt, const char *filename,
+static int measure_file(const AuLoudnessOptions *cfg, const AVIOInterruptCB *interrupt, const char *filename,
                         Meter *m, Histogram *blocks, Histogram *short_term) {
     AVFormatContext *ic = NULL;
     AVCodecContext *dec = NULL;
@@ -642,10 +642,10 @@ void loudness_meter_clear(AuLoudnessMeter *m) {
     m->files = 0;
 }
 
-int loudness_measure_into(AuLoudnessMeter *m, const char *path, const AuLoudnessConfig *config,
+int loudness_measure_into(AuLoudnessMeter *m, const char *path, const AuLoudnessOptions *config,
                           const AVIOInterruptCB *interrupt) {
     if (!m || !path || !path[0]) return AU_ERR_INVALID_ARGUMENT;
-    const AuLoudnessConfig none = { 0 };
+    const AuLoudnessOptions none = { 0 };
     const AVIOInterruptCB no_interrupt = { 0 };
     Meter meter;
     const int ret = measure_file(config ? config : &none, interrupt ? interrupt : &no_interrupt, path, &meter,
@@ -662,7 +662,7 @@ int loudness_measure_into(AuLoudnessMeter *m, const char *path, const AuLoudness
     return AU_OK;
 }
 
-int au_loudness_measure(const char *path, const AuLoudnessConfig *config, AuLoudnessMeter **out) {
+int au_loudness_measure(const char *path, const AuLoudnessOptions *config, AuLoudnessMeter **out) {
     if (!out) return AU_ERR_INVALID_ARGUMENT;
     *out = NULL;
     if (!path || !path[0]) return AU_ERR_INVALID_ARGUMENT;
@@ -700,7 +700,7 @@ int au_loudness_file_count(const AuLoudnessMeter *m) {
     return m ? m->files : 0;
 }
 
-int au_loudness_analyze(const char *path, const AuLoudnessConfig *config, AuLoudness *out) {
+int au_loudness_analyze(const char *path, const AuLoudnessOptions *config, AuLoudness *out) {
     if (!out) return AU_ERR_INVALID_ARGUMENT;
     AuLoudnessMeter *m = NULL;
     const int ret = au_loudness_measure(path, config, &m);

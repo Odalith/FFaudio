@@ -40,7 +40,7 @@ typedef struct Job {
     char **paths;
     int n;
     bool album;
-    bool from_player;           // not dropped by au_gain_cache_cancel_requests()
+    bool from_player;           // not dropped by au_gain_scan_cancel()
     bool measuring;             // taken by a worker
     struct Job *next;
 } Job;
@@ -61,7 +61,7 @@ static SDL_cond *wake = NULL;
 static FfOnce init_once = FF_ONCE_INIT;
 static Job *head = NULL, *tail = NULL;
 static Worker workers[MAX_WORKERS];
-static AuGainScanConfig config;
+static AuGainScanSettings config;
 static int pending = 0;          // paths queued or being measured
 static FfAtomic stopping;    // 1 while au_gain_scan_stop() runs (read without the lock while measuring)
 
@@ -341,17 +341,17 @@ static bool keep_going(double fraction, void *user) {
     return !interrupted(user);
 }
 
-static void notify(const AuGainScanConfig *cfg, const char *path, const int result, const AuReplayGain *rg) {
+static void notify(const AuGainScanSettings *cfg, const char *path, const int result, const AuReplayGain *rg) {
     CHAOS("notify");
     if (result != AU_OK) gain_cache_note_failure(path); // a player waiting for this value stops waiting
     if (cfg->on_cached) cfg->on_cached(path, result, rg, cfg->user);
 }
 
 // `file` and `album` are the worker's own meters, reused for every file
-static void measure_job(const int index, const Job *job, const AuGainScanConfig *cfg, AuLoudnessMeter *file,
+static void measure_job(const int index, const Job *job, const AuGainScanSettings *cfg, AuLoudnessMeter *file,
                         AuLoudnessMeter *album) {
     ProgressCtx ctx = { .index = index };
-    const AuLoudnessConfig lcfg = { .skip_true_peak = cfg->skip_true_peak, .progress = keep_going,
+    const AuLoudnessOptions lcfg = { .skip_true_peak = cfg->skip_true_peak, .progress = keep_going,
                                     .progress_user = &ctx };
     const AVIOInterruptCB interrupt = { .callback = interrupted, .opaque = &ctx };
     if (!file || !album) {
@@ -427,7 +427,7 @@ static int worker_main(void *arg) {
 
     SDL_LockMutex(lock);
     for (;;) {
-        // The wanted count is read again after every wake-up and job: au_gain_scan_configure() may have lowered it.
+        // The wanted count is read again after every wake-up and job: au_set_gain_scan() may have lowered it.
         // A worker no longer wanted leaves by itself; nobody waits for it (start_workers() or au_gain_scan_stop()
         // joins it later, at once)
         while (!head && !ffa_load(&stopping) && index < wanted_workers())
@@ -443,7 +443,7 @@ static int worker_main(void *arg) {
         job->measuring = true;
         workers[index].job = job;
         ffa_store(&workers[index].cancel, 0);
-        const AuGainScanConfig cfg = config;
+        const AuGainScanSettings cfg = config;
         SDL_UnlockMutex(lock);
 
         measure_job(index, job, &cfg, file, album);
@@ -479,17 +479,21 @@ static int request(const char *const *paths, const int count, const bool urgent,
     if (!paths || count <= 0) return 0;
     if (!ready()) return AU_ERR_SDL;
 
-    const bool measure_streams = network_config(NULL, 0).measure_streams;
-    if (album && !measure_streams) {
-        // Measuring would download whole files, and an album measured without them would be wrong
-        for (int i = 0; i < count; i++)
-            if (paths[i] && au_is_network_url(paths[i])) return 0;
-    }
     SDL_LockMutex(lock);
     if (ffa_load(&stopping)) {
         // au_gain_scan_stop() is waiting for the workers; new ones started now would never be joined
         SDL_UnlockMutex(lock);
         return 0;
+    }
+    const bool measure_streams = config.measure_streams;
+    if (album && !measure_streams) {
+        // Measuring would download whole files, and an album measured without them would be wrong
+        for (int i = 0; i < count; i++) {
+            if (paths[i] && au_is_network_url(paths[i])) {
+                SDL_UnlockMutex(lock);
+                return 0;
+            }
+        }
     }
 
     if (album) {
@@ -594,6 +598,14 @@ static int request(const char *const *paths, const int count, const bool urgent,
     return n;
 }
 
+bool gain_scan_measures_streams(void) {
+    if (!ready()) return false;
+    SDL_LockMutex(lock);
+    const bool yes = config.measure_streams;
+    SDL_UnlockMutex(lock);
+    return yes;
+}
+
 bool gain_scan_request_for_player(const char *path) {
     CHAOS("gain_scan_request_for_player");
     if (!path || !ready()) return false;
@@ -606,17 +618,17 @@ bool gain_scan_request_for_player(const char *path) {
     return true;
 }
 
-int au_gain_cache_request(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
-    CHAOS("au_gain_cache_request");
+int au_gain_scan_request(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
+    CHAOS("au_gain_scan_request");
     return request(paths, count, priority == AU_SCAN_URGENT, false, false);
 }
 
-int au_gain_cache_request_album(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
-    CHAOS("au_gain_cache_request_album");
+int au_gain_scan_request_album(const char *const *paths, const int count, const AU_SCAN_PRIORITY priority) {
+    CHAOS("au_gain_scan_request_album");
     return request(paths, count, priority == AU_SCAN_URGENT, true, false);
 }
 
-int au_gain_scan_configure(const AuGainScanConfig *cfg) {
+int au_set_gain_scan(const AuGainScanSettings *cfg) {
     if (cfg && (cfg->threads < 0 || cfg->threads > MAX_WORKERS)) return AU_ERR_INVALID_ARGUMENT;
     if (!ready()) return AU_ERR_SDL;
 
@@ -631,8 +643,8 @@ int au_gain_scan_configure(const AuGainScanConfig *cfg) {
     return AU_OK;
 }
 
-void au_gain_cache_cancel_requests(void) {
-    CHAOS("au_gain_cache_cancel_requests");
+void au_gain_scan_cancel(void) {
+    CHAOS("au_gain_scan_cancel");
     if (!ready()) return;
     SDL_LockMutex(lock);
     Job *prev = NULL, *j = head;
@@ -653,7 +665,7 @@ void au_gain_cache_cancel_requests(void) {
     SDL_UnlockMutex(lock);
 }
 
-int au_gain_cache_pending(void) {
+int au_gain_scan_pending(void) {
     if (!ready()) return 0;
     SDL_LockMutex(lock);
     const int n = pending;
@@ -661,13 +673,10 @@ int au_gain_cache_pending(void) {
     return n;
 }
 
-void au_gain_scan_stop(void) {
+int au_gain_scan_stop(void) {
     CHAOS("au_gain_scan_stop");
-    if (!ready()) return;
-    if (on_scan_worker) { // from on_cached: it would wait for the thread making the call
-        ff_log(AU_LOG_ERROR, "au_gain_scan_stop() must not be called from on_cached");
-        return;
-    }
+    if (!ready()) return AU_ERR_SDL;
+    if (on_scan_worker) return AU_ERR_WRONG_THREAD; // from on_cached: it would wait for the thread making the call
     SDL_Thread *threads[MAX_WORKERS];
     int n = 0;
     SDL_LockMutex(lock);
@@ -693,4 +702,5 @@ void au_gain_scan_stop(void) {
     ffa_store(&stopping, 0);
     forget_all_failures();
     SDL_UnlockMutex(lock);
+    return AU_OK;
 }

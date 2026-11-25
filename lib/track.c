@@ -297,7 +297,7 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
     t->last_pkt_ts = AV_NOPTS_VALUE;
     reset_timestamps(t);
     if ((t->network = au_is_network_url(filename))) {
-        const AuNetworkConfig nc = network_config(NULL, 0);
+        const AuNetworkSettings nc = network_config(NULL, 0);
         t->buffer_target_s = nc.buffer_seconds;
         t->max_buffer_s = nc.max_buffer_seconds;
         ffa_store(&t->buffering, 1);   // nothing plays until the first buffer_seconds are in
@@ -445,7 +445,7 @@ void track_update_gain(TrackState *t, const bool late) {
     CHAOS("track_update_gain");
     AudioPlayer *ap = t->ap;
     SDL_LockMutex(ap->format_mutex);
-    const AuReplayGainConfig cfg = ap->replaygain;
+    const AuReplayGainSettings cfg = ap->replaygain;
     SDL_UnlockMutex(ap->format_mutex);
 
     // Values come from, in order: AuPlayConfig.replaygain, the ReplayGain cache, the file's tags
@@ -470,16 +470,16 @@ void track_update_gain(TrackState *t, const bool late) {
 #define DEFAULT_MEASURE_WAIT_SECONDS 0.5
 
 // Read thread, before the decoder starts: a track without any ReplayGain value gets an urgent measurement
-// (AuReplayGainConfig.measure_missing) and waits for it a little, so it can start at the right level
+// (AuReplayGainSettings.measure_missing) and waits for it a little, so it can start at the right level
 static void wait_for_measurement(TrackState *t, const AuMediaInfo *info) {
     CHAOS("wait_for_measurement");
     AudioPlayer *ap = t->ap;
     SDL_LockMutex(ap->format_mutex);
-    const AuReplayGainConfig cfg = ap->replaygain;
+    const AuReplayGainSettings cfg = ap->replaygain;
     SDL_UnlockMutex(ap->format_mutex);
 
     if (cfg.mode == AU_REPLAYGAIN_OFF || !cfg.measure_missing || t->has_replaygain_override) return;
-    if (au_is_network_url(t->filename) && !network_config(NULL, 0).measure_streams) return; // a download
+    if (au_is_network_url(t->filename) && !gain_scan_measures_streams()) return; // a download
     if (info && (!isnan(info->replaygain.track_gain_db) || !isnan(info->replaygain.album_gain_db))) return;
     if (gain_cache_lookup(t->filename, NULL)) return;
 

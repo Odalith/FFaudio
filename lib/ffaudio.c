@@ -471,11 +471,12 @@ static TrackState *create_track(AudioPlayer *ap, const Msg *msg) {
 }
 
 static void cmd_pause(AudioPlayer *ap, bool value);
+static bool device_for_track(AudioPlayer *ap, TrackState *t);
 
 static void cmd_play(AudioPlayer *ap, const Msg *msg) {
     CHAOS("cmd_play");
     TrackState *t = create_track(ap, msg);
-    if (!t) return;
+    if (!t || !device_for_track(ap, t)) return;
 
     // Starting a track resumes a paused player
     if (ffa_load(&ap->paused))
@@ -501,7 +502,7 @@ static void cmd_play(AudioPlayer *ap, const Msg *msg) {
 static void cmd_set_next(AudioPlayer *ap, const Msg *msg) {
     CHAOS("cmd_set_next");
     TrackState *t = create_track(ap, msg);
-    if (!t) return;
+    if (!t || !device_for_track(ap, t)) return;
 
     lock_mixer(ap);
     Mixer *m = &ap->mixer;
@@ -835,6 +836,7 @@ static int cmd_configure_device(AudioPlayer *ap, const Msg *msg) {
     ap->audio_device_index = -1;
     if (!use_default && !(ap->audio_device_name = av_strdup(msg->str)))
         return AU_ERR_NO_MEMORY;
+    if (!ap->device_id) return AU_OK; // only recorded: the device opens when it is needed (ensure_device())
 
     return reopen_output(ap, use_default, ap->audio_device_name, ap->audio_device_index);
 }
@@ -851,7 +853,25 @@ static int cmd_set_output_format(AudioPlayer *ap, const Msg *msg) {
         return AU_ERR_NOTHING_TO_DO;
     ap->output_channels = channels;
     ap->output_sample_rate = rate;
+    if (!ap->device_id) return AU_OK; // only recorded, as the device
     return reopen_output(ap, ap->use_default_device, ap->audio_device_name, ap->audio_device_index);
+}
+
+// The output device, opened with the device and format chosen so far if none is open yet: for the first track, and
+// au_open_device(). The worker of a track created just before opens its file meanwhile and waits for the format
+// (ensure_convert_graph()). AU_EVENT_DEVICE reports an open.
+static int ensure_device(AudioPlayer *ap) {
+    CHAOS("ensure_device");
+    if (ap->device_id) return AU_OK;
+    return reopen_output(ap, ap->use_default_device, ap->audio_device_name, ap->audio_device_index);
+}
+
+// A track that needs a device none could be opened for (AU_EVENT_DEVICE said so): it ends at once, as an error,
+// instead of waiting for one. The next track tries again.
+static bool device_for_track(AudioPlayer *ap, TrackState *t) {
+    if (ensure_device(ap) >= 0) return true;
+    end_track(ap, t, END_ERROR);
+    return false;
 }
 
 //+-----------------------------------------------------+
@@ -1151,6 +1171,7 @@ static bool handle_msg(AudioPlayer *ap, Msg *msg) {
         case CMD_UPDATE_TRACK_FILTERS:
         case CMD_FILTER_COMMAND:   cmd_filters(ap, msg); break;
         case CMD_CONFIGURE_DEVICE: cmd_configure_device(ap, msg); break;
+        case CMD_OPEN_DEVICE:      ensure_device(ap); break;
         case CMD_SET_OUTPUT_FORMAT: cmd_set_output_format(ap, msg); break;
         case CMD_ENABLE_TAP:       tap_install(ap); break;
         case CMD_SET_PREPARE_NEXT: ap->prepare_next_seconds = msg->d; break;
@@ -1301,37 +1322,30 @@ static void player_free(AudioPlayer *ap) {
 }
 
 // A log message before the control thread runs (au_init() failing): straight to the application
-static void early_log(const AuConfig *config, const char *message) {
+static void early_log(const AuEventFn on_event, void *user_data, const char *message) {
     const AuEvent e = { .type = AU_EVENT_LOG, .data.log = { AU_LOG_FATAL, message, 0 } };
-    if (config->on_event) config->on_event(&e, config->user_data);
+    if (on_event) on_event(&e, user_data);
     else events_push(&e);
 }
 
-int au_init(const AuConfig *config) {
-    if (!config) return AU_ERR_INVALID_ARGUMENT;
+int au_init(const char *app_name, const AuEventFn on_event, void *user_data) {
     if (audio_player) return AU_ERR_ALREADY_INITIALIZED;
 
     AudioPlayer *ap = av_mallocz(sizeof(AudioPlayer));
     if (!ap) return AU_ERR_NO_MEMORY;
     ap->saved_log_level = av_log_get_level();
 
-    const float volume = config->volume < 0 || !isfinite(config->volume) ? 1.0f : fminf(config->volume, 1.0f);
+    // The defaults of the settings: each has a setter
+    const float volume = 1.0f;
     atomic_set_float(&ap->volume, volume);
-    ffa_store(&ap->loop_count, config->loop_count);
-    ap->prepare_next_seconds = config->prepare_next_seconds > 0 ? config->prepare_next_seconds : DEFAULT_PREPARE_NEXT_SECONDS;
-    if (!valid_output_format(config->output_channels, config->output_sample_rate)) {
-        av_free(ap);
-        return AU_ERR_INVALID_ARGUMENT;
-    }
-    ap->output_channels = config->output_channels;
-    ap->output_sample_rate = config->output_sample_rate;
+    ap->prepare_next_seconds = DEFAULT_PREPARE_NEXT_SECONDS;
     ap->downmix = AU_DOWNMIX_FULL_LEVEL;
     ap->speed = 1.0;
     ap->keep_pitch = true;
     ap->audio_device_index = -1;
     ap->use_default_device = true;
-    ap->user_data = config->user_data;
-    ap->on_event = config->on_event;
+    ap->user_data = user_data;
+    ap->on_event = on_event;
     events_open(); // first: early_log() hands a polling application the reason a failed au_init() failed
     ap->audio_target.fmt = AV_SAMPLE_FMT_NONE;
     ap->mixer.pause_gain = 1.0f;
@@ -1365,16 +1379,16 @@ int au_init(const AuConfig *config) {
      * period size is NPOT due to ALSA resampling by forcing the buffer size. */
     if (!SDL_getenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE"))
         SDL_setenv("SDL_AUDIO_ALSA_SET_BUFFER_SIZE", "1", 1);
-    if (config->app_name) {
-        SDL_SetHint(SDL_HINT_APP_NAME, config->app_name);
-        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, config->app_name);
-        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, config->app_name);
+    if (app_name) {
+        SDL_SetHint(SDL_HINT_APP_NAME, app_name);
+        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, app_name);
+        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_APP_NAME, app_name);
     }
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "music");
     SDL_SetHint(SDL_HINT_AUDIO_CATEGORY, "playback");
 
     if (SDL_InitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS) != 0) {
-        early_log(config, SDL_GetError());
+        early_log(on_event, user_data, SDL_GetError());
         goto fail_sync;
     }
     SDL_AddEventWatch(device_event_watch, ap);
@@ -1391,7 +1405,7 @@ int au_init(const AuConfig *config) {
     SDL_UnlockMutex(lock);
     ap->control_thread = SDL_CreateThread(control_thread, "ffa_control", ap);
     if (!ap->control_thread) {
-        early_log(config, SDL_GetError());
+        early_log(on_event, user_data, SDL_GetError());
         SDL_LockMutex(lock);
         audio_player = NULL;
         SDL_UnlockMutex(lock);
@@ -1402,7 +1416,7 @@ int au_init(const AuConfig *config) {
     }
     SDL_SemWait(ap->started_sem); // control_thread_id is set
     av_log_set_callback(ffmpeg_log);   // FFmpeg's messages come as AU_EVENT_LOG (until au_shutdown())
-    au_set_device(config->device);   // AU_EVENT_DEVICE reports how it went
+    // No device yet: the first track (or au_open_device()) opens it, with the settings made until then
 
     ff_log(AU_LOG_INFO, "ffaudio %s initialized (audio driver: %s, resampler: %s)", au_get_version(),
            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "none", ap->use_soxr ? "soxr" : "swr");
@@ -1414,13 +1428,13 @@ fail_sync:
     return AU_ERR_SDL;
 }
 
-void au_shutdown(void) {
+int au_shutdown(void) {
     CHAOS("au_shutdown");
     AudioPlayer *ap = audio_player;
-    if (!ap) return;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
     if (on_control_thread(ap)) {
         ff_log(AU_LOG_ERROR, "au_shutdown() must not be called from a callback");
-        return;
+        return AU_ERR_WRONG_THREAD;
     }
 
     Msg *m = msg_new(CMD_SHUTDOWN);
@@ -1449,6 +1463,7 @@ void au_shutdown(void) {
     avformat_network_deinit();
     SDL_QuitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS);
     events_close();
+    return AU_OK;
 }
 
 int au_set_device(const char *name) {
@@ -1460,6 +1475,15 @@ int au_set_device(const char *name) {
     Msg *m = msg_new(CMD_CONFIGURE_DEVICE);
     if (!m) return AU_ERR_NO_MEMORY;
     if (name && !(m->str = av_strdup(name))) { msg_free(m); return AU_ERR_NO_MEMORY; }
+    msg_post(ap, m);
+    return AU_OK;
+}
+
+int au_open_device(void) {
+    AudioPlayer *ap = audio_player;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
+    Msg *m = msg_new(CMD_OPEN_DEVICE);
+    if (!m) return AU_ERR_NO_MEMORY;
     msg_post(ap, m);
     return AU_OK;
 }
@@ -1558,40 +1582,43 @@ int32_t au_queue(const char *path, const AuPlayConfig *config) {
     return post_track_command(CMD_SET_NEXT, path, config);
 }
 
-static void post_simple(const MsgType type, const int64_t i64, const double d, const bool b) {
+static int post_simple(const MsgType type, const int64_t i64, const double d, const bool b) {
     CHAOS("post_simple");
     AudioPlayer *ap = audio_player;
-    if (!ap) return;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
     ffa_fetch_add(&ap->request_count, 1);
     Msg *m = msg_new(type);
-    if (!m) return;
+    if (!m) return AU_ERR_NO_MEMORY;
     m->i64 = i64;
     m->d = d;
     m->b = b;
     msg_post(ap, m);
+    return AU_OK;
 }
 
-void au_skip(void) { post_simple(CMD_SKIP, 0, 0, false); }
+int au_skip(void) { return post_simple(CMD_SKIP, 0, 0, false); }
 
-void au_clear_queue(void) { post_simple(CMD_CLEAR_NEXT, 0, 0, false); }
+int au_clear_queue(void) { return post_simple(CMD_CLEAR_NEXT, 0, 0, false); }
 
-void au_stop(void) { post_simple(CMD_STOP, 0, 0, false); }
+int au_stop(void) { return post_simple(CMD_STOP, 0, 0, false); }
 
-void au_pause(const bool paused) {
+int au_pause(const bool paused) {
     AudioPlayer *ap = audio_player;
-    if (!ap) return;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
     pause_state_set(ap, paused);
-    post_simple(CMD_PAUSE, 0, 0, paused);
+    return post_simple(CMD_PAUSE, 0, 0, paused);
 }
 
-void au_seek(const double seconds) {
-    if (!isfinite(seconds) || seconds < 0) return;
-    post_simple(CMD_SEEK, 0, seconds, false);
+int au_seek(const double seconds) {
+    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+    if (!isfinite(seconds) || seconds < 0) return AU_ERR_INVALID_ARGUMENT;
+    return post_simple(CMD_SEEK, 0, seconds, false);
 }
 
-void au_seek_fraction(const double fraction) {
-    if (!(fraction >= 0.0 && fraction <= 1.0)) return;
-    post_simple(CMD_SEEK_PERCENT, 0, fraction * 100.0, false);
+int au_seek_fraction(const double fraction) {
+    if (!audio_player) return AU_ERR_NOT_INITIALIZED;
+    if (!(fraction >= 0.0 && fraction <= 1.0)) return AU_ERR_INVALID_ARGUMENT;
+    return post_simple(CMD_SEEK_PERCENT, 0, fraction * 100.0, false);
 }
 
 int au_set_speed(const double speed, const bool keep_pitch) {
@@ -1686,10 +1713,10 @@ int au_set_track_filters(const int32_t handle, const char *filters) {
 //| Public API: ReplayGain, track info                  |
 //+-----------------------------------------------------+
 
-int au_set_replaygain(const AuReplayGainConfig *config) {
+int au_set_replaygain(const AuReplayGainSettings *config) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
-    AuReplayGainConfig cfg;
+    AuReplayGainSettings cfg;
     memset(&cfg, 0, sizeof(cfg));
     if (config) {
         cfg = *config;
@@ -1824,41 +1851,42 @@ int au_send_filter_command(const int32_t handle, const char *target, const char 
 //| Public API: volume, looping, status                 |
 //+-----------------------------------------------------+
 
-void au_set_volume(const float gain) {
+int au_set_volume(const float gain) {
     AudioPlayer *ap = audio_player;
-    if (!ap || !(gain >= 0.0f && gain <= 1.0f)) return;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
+    if (!(gain >= 0.0f && gain <= 1.0f)) return AU_ERR_INVALID_ARGUMENT;
     ffa_fetch_add(&ap->request_count, 1);
     atomic_set_float(&ap->volume, gain);
+    return AU_OK;
 }
 
-void au_set_muted(const bool muted) {
+int au_set_muted(const bool muted) {
     AudioPlayer *ap = audio_player;
-    if (!ap) return;
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
     ffa_fetch_add(&ap->request_count, 1);
     ffa_store(&ap->muted, muted);
+    return AU_OK;
 }
 
 int au_set_output_format(const int channels, const int sample_rate) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
     if (!valid_output_format(channels, sample_rate)) return AU_ERR_INVALID_ARGUMENT;
-    post_simple(CMD_SET_OUTPUT_FORMAT, channels, sample_rate, false);   // the rate travels in d
-    return AU_OK;
+    return post_simple(CMD_SET_OUTPUT_FORMAT, channels, sample_rate, false);   // the rate travels in d
 }
 
 int au_set_prepare_next(const double seconds) {
     if (!audio_player) return AU_ERR_NOT_INITIALIZED;
     if (!(seconds > 0) || !isfinite(seconds)) return AU_ERR_INVALID_ARGUMENT;
-    post_simple(CMD_SET_PREPARE_NEXT, 0, seconds, false);
-    return AU_OK;
+    return post_simple(CMD_SET_PREPARE_NEXT, 0, seconds, false);
 }
 
-void au_set_loop_count(const int count) {
+int au_set_loop_count(const int count) {
     AudioPlayer *ap = audio_player;
-    if (!ap) return;
-    const int c = count < -1 ? -1 : count;
-    ffa_store(&ap->loop_count, c);   // as last set; the command applies it to the tracks
-    post_simple(CMD_SET_LOOP, c, 0, false);
+    if (!ap) return AU_ERR_NOT_INITIALIZED;
+    if (count < -1) return AU_ERR_INVALID_ARGUMENT;
+    ffa_store(&ap->loop_count, count);   // as last set; the command applies it to the tracks
+    return post_simple(CMD_SET_LOOP, count, 0, false);
 }
 
 static StatusSnapshot read_status(AudioPlayer *ap) {
