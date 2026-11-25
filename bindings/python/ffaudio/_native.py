@@ -50,10 +50,17 @@ def _load():
             continue
         try:
             if sys.platform == "win32" and os.path.isabs(path):
-                # The DLLs it needs (FFmpeg, SDL2, the MinGW runtime) are next to it
+                # The DLLs it needs (FFmpeg, SDL2, the MinGW runtime) are next to it in a release archive
                 os.add_dll_directory(os.path.dirname(path))
             return ctypes.CDLL(path)
         except OSError as e:
+            if sys.platform == "win32":
+                # A build of your own: its DLLs are on PATH (e.g. MSYS2's ucrt64/bin), which Python 3.8+ leaves
+                # out of the search for a DLL's dependencies; winmode=0 is Windows' standard search order
+                try:
+                    return ctypes.CDLL(path, winmode=0)
+                except OSError:
+                    pass
             errors.append(f"{path}: {e}")
     raise ImportError("libffaudio (version 4) not found; set FFAUDIO_LIBRARY to its path\n  " + "\n  ".join(errors))
 

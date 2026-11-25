@@ -104,6 +104,8 @@ class WithoutPlayer(unittest.TestCase):
 
     @needs_fixtures
     def test_cue_sheet(self):
+        if not os.path.exists(fx("cue_tag.flac")):
+            self.skipTest("no cue_tag.flac (made with metaflac, which is not installed)")
         sheet = ffaudio.cue_read(fx("cue_tag.flac"))
         self.assertGreater(len(sheet.tracks), 1)
         t = sheet.tracks[1]
