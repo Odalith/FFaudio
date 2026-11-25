@@ -18,7 +18,7 @@
 
 /*
  * Run-once initialization with the platform's own primitive (C99 has none), for process-wide mutexes
- * that must work before au_initialize().
+ * that must work before au_init().
  *
  *   static FfOnce once = FF_ONCE_INIT;
  *   ff_once(&once, init_function);

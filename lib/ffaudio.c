@@ -715,7 +715,7 @@ static void cmd_filters(AudioPlayer *ap, const Msg *msg) {
         case CMD_UPDATE_TRACK_FILTERS: {
             TrackState *t = track_for_handle(ap, msg->handle);
             if (t && !t->ended) track_set_filters(t, msg->str);
-            else ff_log(AU_LOG_WARNING, "au_update_filtergraph: no track with handle %d", msg->handle);
+            else ff_log(AU_LOG_WARNING, "au_set_track_filters: no track with handle %d", msg->handle);
             break;
         }
         case CMD_FILTER_COMMAND:
@@ -1222,7 +1222,7 @@ static int control_thread(void *arg) {
     AudioPlayer *ap = arg;
     Msg *shutdown_msg = NULL;
     // Recognising itself is what lets callbacks call the API inline. SDL2 sets the id SDL_GetThreadID() returns only
-    // when the thread runs, so au_initialize() usually read 0: every synchronous call from a callback then waited for
+    // when the thread runs, so au_init() usually read 0: every synchronous call from a callback then waited for
     // the thread making it.
     ap->control_thread_id = SDL_ThreadID();
     SDL_SemPost(ap->started_sem);
@@ -1677,7 +1677,7 @@ static int post_filter_msg(const MsgType type, const int32_t handle, const char 
 int au_set_filters(const char *filters) {
     if (!audio_player) return AU_ERR_NOT_INITIALIZED;
     if (au_validate_filters(filters) != AU_OK) {
-        ff_log(AU_LOG_ERROR, "au_set_global_filtergraph: invalid filters \"%s\"", filters);
+        ff_log(AU_LOG_ERROR, "au_set_filters: invalid filters \"%s\"", filters);
         return AU_ERR_INVALID_ARGUMENT;
     }
     return post_filter_msg(CMD_SET_GLOBAL_FILTERS, 0, filters, NULL, NULL);
@@ -1687,7 +1687,7 @@ int au_set_track_filters(const int32_t handle, const char *filters) {
     if (!audio_player) return AU_ERR_NOT_INITIALIZED;
     if (handle < 0) return AU_ERR_INVALID_ARGUMENT;
     if (au_validate_filters(filters) != AU_OK) {
-        ff_log(AU_LOG_ERROR, "au_update_filtergraph: invalid filters \"%s\"", filters);
+        ff_log(AU_LOG_ERROR, "au_set_track_filters: invalid filters \"%s\"", filters);
         return AU_ERR_INVALID_ARGUMENT;
     }
     return post_filter_msg(CMD_UPDATE_TRACK_FILTERS, handle, filters, NULL, NULL);
