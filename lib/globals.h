@@ -184,8 +184,8 @@ typedef struct TrackState {
     int32_t handle;
     char *filename;
     char *filtergraph_str;              // per-track user filters, may be NULL
-    double range_start_s;               // AuPlayConfig.start_seconds as given (0 = from the start)
-    double range_len_s;                 // AuPlayConfig.length_seconds as given (0 = to the end)
+    double range_start_s;               // au_play_options_set_range() start as given (0 = from the start)
+    double range_len_s;                 // au_play_options_set_range() length as given (0 = to the end)
     AuFade fade_in_override;            // only used when has_fade_in_override
     FadeCurve fade_in_curve;            // its curve, sampled when the track is created
     bool has_fade_in_override;
@@ -247,7 +247,7 @@ typedef struct TrackState {
     bool speed_seg_open;                // worker only: speed_seg_in is known
     int32_t convert_rate;               // output rate the graphs were built for
     int32_t convert_channels;           // and its channel count
-    char *http_headers;                 // AuPlayConfig.http_headers (owned), network streams only
+    char *http_headers;                 // au_play_options_set_http_headers() (owned), network streams only
     // Network tracks (set at creation): the reader fills buffer_target_s before the mixer takes anything,
     // again after the mixer ran dry while playing, and reads ahead up to max_buffer_s
     bool network;
@@ -433,14 +433,9 @@ typedef struct Msg {
     char *str;                      // owned
     char *str2;                     // owned
     char *str3;                     // owned
-    AuPlayConfig play_config;       // filters points at str2, http_headers at str3
-    bool has_play_config;
-    AuFade fade_in_override;
-    bool has_fade_in_override;
+    AuPlayOptions *options;         // owned copy (CMD_PLAY, CMD_SET_NEXT); NULL = defaults
     AuCrossfade crossfade;
     AuReplayGainSettings replaygain;
-    AuReplayGain replaygain_override;
-    bool has_replaygain_override;
     int64_t i64;
     double d;
     bool b;

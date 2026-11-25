@@ -194,10 +194,11 @@ static void test_player_priority(void) {
     h = au_play(fx("rg_tagged.flac"), NULL);
     CHECK(fabs(applied_gain(h) + 7) < 0.01);
 
-    // AuPlayConfig.replaygain wins over the cache
+    // au_play_options_set_replaygain() wins over the cache
     const AuReplayGain explicit_rg = track_gain(-3);
-    const AuPlayConfig cfg = { .replaygain = &explicit_rg };
-    h = au_play(fx("rg_tagged.flac"), &cfg);
+    AuPlayOptions *o = au_play_options_create();
+    REQUIRE(au_play_options_set_replaygain(o, &explicit_rg) == AU_OK);
+    h = tc_play(fx("rg_tagged.flac"), o);
     CHECK(fabs(applied_gain(h) + 3) < 0.01);
 
     au_stop();

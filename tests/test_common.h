@@ -287,6 +287,28 @@ static int tc_init_player(int loop_count) {
     return tc_init_player_cfg(loop_count, 0);
 }
 
+// A play-options object with a range (0, 0 = the whole file) and filters (NULL = none). au_play() and au_queue()
+// copy it: tc_play()/tc_queue() free it right after the call.
+static AuPlayOptions *tc_options(double start_seconds, double length_seconds, const char *filters) {
+    AuPlayOptions *o = au_play_options_create();
+    REQUIRE(o);
+    REQUIRE(au_play_options_set_range(o, start_seconds, length_seconds) == AU_OK);
+    REQUIRE(au_play_options_set_filters(o, filters) == AU_OK);
+    return o;
+}
+
+static int32_t tc_play(const char *path, AuPlayOptions *options) {
+    const int32_t h = au_play(path, options);
+    au_play_options_free(options);
+    return h;
+}
+
+static int32_t tc_queue(const char *path, AuPlayOptions *options) {
+    const int32_t h = au_queue(path, options);
+    au_play_options_free(options);
+    return h;
+}
+
 static void tc_setup(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <fixture-dir>\n", argv[0]);

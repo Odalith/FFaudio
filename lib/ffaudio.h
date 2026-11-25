@@ -150,7 +150,7 @@ extern "C" {
 
     // t goes 0 -> 1 over the fade; return the gain (0..1) of the track fading IN.
     // The track fading out uses curve(1 - t). Called on ffaudio's control thread while the fade is set up
-    // (au_set_crossfade(), or the track with AuPlayConfig.fade_in being queued): the curve is sampled at 257
+    // (au_set_crossfade(), or the track with its own fade-in (au_play_options_set_fade_in()) being queued): the curve is sampled at 257
     // points, which are used from then on, so custom_user only has to live until that call has been processed.
     typedef float (*AuFadeCurveFn)(float t, void *custom_user);
 
@@ -205,7 +205,7 @@ extern "C" {
         double preamp_db;            // added to tagged gains, -15..+15 dB
         double fallback_gain_db;     // used for files without ReplayGain/R128 tags, -30..+15 dB (e.g. -6)
         bool prevent_clipping;       // lower the gain so the tagged peak does not exceed full scale
-        // Measure a starting track that has no value (no AuPlayConfig.replaygain, no cache entry, no
+        // Measure a starting track that has no value (no au_play_options_set_replaygain(), no cache entry, no
         // ReplayGain/R128 tags) with the background queue and store it in the ReplayGain cache
         // (ffaudio_loudness.h). Off by default because it writes to the per-user cache file.
         bool measure_missing;
@@ -215,29 +215,41 @@ extern "C" {
     } AuReplayGainSettings;
 
     //+-----------------------------------------------------+
-    //| Configuration structs                               |
+    //| Options for one track                               |
     //+-----------------------------------------------------+
 
-    typedef struct AuPlayConfig {
-        // A range of the file to play as the track, exact to the sample at the file's rate: consecutive ranges of one
-        // file (cue sheet tracks) join with nothing missing or doubled. The track's position, duration, seeks and
-        // events then count from the range's start. Since 3.2 exact and in range time (before: packet-exact, and
-        // positions in file time).
-        double start_seconds;                // start this far into the file; 0 = from the start
-        double length_seconds;               // play this long, then end the track; 0 = to the end
-        // This track's own filter graph (NULL = none), after the conversion to the output format (float, the device's
-        // sample rate and channel layout: AuStatus.sample_rate / .channels) and before the mixer. A new graph is
-        // built for each track. Filters: https://ffmpeg.org/ffmpeg-filters.html
-        const char *filters;
-        // NULL = the AuCrossfade setting. Overrides the fade into this track (on_play for au_play(), on_track_end
-        // or on_skip for au_queue()).
-        const AuFade *fade_in;
-        // NULL = the ReplayGain cache, then the file's tags. Values from your own library database.
-        const AuReplayGain *replaygain;
-        // Network streams only: extra HTTP request headers, one "Name: value" per line, e.g.
-        // "Authorization: Bearer abc\nX-Client: myplayer". For servers that want a token in a header.
-        const char *http_headers;
-    } AuPlayConfig;
+    // The options of a track to play, for au_play() and au_queue(), which copy them: one object can serve many tracks
+    // (the same headers for a whole server, a new range for each track of a cue sheet) and be freed at any time.
+    // An object is used by one thread at a time. Each setter returns AU_OK, or AU_ERR_INVALID_ARGUMENT (also for a
+    // NULL object) or AU_ERR_NO_MEMORY, and leaves the object unchanged on error. Since 4.0 (AuPlayConfig before).
+    typedef struct AuPlayOptions AuPlayOptions;
+
+    // A new object with every option at its default; NULL without memory
+    FFAUDIO_API AuPlayOptions *au_play_options_create(void);
+    // NULL is fine
+    FFAUDIO_API void au_play_options_free(AuPlayOptions *options);
+
+    // A range of the file to play as the track: start this far into the file (0 = from the start), play this long and
+    // then end the track (0 = to the end). Both finite and >= 0. Exact to the sample at the file's rate: consecutive
+    // ranges of one file (cue sheet tracks) join with nothing missing or doubled. The track's position, duration,
+    // seeks and events then count from the range's start.
+    FFAUDIO_API int au_play_options_set_range(AuPlayOptions *options, double start_seconds, double length_seconds);
+
+    // This track's own filter graph (NULL or "" = none), after the conversion to the output format (float, the
+    // device's sample rate and channel layout: AuStatus.sample_rate / .channels) and before the mixer. A new graph is
+    // built for each track. Checked like au_validate_filters(). Filters: https://ffmpeg.org/ffmpeg-filters.html
+    FFAUDIO_API int au_play_options_set_filters(AuPlayOptions *options, const char *filters);
+
+    // The fade into this track (copied), instead of the AuCrossfade setting (on_play for au_play(), on_track_end or
+    // on_skip for au_queue()). NULL = the AuCrossfade setting. A fade needs finite seconds and a known curve.
+    FFAUDIO_API int au_play_options_set_fade_in(AuPlayOptions *options, const AuFade *fade);
+
+    // ReplayGain values from your own library database (copied). NULL = the ReplayGain cache, then the file's tags.
+    FFAUDIO_API int au_play_options_set_replaygain(AuPlayOptions *options, const AuReplayGain *replaygain);
+
+    // Network streams only: extra HTTP request headers, one "Name: value" per line, e.g.
+    // "Authorization: Bearer abc\nX-Client: myplayer", for servers that want a token in a header. NULL = none.
+    FFAUDIO_API int au_play_options_set_http_headers(AuPlayOptions *options, const char *headers);
 
     //+-----------------------------------------------------+
     //| Lifetime                                            |
@@ -295,14 +307,14 @@ extern "C" {
     // Each returns AU_OK, or AU_ERR_NOT_INITIALIZED without a player, AU_ERR_INVALID_ARGUMENT for a value out of
     // range (nothing changes then) or AU_ERR_NO_MEMORY.
 
-    // Play a file or URL, replacing the current track (a track queued with au_queue() stays queued). config may be
-    // NULL. Returns the track's handle (> 0) at once, or a negative AU_RESULT; a file that can not be opened ends
-    // with AU_END_ERROR.
-    FFAUDIO_API int32_t au_play(const char *path, const AuPlayConfig *config);
+    // Play a file or URL, replacing the current track (a track queued with au_queue() stays queued). options may be
+    // NULL (defaults); they are copied. Returns the track's handle (> 0) at once, or a negative AU_RESULT; a file
+    // that can not be opened ends with AU_END_ERROR.
+    FFAUDIO_API int32_t au_play(const char *path, const AuPlayOptions *options);
 
     // Queue a file to play after the current one (gapless, or crossfaded per AuCrossfade.on_track_end), replacing
     // a queued one. If nothing is playing it starts right away. Returns the handle (> 0) or a negative AU_RESULT.
-    FFAUDIO_API int32_t au_queue(const char *path, const AuPlayConfig *config);
+    FFAUDIO_API int32_t au_queue(const char *path, const AuPlayOptions *options);
 
     // End the current track now and start the queued one (crossfaded per AuCrossfade.on_skip). Without a queued
     // track this stops playback.
@@ -317,7 +329,7 @@ extern "C" {
     // Pause (fading out per AuCrossfade.on_pause) or resume
     FFAUDIO_API int au_pause(bool paused);
 
-    // Seek the current track to this many seconds (>= 0) from its start (of its range, AuPlayConfig.start_seconds),
+    // Seek the current track to this many seconds (>= 0) from its start (of its range, au_play_options_set_range()),
     // exact to the sample. A position past the end ends the track (or loops it).
     FFAUDIO_API int au_seek(double seconds);
 
@@ -379,7 +391,7 @@ extern "C" {
     // helpers that build common strings (equalizer, crossfeed, bs2b, gain).
     // Changes take effect within about half a second (the audio already decoded plays out first).
 
-    // Filters applied to every track, after the track's own (AuPlayConfig.filters). NULL or "" removes them.
+    // Filters applied to every track, after the track's own (au_play_options_set_filters()). NULL or "" removes them.
     // Returns AU_ERR_INVALID_ARGUMENT (and changes nothing) if the string does not parse.
     FFAUDIO_API int au_set_filters(const char *filters);
 
@@ -470,7 +482,7 @@ extern "C" {
     // Media files are never touched.
     //
     // When a track starts, ffaudio looks up its path (exactly as passed to au_play()/au_queue()) and
-    // uses a cached entry instead of the file's tags. Order: AuPlayConfig.replaygain > cache > file tags.
+    // uses a cached entry instead of the file's tags. Order: au_play_options_set_replaygain() > cache > file tags.
     // Setting or removing an entry also updates tracks that are already queued or playing (with a short ramp),
     // so values can arrive after the track was queued:
     //

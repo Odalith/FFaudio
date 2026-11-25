@@ -26,6 +26,7 @@
  */
 
 #include "track.h"
+#include "play_options.h"
 #include "metadata.h"
 #include "probe.h"
 #include "numbers.h"
@@ -274,7 +275,7 @@ double track_duration(TrackState *t) {
 //| Lifetime                                            |
 //+-----------------------------------------------------+
 
-TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *filename, const AuPlayConfig *config) {
+TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *filename, const AuPlayOptions *options) {
     TrackState *t = av_mallocz(sizeof(TrackState));
     if (!t) return NULL;
 
@@ -303,23 +304,19 @@ TrackState *track_create(AudioPlayer *ap, const int32_t handle, const char *file
         ffa_store(&t->buffering, 1);   // nothing plays until the first buffer_seconds are in
     }
 
-    if (config) {
-        if (config->filters && config->filters[0] && !(t->filtergraph_str = av_strdup(config->filters)))
-            goto fail;
-        if (config->http_headers && config->http_headers[0] && !(t->http_headers = av_strdup(config->http_headers)))
-            goto fail;
+    if (options) { // checked by its setters
+        if (options->filters && !(t->filtergraph_str = av_strdup(options->filters))) goto fail;
+        if (options->http_headers && !(t->http_headers = av_strdup(options->http_headers))) goto fail;
         // Kept as given: the samples are worked out once the file's rate is known
-        if (isfinite(config->length_seconds) && config->length_seconds > 0)
-            t->range_len_s = config->length_seconds;
-        if (isfinite(config->start_seconds) && config->start_seconds > 0)
-            t->range_start_s = config->start_seconds;
-        if (config->fade_in) {
-            t->fade_in_override = *config->fade_in;
-            fade_curve_build(&t->fade_in_curve, config->fade_in); // control thread: a custom curve is called here
+        t->range_len_s = options->length_seconds;
+        t->range_start_s = options->start_seconds;
+        if (options->has_fade_in) {
+            t->fade_in_override = options->fade_in;
+            fade_curve_build(&t->fade_in_curve, &options->fade_in); // control thread: a custom curve is called here
             t->has_fade_in_override = true;
         }
-        if (config->replaygain) {
-            t->replaygain_override = *config->replaygain;
+        if (options->has_replaygain) {
+            t->replaygain_override = options->replaygain;
             t->has_replaygain_override = true;
         }
     }
@@ -448,7 +445,7 @@ void track_update_gain(TrackState *t, const bool late) {
     const AuReplayGainSettings cfg = ap->replaygain;
     SDL_UnlockMutex(ap->format_mutex);
 
-    // Values come from, in order: AuPlayConfig.replaygain, the ReplayGain cache, the file's tags
+    // Values come from, in order: au_play_options_set_replaygain(), the ReplayGain cache, the file's tags
     SDL_LockMutex(t->seek_mutex);
     const bool known = t->info || t->has_replaygain_override;
     const bool has_override = t->has_replaygain_override;

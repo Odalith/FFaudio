@@ -17,7 +17,7 @@
  */
 
 /*
- * Helpers that build FFmpeg filter strings for AuPlayConfig.filters, au_set_filters() and au_set_track_filters().
+ * Helpers that build FFmpeg filter strings for au_play_options_set_filters(), au_set_filters() and au_set_track_filters().
  *
  *   AuFilterBuilder *fb = au_fb_create();
  *   AuEqualizer eq = au_equalizer_defaults();

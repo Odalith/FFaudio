@@ -379,16 +379,17 @@ static void play_random(const bool queue) {
     const AuFade fade = random_fade(2);
     AuReplayGain rg = AU_REPLAYGAIN_NONE;
     rg.track_gain_db = (float)rnd_real(-12, 3);
-    const AuPlayConfig cfg = {
-        .start_seconds = chance(0.2) ? rnd_real(0, 400) : 0,  // sometimes past the end
-        .length_seconds = chance(0.15) ? rnd_real(1, 60) : 0,
-        .filters = chance(0.15) ? track_filters[rnd_int(4)] : NULL,
-        .fade_in = chance(0.15) ? &fade : NULL,
-        .replaygain = chance(0.1) ? &rg : NULL,
-    };
-    const AuPlayConfig *c = chance(0.5) ? &cfg : NULL;
-    if (queue) au_queue(pick_file(), c);
-    else au_play(pick_file(), c);
+    AuPlayOptions *o = NULL;
+    if (chance(0.5) && (o = au_play_options_create())) {
+        au_play_options_set_range(o, chance(0.2) ? rnd_real(0, 400) : 0,   // sometimes past the end
+                                  chance(0.15) ? rnd_real(1, 60) : 0);
+        au_play_options_set_filters(o, chance(0.15) ? track_filters[rnd_int(4)] : NULL);
+        au_play_options_set_fade_in(o, chance(0.15) ? &fade : NULL);
+        au_play_options_set_replaygain(o, chance(0.1) ? &rg : NULL);
+    }
+    if (queue) au_queue(pick_file(), o);
+    else au_play(pick_file(), o);
+    au_play_options_free(o);
 }
 
 //+-----------------------------------------------------+

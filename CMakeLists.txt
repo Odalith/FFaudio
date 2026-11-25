@@ -68,6 +68,7 @@ set(FFAUDIO_PUBLIC_HEADERS
 add_library(ffaudio
         ${FFAUDIO_PUBLIC_HEADERS}
         lib/ffaudio.c
+        lib/play_options.c
         lib/filters.c
         lib/metadata.c
         lib/loudness.c

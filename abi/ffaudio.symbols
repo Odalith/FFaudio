@@ -71,6 +71,13 @@ au_play
 au_playlist_file_release
 au_playlist_parse
 au_playlist_read
+au_play_options_create
+au_play_options_free
+au_play_options_set_fade_in
+au_play_options_set_filters
+au_play_options_set_http_headers
+au_play_options_set_range
+au_play_options_set_replaygain
 au_poll_event
 au_probe
 au_queue

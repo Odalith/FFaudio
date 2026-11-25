@@ -44,9 +44,11 @@ static SDL_atomic_t next_item;   // next playlist item to queue
 static SDL_atomic_t ended, errors;
 
 static void queue(const int i) {
-    const AuPlayConfig cfg = { .filters = playlist[i].filters };
-    if (i == 0) au_play(paths[i], &cfg);
-    else au_queue(paths[i], &cfg);
+    AuPlayOptions *o = au_play_options_create();
+    if (o && au_play_options_set_filters(o, playlist[i].filters) != AU_OK) fprintf(stderr, "bad filters %d\n", i);
+    if (i == 0) au_play(paths[i], o);
+    else au_queue(paths[i], o);
+    au_play_options_free(o);
 }
 
 static void on_prepare_next(int32_t handle, void *user) {

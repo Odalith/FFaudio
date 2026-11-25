@@ -24,7 +24,7 @@
 #include "globals.h"
 
 // Control thread: allocate a track (its worker does not run yet). NULL on allocation failure.
-TrackState *track_create(AudioPlayer *ap, int32_t handle, const char *filename, const AuPlayConfig *config);
+TrackState *track_create(AudioPlayer *ap, int32_t handle, const char *filename, const AuPlayOptions *options);
 
 // Control thread: start the track's worker, once the track is registered: the worker publishes its details for
 // au_track_info() as soon as the file is open (docs/threading.md, "Creating a track"). < 0 when it could not start;

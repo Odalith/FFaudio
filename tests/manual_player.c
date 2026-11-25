@@ -281,7 +281,7 @@ static bool use_cache = false;
 // described by the entry of the same index here (NULL when playing a folder)
 typedef struct CueEntry {
     int number;
-    double start, length;            // AuPlayConfig.start_seconds / .length_seconds (0 = to the end)
+    double start, length;            // au_play_options_set_range() (0 = to the end)
     char *title, *performer;
     AuReplayGain replaygain;         // the sheet's REM REPLAYGAIN_* values
 } CueEntry;
@@ -302,21 +302,25 @@ static bool take_next(size_t *index) {
 
 static void prefetch_upcoming(void);
 
-static AuPlayConfig play_config(const size_t index) {
-    AuPlayConfig cfg = { .filters = filter };
+// The options to play entry `index` with (NULL without memory: then defaults); free with au_play_options_free()
+static AuPlayOptions *play_options(const size_t index) {
+    AuPlayOptions *o = au_play_options_create();
+    if (!o) return NULL;
+    if (au_play_options_set_filters(o, filter) != AU_OK) fprintf(stderr, "invalid filters: %s\n", filter);
     if (cue_entries) {
         const CueEntry *e = &cue_entries[index];
-        cfg.start_seconds = e->start;
-        cfg.length_seconds = e->length;
-        if (!isnan(e->replaygain.track_gain_db) || !isnan(e->replaygain.album_gain_db)) cfg.replaygain = &e->replaygain;
+        au_play_options_set_range(o, e->start, e->length);
+        if (!isnan(e->replaygain.track_gain_db) || !isnan(e->replaygain.album_gain_db))
+            au_play_options_set_replaygain(o, &e->replaygain);
     }
-    return cfg;
+    return o;
 }
 
 // Play (or queue) entry `index`; returns the handle
 static int32_t start_entry(const size_t index, const bool queue) {
-    const AuPlayConfig cfg = play_config(index);
-    const int32_t h = queue ? au_queue(files[index], &cfg) : au_play(files[index], &cfg);
+    AuPlayOptions *o = play_options(index);
+    const int32_t h = queue ? au_queue(files[index], o) : au_play(files[index], o);
+    au_play_options_free(o);
     if (h > 0) {
         lock(&files_lock);
         handle_map[handle_map_next].handle = h;

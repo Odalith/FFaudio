@@ -33,6 +33,7 @@
 #include <math.h>
 #include "ffaudio.h"
 #include "globals.h"
+#include "play_options.h"
 #include "filtergraph.h"
 #include "output.h"
 #include "track.h"
@@ -67,6 +68,7 @@ static void msg_free(Msg *m) {
     av_free(m->str);
     av_free(m->str2);
     av_free(m->str3);
+    au_play_options_free(m->options);
     av_free(m);
 }
 
@@ -420,7 +422,7 @@ static void set_current_slot(AudioPlayer *ap, TrackState *t) {
     if (t && ap->mixer.next == t) ap->mixer.next = NULL;
 }
 
-// Seconds and sampled curve of the fade into `incoming`: its own (AuPlayConfig.fade_in) or the configured one
+// Seconds and sampled curve of the fade into `incoming`: its own (au_play_options_set_fade_in()) or the configured one
 static double fade_for(const TrackState *incoming, const AuFade *fallback, const FadeCurve *fallback_curve,
                        const FadeCurve **curve) {
     if (incoming && incoming->has_fade_in_override) {
@@ -455,7 +457,7 @@ static void update_device_running(AudioPlayer *ap) {
 
 static TrackState *create_track(AudioPlayer *ap, const Msg *msg) {
     CHAOS("create_track");
-    TrackState *t = track_create(ap, msg->handle, msg->str, msg->has_play_config ? &msg->play_config : NULL);
+    TrackState *t = track_create(ap, msg->handle, msg->str, msg->options);
     // Registered (and published for au_track_info()) before its worker runs: the worker publishes the file's details
     // as soon as it has them
     const bool registered = t && registry_add(ap, t);
@@ -1549,35 +1551,17 @@ int au_get_device_name(char *buf, const size_t size) {
 //| Public API: playback                                |
 //+-----------------------------------------------------+
 
-static int32_t post_track_command(const MsgType type, const char *filename, const AuPlayConfig *config) {
+static int32_t post_track_command(const MsgType type, const char *filename, const AuPlayOptions *options) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
     if (!filename || !filename[0]) return AU_ERR_INVALID_ARGUMENT;
     ffa_fetch_add(&ap->request_count, 1);
 
     Msg *m = msg_new(type);
-    if (!m || !(m->str = av_strdup(filename))) { msg_free(m); return AU_ERR_NO_MEMORY; }
-    if (config) {
-        m->has_play_config = true;
-        m->play_config = *config;
-        if (config->filters) {
-            if (!(m->str2 = av_strdup(config->filters))) { msg_free(m); return AU_ERR_NO_MEMORY; }
-            m->play_config.filters = m->str2;
-        }
-        if (config->http_headers) {
-            if (!(m->str3 = av_strdup(config->http_headers))) { msg_free(m); return AU_ERR_NO_MEMORY; }
-            m->play_config.http_headers = m->str3;
-        }
-        if (config->fade_in) {
-            m->fade_in_override = *config->fade_in;
-            m->has_fade_in_override = true;
-            m->play_config.fade_in = &m->fade_in_override;
-        }
-        if (config->replaygain) {
-            m->replaygain_override = *config->replaygain;
-            m->has_replaygain_override = true;
-            m->play_config.replaygain = &m->replaygain_override;
-        }
+    bool failed = false;
+    if (!m || !(m->str = av_strdup(filename)) || (m->options = play_options_clone(options, &failed), failed)) {
+        msg_free(m);
+        return AU_ERR_NO_MEMORY;
     }
     m->pause_state = ffa_load(&ap->pause_state);
     m->handle = ffa_fetch_add(&ap->handle_count, 1) + 1;
@@ -1586,16 +1570,16 @@ static int32_t post_track_command(const MsgType type, const char *filename, cons
     return handle;
 }
 
-int32_t au_play(const char *path, const AuPlayConfig *config) {
+int32_t au_play(const char *path, const AuPlayOptions *options) {
     CHAOS("au_play");
-    const int32_t handle = post_track_command(CMD_PLAY, path, config);
+    const int32_t handle = post_track_command(CMD_PLAY, path, options);
     if (handle > 0) pause_state_set(audio_player, false); // playing unpauses
     return handle;
 }
 
-int32_t au_queue(const char *path, const AuPlayConfig *config) {
+int32_t au_queue(const char *path, const AuPlayOptions *options) {
     CHAOS("au_queue");
-    return post_track_command(CMD_SET_NEXT, path, config);
+    return post_track_command(CMD_SET_NEXT, path, options);
 }
 
 static int post_simple(const MsgType type, const int64_t i64, const double d, const bool b) {

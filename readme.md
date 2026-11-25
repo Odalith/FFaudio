@@ -116,8 +116,10 @@ Everything the player reports is an `AuEvent`: a type, the track's handle and pe
 ```c
 int32_t handle = au_play("/music/song.flac", NULL);
 
-const AuPlayConfig cfg = { .start_seconds = 30, .length_seconds = 60 };
-au_queue("/music/next.mp3", &cfg);    // starts gaplessly when song.flac ends; plays 0:30 to 1:30 as a 60 s track
+AuPlayOptions *opts = au_play_options_create();   // reusable: au_play() and au_queue() copy it
+au_play_options_set_range(opts, 30, 60);
+au_queue("/music/next.mp3", opts);    // starts gaplessly when song.flac ends; plays 0:30 to 1:30 as a 60 s track
+au_play_options_free(opts);
 
 au_pause(true);
 au_seek(90);                          // seconds; au_seek_fraction(0.5) jumps to the middle
@@ -159,8 +161,9 @@ au_set_crossfade(&xf);   // NULL = gapless + hard cuts
 
 // One track can ask for something else, e.g. no crossfade inside a live album:
 const AuFade none = { 0 };
-const AuPlayConfig gapless = { .fade_in = &none };
-au_queue("/music/live/track2.flac", &gapless);
+AuPlayOptions *gapless = au_play_options_create();
+au_play_options_set_fade_in(gapless, &none);
+au_queue("/music/live/track2.flac", gapless);
 ```
 Curves: linear, equal power, s-curve, logarithmic, exponential, or your own `AuFadeCurveFn`.
 Tracks shorter than `min_track_seconds` (default: twice the fade) and tracks of unknown length play gapless.
@@ -187,8 +190,9 @@ au_free(filters);
 au_fb_free(fb);
 
 // Per track
-const AuPlayConfig cfg = { .filters = "atempo=1.1" };
-au_play("/music/song.flac", &cfg);
+AuPlayOptions *opts = au_play_options_create();
+au_play_options_set_filters(opts, "atempo=1.1");   // AU_ERR_INVALID_ARGUMENT for a graph FFmpeg refuses
+au_play("/music/song.flac", opts);
 
 // Runtime parameter changes without rebuilding the graph
 au_send_filter_command(0, "equalizer@eq_9", "g", "-4");   // band 9 to -4 dB
@@ -248,8 +252,9 @@ au_set_network(&net);                                   // optional; also applie
 
 au_play("https://radio.example.com/stream.mp3", NULL);
 
-const AuPlayConfig cfg = { .http_headers = "Authorization: Bearer abc123" };
-au_queue("https://music.example.com/rest/stream?id=42", &cfg);
+AuPlayOptions *server = au_play_options_create();   // keep it for every track of that server
+au_play_options_set_http_headers(server, "Authorization: Bearer abc123");
+au_queue("https://music.example.com/rest/stream?id=42", server);
 ```
 Network tracks buffer before they start (`AuNetworkSettings.buffer_seconds`, default 2 s) and read ahead up to
 `max_buffer_seconds` (10 s). When the network falls behind, the track waits for a full buffer again instead of
@@ -297,24 +302,24 @@ chapters all list tracks inside one file. `au_cue_read()` reads any of them; eac
 
 static const AuCueSheet *album;
 static int next_track;
+static AuPlayOptions *opts;   // one object for every track
 
-static AuPlayConfig track_config(const AuCueTrack *t) {
-    const AuPlayConfig pc = { .start_seconds = t->start_seconds, .length_seconds = t->length_seconds,
-                              .replaygain = &t->replaygain };   // the sheet's REM REPLAYGAIN_* values, if any
-    return pc;
+static const AuPlayOptions *track_options(const AuCueTrack *t) {
+    au_play_options_set_range(opts, t->start_seconds, t->length_seconds);
+    au_play_options_set_replaygain(opts, &t->replaygain);   // the sheet's REM REPLAYGAIN_* values, if any
+    return opts;
 }
 
 // in on_event, case AU_EVENT_PREPARE_NEXT:
 if (next_track < album->count) {
     const AuCueTrack *t = album->tracks[next_track++];
-    const AuPlayConfig pc = track_config(t);
-    au_queue(t->path, &pc);
+    au_queue(t->path, track_options(t));
 }
 
+opts = au_play_options_create();
 album = au_cue_read("/music/Album/album.cue", NULL);   // or the .flac / .m4b itself
 const AuCueTrack *first = album->tracks[next_track++];
-const AuPlayConfig pc = track_config(first);
-au_play(first->path, &pc);
+au_play(first->path, track_options(first));            // on_event uses opts only once this has posted the track
 printf("%d. %s - %s\n", first->number, first->performer, first->title);
 // au_cue_release(album) once nothing uses its strings any more (the ReplayGain values are copied by au_play())
 ```
@@ -338,8 +343,9 @@ au_set_replaygain(&rg);             // applies to playing tracks with a short ra
 AuReplayGain mine = AU_REPLAYGAIN_NONE;
 mine.track_gain_db = -7.3f;
 mine.track_peak = 0.97f;
-const AuPlayConfig cfg = { .replaygain = &mine };
-au_play("/music/song.flac", &cfg);
+AuPlayOptions *opts = au_play_options_create();
+au_play_options_set_replaygain(opts, &mine);
+au_play("/music/song.flac", opts);
 
 // Tags and format without playing (no au_init() needed)
 const AuMediaInfo *info = au_probe("/music/song.flac", NULL);
@@ -386,7 +392,7 @@ Tag names are FFmpeg's normalized ones (`title`, `artist`, `album`, `album_artis
 ### 6. Measuring loudness
 Files without ReplayGain/R128 tags (most libraries) can be measured with `ffaudio_loudness.h`. It is separate from
 playback: no `au_init()` needed, it can run in background threads while music plays, and it only reads files. Store
-the results in your own database and hand them back with `AuPlayConfig.replaygain`.
+the results in your own database and hand them back with `au_play_options_set_replaygain()`.
 ```c
 #include <ffaudio_loudness.h>
 
@@ -406,8 +412,9 @@ au_loudness_meter_free(all);
 //         .replaygain_gain_db (re -18 LUFS), .r128_gain_db / .r128_gain_q78 (re -23 LUFS)
 
 AuReplayGain rg = au_loudness_to_replaygain(&track[0], &album);   // save it with the track...
-const AuPlayConfig cfg = { .replaygain = &rg };                    // ...and use it when playing
-au_play(album_files[0], &cfg);
+AuPlayOptions *opts = au_play_options_create();                   // ...and use it when playing
+au_play_options_set_replaygain(opts, &rg);
+au_play(album_files[0], opts);
 ```
 The measurement follows ITU-R BS.1770-4 / EBU R128 (K-weighting at any sample rate, 400 ms gating blocks with
 the -70 LUFS absolute and -10 LU relative gates, EBU Tech 3342 loudness range, 4x oversampled true peak,
@@ -418,7 +425,7 @@ parallel. `au_loudness_analyze()` measures a single file in one call. `tests/lou
 example (`loudness_scan [-t] [-c] files...`).
 
 #### ReplayGain cache
-Instead of passing `AuPlayConfig.replaygain` every time, put the values in ffaudio's ReplayGain cache: a
+Instead of passing `au_play_options_set_replaygain()` every time, put the values in ffaudio's ReplayGain cache: a
 persistent key-value store from path to `AuReplayGain`, kept per user and shared by every program that uses
 ffaudio, so values measured once are there in every later run.
 
@@ -440,7 +447,7 @@ ffaudio never tracks, checks or modifies the media files: paths are plain string
 to the application (`au_gain_cache_foreach()` + `au_gain_cache_remove()` to drop entries for deleted files).
 
 When a track starts, its path is looked up and a cached entry is used instead of the file's tags
-(order: `AuPlayConfig.replaygain` > cache > tags). Setting or removing an entry also updates tracks that are
+(order: `au_play_options_set_replaygain()` > cache > tags). Setting or removing an entry also updates tracks that are
 already queued or playing, so a value may arrive after the track was queued.
 
 #### Measuring in the background

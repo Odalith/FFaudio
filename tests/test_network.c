@@ -43,8 +43,8 @@ static void file_url(const char *name, char *out, const size_t size) {
 #endif
 }
 
-static void play_and_wait(const char *what, const AuPlayConfig *cfg, const int eofs, const uint32_t ms) {
-    au_play(what, cfg);
+static void play_and_wait(const char *what, const AuPlayOptions *options, const int eofs, const uint32_t ms) {
+    au_play(what, options);
     if (!TC_WAIT_FIELD(eof, eofs, ms)) {
         fprintf(stderr, "no end of %s within %u ms\n", what, ms);
         CHECK(false);
@@ -140,8 +140,10 @@ static void test_headers_and_user_agent(void) {
     play_and_wait(url("/auth/s44_stereo.flac"), NULL, 1, 5000);
     CHECK(tc_snapshot().eof_error == 1);           // 401 without the token
 
-    const AuPlayConfig with_token = { .http_headers = "X-Other: 1\nX-Test-Token: secret" };
-    play_and_wait(url("/auth/s44_stereo.flac"), &with_token, 2, 6000);
+    AuPlayOptions *with_token = au_play_options_create();
+    REQUIRE(au_play_options_set_http_headers(with_token, "X-Other: 1\nX-Test-Token: secret") == AU_OK);
+    play_and_wait(url("/auth/s44_stereo.flac"), with_token, 2, 6000);
+    au_play_options_free(with_token);
     CHECK(tc_snapshot().eof_error == 1);           // played
 
     const AuNetworkSettings ua = { .user_agent = "soak-test/1" };

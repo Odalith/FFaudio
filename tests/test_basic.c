@@ -165,8 +165,7 @@ static void test_output_format_setter(void) {
 static void test_range_time(void) {
     CHECK(au_set_prepare_next(1.0) == AU_OK);
     watch_prepare_position();
-    const AuPlayConfig pc = { .start_seconds = 2.0, .length_seconds = 3.0 };
-    const int32_t h = au_play(fx("long_6s.flac"), &pc);
+    const int32_t h = tc_play(fx("long_6s.flac"), tc_options(2.0, 3.0, NULL));
     CHECK(TC_WAIT_FIELD(opened, 1, 3000));
     TcEvents e = tc_snapshot();
     printf("   opened: duration %.3f\n", e.opened_duration);
@@ -205,10 +204,56 @@ static void test_range_time(void) {
     CHECK(au_set_prepare_next(10) == AU_OK);
 
     // A start past the end of the file plays nothing and ends cleanly
-    const AuPlayConfig past = { .start_seconds = 60.0 };
-    au_play(fx("long_6s.flac"), &past);
+    tc_play(fx("long_6s.flac"), tc_options(60.0, 0, NULL));
     CHECK(TC_WAIT_FIELD(eof, 2, 3000));
     CHECK(tc_snapshot().eof_error == 0);
+}
+
+static float linear_curve(float t, void *user) { (void)user; return t; }
+
+// Each play-options setter checks its value at the call and leaves the object as it was when it refuses one; the
+// object is copied by au_play(), so it can be changed and freed right after
+static void test_play_options(void) {
+    const AuFade fade = { .seconds = 1, .curve = AU_FADE_LINEAR };
+    const AuReplayGain rg = AU_REPLAYGAIN_NONE;
+    CHECK(au_play_options_set_range(NULL, 0, 0) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_play_options_set_filters(NULL, NULL) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_play_options_set_fade_in(NULL, &fade) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_play_options_set_replaygain(NULL, &rg) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_play_options_set_http_headers(NULL, "X: 1") == AU_ERR_INVALID_ARGUMENT);
+    au_play_options_free(NULL);
+
+    AuPlayOptions *o = au_play_options_create();
+    REQUIRE(o);
+    CHECK(au_play_options_set_range(o, 2.0, 3.0) == AU_OK);
+    CHECK(au_play_options_set_range(o, -1, 1) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_play_options_set_range(o, 1, -1) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_play_options_set_range(o, NAN, 1) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_play_options_set_range(o, 1, INFINITY) == AU_ERR_INVALID_ARGUMENT);
+    AuFade bad = fade;
+    bad.seconds = NAN;
+    CHECK(au_play_options_set_fade_in(o, &bad) == AU_ERR_INVALID_ARGUMENT);
+    bad = fade;
+    bad.curve = (AU_FADE_CURVE)99;
+    CHECK(au_play_options_set_fade_in(o, &bad) == AU_ERR_INVALID_ARGUMENT);
+    bad.curve = AU_FADE_CUSTOM;                 // without a function
+    CHECK(au_play_options_set_fade_in(o, &bad) == AU_ERR_INVALID_ARGUMENT);
+    bad.custom = linear_curve;
+    CHECK(au_play_options_set_fade_in(o, &bad) == AU_OK);
+    CHECK(au_play_options_set_fade_in(o, NULL) == AU_OK);       // back to the AuCrossfade setting
+    CHECK(au_play_options_set_filters(o, "no_such_filter") == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_play_options_set_filters(o, "") == AU_OK);
+    CHECK(au_play_options_set_http_headers(o, "X-A: 1") == AU_OK);
+    CHECK(au_play_options_set_http_headers(o, NULL) == AU_OK);
+
+    // The refused values left the range 2 + 3: the track is 3 s long
+    au_play(fx("long_6s.flac"), o);
+    CHECK(au_play_options_set_range(o, 0, 1) == AU_OK);   // the queued track has its own copy
+    au_play_options_free(o);
+    CHECK(TC_WAIT_FIELD(opened, 1, 3000));
+    CHECK(fabs(tc_snapshot().opened_duration - 3.0) < 1e-6);
+    au_stop();
+    CHECK(TC_WAIT_FIELD(eof, 1, 3000));
 }
 
 // Readers of the meters while the output format changes under them: the tap is remade for every format
@@ -399,6 +444,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_prepare_next_setter);
     RUN_TEST(test_output_format_setter);
     RUN_TEST(test_range_time);
+    RUN_TEST(test_play_options);
     RUN_TEST(test_meters_during_format_changes);
     RUN_TEST(test_skip_to_next);
     RUN_TEST(test_pause_resume);

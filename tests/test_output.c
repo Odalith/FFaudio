@@ -231,10 +231,8 @@ static void test_volume_ramp(void) {
 // volume=0.5 halves the level: compare against the same file without the filter
 static void check_user_filter(const char *name) {
     start_capture(name);
-    const AuPlayConfig plain = {0};
-    const AuPlayConfig halved = { .filters = "volume=0.5" };
-    au_play(fx("join_a.flac"), &plain);
-    au_queue(fx("join_b.flac"), &halved);
+    tc_play(fx("join_a.flac"), au_play_options_create());   // all defaults: the same as NULL
+    tc_queue(fx("join_b.flac"), tc_options(0, 0, "volume=0.5"));
     wait_until_idle(2, 6000);
     Capture c = stop_capture();
 
@@ -362,9 +360,10 @@ static void test_per_track_fade_override(void) {
     start_capture("override");
     // No crossfade configured, but the queued track asks for a 0.4 s fade in
     const AuFade fade = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER };
-    const AuPlayConfig cfg = { .fade_in = &fade };
+    AuPlayOptions *o = au_play_options_create();
+    REQUIRE(au_play_options_set_fade_in(o, &fade) == AU_OK);
     au_play(fx("join_a.flac"), NULL);
-    au_queue(fx("join_b.flac"), &cfg);
+    tc_queue(fx("join_b.flac"), o);
     wait_until_idle(2, 6000);
     const double s = transition_seconds("override", NULL, NULL);
     CHECK(fabs(s - 1.6) < 0.005);
@@ -604,8 +603,7 @@ static void test_upmix(void) {
 static Capture capture_with_filters(const char *name, const char *file, const char *filters) {
     start_capture(name);
     au_set_volume(1.0f);
-    const AuPlayConfig pc = { .filters = filters };
-    au_play(fx(file), &pc);
+    tc_play(fx(file), tc_options(0, 0, filters));
     wait_until_idle(1, 4000);
     return stop_capture();
 }
@@ -718,15 +716,18 @@ static bool counter_exact(const Capture *c, const long first, const long last, c
     return true;
 }
 
-// Consecutive ranges of one file, each queued when the one before asks for its successor
+// Consecutive ranges of one file, each queued when the one before asks for its successor. One options object serves
+// them all, as an application playing a cue sheet would use it: the main thread plays the first range, then hands
+// it to on_event (under tc_mutex), which queues the others.
 static const char *range_file;
 static const double *range_bounds; // n + 1 boundaries in seconds; the last 0 = to the end of the file
 static int range_count, range_next;
+static AuPlayOptions *range_options;
 
-static AuPlayConfig range_config(const int i) {
+static AuPlayOptions *range_config(const int i) {
     const double start = range_bounds[i], end = range_bounds[i + 1];
-    const AuPlayConfig pc = { .start_seconds = start, .length_seconds = end > 0 ? end - start : 0 };
-    return pc;
+    REQUIRE(au_play_options_set_range(range_options, start, end > 0 ? end - start : 0) == AU_OK);
+    return range_options;
 }
 
 static void queue_next_range(void) {
@@ -734,8 +735,7 @@ static void queue_next_range(void) {
     const int i = range_next < range_count ? range_next++ : -1;
     SDL_UnlockMutex(tc_mutex);
     if (i < 0) return;
-    const AuPlayConfig pc = range_config(i);
-    au_queue(fx(range_file), &pc);
+    au_queue(fx(range_file), range_config(i));
 }
 
 static void start_capture_48k(const char *name) {
@@ -746,6 +746,7 @@ static void start_capture_48k(const char *name) {
 
 static Capture play_ranges(const char *name, const char *file, const double *bounds, const int n) {
     start_capture_48k(name);
+    REQUIRE(range_options = au_play_options_create());
     SDL_LockMutex(tc_mutex);
     range_file = file;
     range_bounds = bounds;
@@ -753,11 +754,13 @@ static Capture play_ranges(const char *name, const char *file, const double *bou
     range_next = 1;
     tc_on_prepare_next_hook = queue_next_range;
     SDL_UnlockMutex(tc_mutex);
-    const AuPlayConfig first = range_config(0);
-    au_play(fx(file), &first);
+    // The object is on_event's from the moment au_play() posts the track: no event of it can come earlier
+    au_play(fx(file), range_config(0));
     wait_until_idle(n, 10000);
     SDL_LockMutex(tc_mutex);
     tc_on_prepare_next_hook = NULL;
+    au_play_options_free(range_options);
+    range_options = NULL;
     SDL_UnlockMutex(tc_mutex);
     return stop_capture();
 }
@@ -778,8 +781,7 @@ static void test_exact_ranges(void) {
 static void test_exact_range_loop(void) {
     start_capture_48k("range_loop");
     au_set_loop_count(2);                       // three times in all
-    const AuPlayConfig pc = { .start_seconds = 1.0 / 3.0, .length_seconds = 0.25 };
-    au_play(fx("counter_48k.flac"), &pc);
+    tc_play(fx("counter_48k.flac"), tc_options(1.0 / 3.0, 0.25, NULL));
     wait_until_idle(1, 6000);
     Capture c = stop_capture();
     CHECK(counter_exact(&c, 16001, 28000, 3, "range 1/3 + 0.25 looped twice"));
@@ -788,7 +790,7 @@ static void test_exact_range_loop(void) {
 }
 
 // Plays `pc` of the counter, seeks to `to` after 0.3 s, and checks: a run from first_k, then exactly from_k..last_k
-static void check_exact_seek(const char *what, const AuPlayConfig *pc, const double to, const long first_k,
+static void check_exact_seek(const char *what, const AuPlayOptions *pc, const double to, const long first_k,
                              const long from_k, const long last_k) {
     start_capture_48k("seek");
     au_play(fx("counter_48k.wav"), pc);
@@ -816,8 +818,9 @@ static void check_exact_seek(const char *what, const AuPlayConfig *pc, const dou
 static void test_exact_seek(void) {
     check_exact_seek("seek to 1.5 s", NULL, 1.5, 1, 72001, 192000);
     // In a range, seconds count from its start: 0.5 s + 1.0 s is sample 72000
-    const AuPlayConfig pc = { .start_seconds = 0.5, .length_seconds = 2.0 };
-    check_exact_seek("range 0.5 + 2, seek to 1 s", &pc, 1.0, 24001, 72001, 120000);
+    AuPlayOptions *pc = tc_options(0.5, 2.0, NULL);
+    check_exact_seek("range 0.5 + 2, seek to 1 s", pc, 1.0, 24001, 72001, 120000);
+    au_play_options_free(pc);
 }
 
 // Lossy files: ranges and seeks start from the decoder's preroll, so they match playing the whole file to within the
@@ -869,8 +872,7 @@ static void test_lossy_ranges(void) {
         audible_range(&w, &fw, &lw);
 
         start_capture_48k("lossy_range");
-        const AuPlayConfig pc = { .start_seconds = 1.5 };
-        au_play(fx(files[f]), &pc);
+        tc_play(fx(files[f]), tc_options(1.5, 0, NULL));
         wait_until_idle(1, 8000);
         Capture r = stop_capture();
         size_t fr, lr;
@@ -1051,8 +1053,12 @@ static float replaygain_level(const char *file, const AuReplayGainSettings *cfg,
     start_capture("replaygain");
     au_set_volume(1.0f);
     if (cfg) CHECK(au_set_replaygain(cfg) == AU_OK);
-    const AuPlayConfig pc = { .replaygain = override };
-    au_play(fx(file), override ? &pc : NULL);
+    AuPlayOptions *o = NULL;
+    if (override) {
+        REQUIRE(o = au_play_options_create());
+        REQUIRE(au_play_options_set_replaygain(o, override) == AU_OK);
+    }
+    tc_play(fx(file), o);
     wait_until_idle(1, 4000);
     Capture c = stop_capture();
     const float db = channel_peak_db(&c, 0);
@@ -1399,10 +1405,12 @@ static void test_limiter_and_named_command(void) {
 
 static void test_bad_filter_fails_cleanly(void) {
     start_capture("badfilter");
-    const AuPlayConfig bad = { .filters = "this_filter_does_not_exist=1" };
-    au_play(fx("join_a.flac"), &bad);
+    // Refused at once now; 3.x took it, and the track failed when its graph was built
+    AuPlayOptions *o = tc_options(0, 0, "volume=0.5");
+    CHECK(au_play_options_set_filters(o, "this_filter_does_not_exist=1") == AU_ERR_INVALID_ARGUMENT);
+    tc_play(fx("join_a.flac"), o);                      // still with volume=0.5
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
-    CHECK(tc_snapshot().eof_error == 1);
+    CHECK(tc_snapshot().eof_error == 0);
     Capture c = stop_capture();
     free(c.samples);
 }

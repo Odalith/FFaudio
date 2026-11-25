@@ -75,14 +75,16 @@ extern "C" {
     //+-----------------------------------------------------+
     // Several tracks in one file: a .cue sheet next to an album image, a cue sheet embedded in the file (the CUESHEET
     // tag of FLAC/WavPack/APE, or a FLAC CUESHEET block), or the file's chapters (M4B/M4A audiobooks, Matroska, MP3
-    // ID3 CHAP frames). Each track is a range of a file, played with AuPlayConfig.start_seconds / .length_seconds:
-    // consecutive tracks of one file join exactly, with nothing missing or doubled.
+    // ID3 CHAP frames). Each track is a range of a file, played with au_play_options_set_range(): consecutive
+    // tracks of one file join exactly, with nothing missing or doubled.
     //
     //   const AuCueSheet *cue = au_cue_read("/music/album.cue", NULL);   // or the audio file itself
+    //   AuPlayOptions *o = au_play_options_create();                     // one object for every track
     //   const AuCueTrack *t = cue->tracks[0];
-    //   const AuPlayConfig pc = { .start_seconds = t->start_seconds, .length_seconds = t->length_seconds,
-    //                             .replaygain = &t->replaygain };
-    //   au_play(t->path, &pc);                     // the next ones with au_queue() on AU_EVENT_PREPARE_NEXT
+    //   au_play_options_set_range(o, t->start_seconds, t->length_seconds);
+    //   au_play_options_set_replaygain(o, &t->replaygain);
+    //   au_play(t->path, o);                       // the next ones with au_queue() on AU_EVENT_PREPARE_NEXT
+    //   au_play_options_free(o);                   // au_play() took a copy
     //   au_cue_release(cue);                       // after the last use of its strings
     // Since 3.2.
 
@@ -92,10 +94,10 @@ extern "C" {
         const char *path;            // the audio file it is in (resolved like playlist entries)
         double start_seconds;        // where it starts in that file: INDEX 01, or the chapter's start
         // How long: up to the next track of the same file (a pregap, INDEX 00, plays at the end of the track before);
-        // 0 = to the end of the file. As AuPlayConfig.length_seconds.
+        // 0 = to the end of the file. As au_play_options_set_range().
         double length_seconds;
         const char *title, *performer, *songwriter, *isrc;   // "" when not given; performer falls back to the sheet's
-        AuReplayGain replaygain;     // REM REPLAYGAIN_* lines of the sheet (NaN where missing), for AuPlayConfig
+        AuReplayGain replaygain;     // REM REPLAYGAIN_* lines of the sheet (NaN where missing), for au_play_options_set_replaygain()
     } AuCueTrack;
 
     // Library-allocated: may gain fields at the end

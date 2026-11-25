@@ -20,7 +20,7 @@
  * Loudness analysis (EBU R128 / ITU-R BS.1770-4, ReplayGain 2.0), independent of playback.
  *
  * Measures files and returns the values; it never modifies them. Store the results in your own library
- * database and pass them to playback with AuPlayConfig.replaygain (see au_loudness_to_replaygain()).
+ * database and pass them to playback with au_play_options_set_replaygain() (see au_loudness_to_replaygain()).
  *
  * - No au_init() needed, and it does not affect playback: scan while music plays.
  * - A scanner is used by one thread at a time; run several scanners in parallel to scan faster.
@@ -96,7 +96,7 @@ extern "C" {
     // au_loudness_measure() and au_loudness_result() in one, for a single file
     FFAUDIO_API int au_loudness_analyze(const char *path, const AuLoudnessOptions *config, AuLoudness *out);
 
-    // ReplayGain values for AuPlayConfig.replaygain. album may be NULL. Peaks are the true peaks
+    // ReplayGain values for au_play_options_set_replaygain(). album may be NULL. Peaks are the true peaks
     // (the sample peaks when true peak was skipped). Silent results give no gain.
     FFAUDIO_API AuReplayGain au_loudness_to_replaygain(const AuLoudness *track, const AuLoudness *album);
 
