@@ -270,6 +270,30 @@ if(FFAUDIO_BUILD_TESTS)
                     ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
 
+        # The Python bindings (bindings/python) and the player (player/), with the library just built. Not with a
+        # sanitizer: an instrumented library can not be loaded into a Python that is not.
+        find_package(Python3 COMPONENTS Interpreter)
+        if(Python3_FOUND AND (FFAUDIO_SANITIZER STREQUAL "" OR FFAUDIO_SANITIZER STREQUAL "none"))
+            # Prints every struct's layout as the C compiler sees it, for the bindings' layout test
+            add_executable(ffaudio_layout bindings/python/tests/layout.c)
+            target_include_directories(ffaudio_layout PRIVATE lib)
+            set(FFAUDIO_PYTHON_ENV "FFAUDIO_LIBRARY=$<TARGET_FILE:ffaudio>;FFAUDIO_FIXTURES=${FIXTURE_DIR};SDL_AUDIODRIVER=dummy;PYTHONDONTWRITEBYTECODE=1;${FFAUDIO_TEST_DATA_ENV}")
+            add_test(NAME python_bindings
+                     COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/tests)
+            set_tests_properties(python_bindings PROPERTIES FIXTURES_REQUIRED fixtures TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
+                    ENVIRONMENT "${FFAUDIO_PYTHON_ENV};FFAUDIO_LAYOUT=$<TARGET_FILE:ffaudio_layout>")
+            execute_process(COMMAND ${Python3_EXECUTABLE} -c "import textual" RESULT_VARIABLE FFAUDIO_NO_TEXTUAL
+                            OUTPUT_QUIET ERROR_QUIET)
+            if(FFAUDIO_NO_TEXTUAL EQUAL 0)
+                add_test(NAME player
+                         COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/player/tests)
+                set_tests_properties(player PROPERTIES FIXTURES_REQUIRED fixtures TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
+                        ENVIRONMENT "${FFAUDIO_PYTHON_ENV}")
+            else()
+                message(STATUS "ffaudio: Textual not found for ${Python3_EXECUTABLE}, the player's tests are left out")
+            endif()
+        endif()
+
         if(FFAUDIO_CHAOS)
             # Races of docs/threading.md pinned down: a delay forced at the chaos point that opens each one's window
             ffaudio_test_exe(test_races tests/test_races.c)

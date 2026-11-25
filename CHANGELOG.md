@@ -54,6 +54,12 @@ its replacement. The soname is `libffaudio.so.4`.
   writes as `AU_ERR_FILE` (or not at all, from the background queue and `au_gain_cache_remove/clear()`).
 - `au_result_string()`: text for an `AU_RESULT`.
 - `AU_REPLAYGAIN_NONE` works in C++.
+- Python bindings (`bindings/python`, ctypes): every public header, with dataclasses for value structs, one class
+  per event, exceptions for errors, and a test that checks every struct layout against the C compiler.
+- A terminal music player (`player/`, Python with Textual) built on them, shipped in the release archives: queue with
+  playlists, cue sheets and streams, gapless and crossfaded transitions, ReplayGain with a loudness target, live
+  effects (graphic EQ, AutoEq headphone correction, tone, stereo, crossfeed, compressor, limiter, repairs), level
+  meters, spectrum and cover art.
 
 ### Fixed
 - A track's details could be lost for `au_track_info()` and `au_track_gain_db()` for the track's whole life when its

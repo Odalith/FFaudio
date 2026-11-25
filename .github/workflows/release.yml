@@ -12,7 +12,8 @@ on:
     branches: [ master ]
     paths: [ 'scripts/build-deps.sh', '.github/workflows/release.yml' ]
   pull_request:
-    paths: [ '.github/workflows/release.yml', 'scripts/**', 'CMakeLists.txt', 'ffaudio.pc.in', 'tests/release_smoke.c' ]
+    paths: [ '.github/workflows/release.yml', 'scripts/**', 'CMakeLists.txt', 'ffaudio.pc.in', 'tests/release_smoke.c',
+             'bindings/**', 'player/**' ]
   workflow_dispatch:
 
 permissions:
@@ -125,6 +126,13 @@ jobs:
             $(PKG_CONFIG_PATH="$a/lib/pkgconfig" pkg-config --cflags --libs ffaudio) -lm -Wl,-rpath,"$a/lib"
           env -u LD_LIBRARY_PATH SDL_AUDIODRIVER=dummy smoke/run build/fixtures/s44_stereo.flac
           ldd smoke/run | grep -E 'ffaudio|libav|soxr|bs2b'
+          # The Python bindings find the archive's library by themselves; the player's modules import with Textual
+          env -u LD_LIBRARY_PATH SDL_AUDIODRIVER=dummy python3 -c "import sys; sys.path.insert(0, '$a/python'); \
+            import ffaudio; print('python bindings', ffaudio.version(), ffaudio.probe('build/fixtures/s44_stereo.flac').codec)"
+          python3 -m venv smoke/venv
+          smoke/venv/bin/pip install -q -r "$a/player/requirements.txt"
+          env -u LD_LIBRARY_PATH smoke/venv/bin/python -c "import sys; sys.path[:0] = ['$a/player', '$a/python']; \
+            import ffaudio_player.ui.app; print('player imports')"
 
       - uses: actions/upload-artifact@v4
         with:

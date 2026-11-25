@@ -103,11 +103,19 @@ jobs:
           sudo rm -f ~/apt-cache/lock
           sudo chown -R "$USER" ~/apt-cache
 
+      # The player's tests need Textual; the bindings' tests only Python, which the runner has
+      - name: Textual for the player's tests
+        if: matrix.name == 'release'
+        run: |
+          python3 -m venv ~/pyenv
+          ~/pyenv/bin/pip install -q -r player/requirements.txt
+
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
           -DFFAUDIO_SANITIZER=${{ matrix.sanitizer }}
+          ${{ matrix.name == 'release' && '-DPython3_EXECUTABLE=/home/runner/pyenv/bin/python' || '' }}
           -DFFAUDIO_CHAOS=${{ matrix.chaos }}
           -DFFAUDIO_REQUIRE_TESTS=ON
           -DCMAKE_INSTALL_PREFIX=$PWD/stage

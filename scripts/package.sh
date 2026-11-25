@@ -40,6 +40,13 @@ for pc in "$root"/lib/pkgconfig/*.pc; do
     sed -i 's|^prefix=.*|prefix=${pcfiledir}/../..|' "$pc"
 done
 
+# The Python bindings and the player (source; the player needs Textual: pip install -r player/requirements.txt)
+mkdir -p "$root/python" "$root/player"
+cp -a "$src/bindings/python/ffaudio" "$src/bindings/python/README.md" "$root/python/"
+cp -a "$src/player/ffaudio_player" "$src/player/run.py" "$src/player/requirements.txt" "$src/player/README.md" \
+    "$root/player/"
+find "$root/python" "$root/player" -name __pycache__ -type d -prune -exec rm -rf {} +
+
 mkdir -p "$root/share/licenses/ffaudio"
 cp "$src/license.txt" "$root/share/licenses/ffaudio/"
 cp "$src/readme.md" "$src/CHANGELOG.md" "$root/"
@@ -166,6 +173,9 @@ fi
     echo "Contents"
     echo "  include/ffaudio/    ffaudio.h, ffaudio_filters.h, ffaudio_loudness.h, ffaudio_meters.h, ffaudio_playlist.h"
     echo "  include/            FFmpeg's headers"
+    echo "  python/ffaudio/     Python bindings (ctypes, no compiler needed): finds the library next to it"
+    echo "  player/             a terminal music player built on them: pip install -r player/requirements.txt,"
+    echo "                      then python3 player/run.py ~/Music  (player/README.md)"
     if [ "$os" = linux ]; then
         echo "  lib/                libffaudio.so and the libraries it needs (RUNPATH \$ORIGIN)"
         echo "  lib/pkgconfig       pkg-config files: PKG_CONFIG_PATH=<here>/lib/pkgconfig pkg-config --cflags --libs ffaudio"

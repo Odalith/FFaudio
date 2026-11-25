@@ -542,6 +542,22 @@ au_set_upmix(AU_UPMIX_NONE, NULL);              // back to the default
 au_shutdown();   // not from on_event; au_init() may be called again afterwards
 ```
 
+## Python bindings and a player
+`bindings/python` has bindings for every public header (ctypes, nothing to compile; [its README](bindings/python/README.md)):
+```python
+import ffaudio
+ffaudio.init("My Player")
+ffaudio.play("/music/song.flac")
+match ffaudio.wait_event(5.0):
+    case ffaudio.TrackEnded(error=err, message=msg) if err:
+        print("could not play:", msg)
+```
+`player/` is a terminal music player built on them with Textual. It has a queue with playlists, cue sheets and
+streams, gapless playback and crossfades, ReplayGain with a loudness target, a live graphic EQ and headphone
+correction, level meters and a spectrum, and cover art. It is a complete program and an example of ffaudio in use
+([its README](player/README.md)). Both ship with each release:
+`pip install -r player/requirements.txt`, then `python3 player/run.py ~/Music`.
+
 ## Audio processing chain
 What happens to the audio of a track, in order, and which setting acts where. Everything after the decoder is 32-bit
 float, so nothing clips before the last step.
