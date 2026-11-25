@@ -40,6 +40,7 @@
 extern "C" {
 #endif
 
+    // One entry. Reached through a pointer (AuPlaylistFile.entries), so it may gain fields at the end.
     typedef struct AuPlaylistEntry {
         // A URL, or a local path: relative entries are resolved against the playlist's folder, file:// URIs become
         // paths. Ready for au_play() / au_queue().
@@ -51,7 +52,7 @@ extern "C" {
     // One immutable block: every pointer in it stays valid until au_playlist_file_release()
     typedef struct AuPlaylistFile {
         int count;
-        const AuPlaylistEntry *entries;
+        const AuPlaylistEntry *const *entries;   // count pointers (an array of structs before 4.0)
     } AuPlaylistFile;
 
     // Read a playlist file or URL. The format comes from the content ("[playlist]" = PLS, otherwise M3U); text that is

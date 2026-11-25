@@ -280,10 +280,10 @@ int err;
 const AuPlaylistFile *pl = au_playlist_read("/music/road trip.m3u8", &err);  // or a station's .pls URL
 if (pl) {
     for (int i = 0; i < pl->count; i++) {
-        const AuPlaylistEntry *e = &pl->entries[i];
+        const AuPlaylistEntry *e = pl->entries[i];
         printf("%s (%s, %.0f s)\n", e->path, e->title, e->duration);       // title "", duration -1 when not given
     }
-    au_play(pl->entries[0].path, NULL);
+    au_play(pl->entries[0]->path, NULL);
     au_playlist_file_release(pl);
 }
 ```

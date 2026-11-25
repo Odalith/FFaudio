@@ -70,15 +70,19 @@ static void draft_free(Draft *d) {
     av_free(d->items);
 }
 
-// One allocation: the AuPlaylistFile, its entries, then every string
+// One allocation: the AuPlaylistFile, the pointers, the entries, then every string
 static const AuPlaylistFile *freeze(const Draft *d) {
     size_t chars = 0;
     for (int i = 0; i < d->n; i++) chars += strlen(d->items[i].path) + strlen(d->items[i].title) + 2;
-    const size_t head = sizeof(AuPlaylistFile) + (size_t)d->n * sizeof(AuPlaylistEntry);
-    AuPlaylistFile *pl = av_malloc(head + chars + 1);
-    if (!pl) return NULL;
-    AuPlaylistEntry *entries = (AuPlaylistEntry *)(pl + 1);
-    char *arena = (char *)pl + head;
+    const size_t head = FFALIGN(sizeof(AuPlaylistFile), 16);
+    const size_t ptrs = FFALIGN((size_t)d->n * sizeof(AuPlaylistEntry *), 16);
+    const size_t items = FFALIGN((size_t)d->n * sizeof(AuPlaylistEntry), 16);
+    uint8_t *block = av_malloc(head + ptrs + items + chars + 1);
+    if (!block) return NULL;
+    AuPlaylistFile *pl = (AuPlaylistFile *)block;
+    const AuPlaylistEntry **ptr = (const AuPlaylistEntry **)(block + head);
+    AuPlaylistEntry *entries = (AuPlaylistEntry *)(block + head + ptrs);
+    char *arena = (char *)(block + head + ptrs + items);
     for (int i = 0; i < d->n; i++) {
         const size_t lp = strlen(d->items[i].path) + 1, lt = strlen(d->items[i].title) + 1;
         memcpy(arena, d->items[i].path, lp);
@@ -88,9 +92,10 @@ static const AuPlaylistFile *freeze(const Draft *d) {
         entries[i].title = arena;
         arena += lt;
         entries[i].duration = d->items[i].duration;
+        ptr[i] = &entries[i];
     }
     pl->count = d->n;
-    pl->entries = entries;
+    pl->entries = ptr;
     return pl;
 }
 

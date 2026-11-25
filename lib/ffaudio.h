@@ -537,6 +537,7 @@ extern "C" {
     //| Metadata                                            |
     //+-----------------------------------------------------+
 
+    // A finished key/value pair: AuMediaInfo.tags is an array of them, and AuTag never gains fields
     typedef struct AuTag {
         const char *key;
         const char *value;

@@ -30,16 +30,16 @@ static void test_m3u_extended(void) {
     const AuPlaylistFile *pl = parse(text, "/music/lists/road.m3u8", &err);
     REQUIRE(pl);
     CHECK(err == AU_OK && pl->count == 4);
-    CHECK_STR(pl->entries[0].path, "/music/lists/songs/majesty.flac");
-    CHECK_STR(pl->entries[0].title, "Apashe - Majesty");
-    CHECK(pl->entries[0].duration == 215);
-    CHECK_STR(pl->entries[1].path, "http://radio.example.com/live.mp3");
-    CHECK_STR(pl->entries[1].title, "Station One");   // the comma inside quotes is an attribute's
-    CHECK(pl->entries[1].duration == -1);
-    CHECK_STR(pl->entries[2].path, "/abs/track.ogg");
-    CHECK_STR(pl->entries[2].title, "");               // no #EXTINF: no title, unknown duration
-    CHECK(pl->entries[2].duration == -1);
-    CHECK_STR(pl->entries[3].path, "/music/with space.flac");
+    CHECK_STR(pl->entries[0]->path, "/music/lists/songs/majesty.flac");
+    CHECK_STR(pl->entries[0]->title, "Apashe - Majesty");
+    CHECK(pl->entries[0]->duration == 215);
+    CHECK_STR(pl->entries[1]->path, "http://radio.example.com/live.mp3");
+    CHECK_STR(pl->entries[1]->title, "Station One");   // the comma inside quotes is an attribute's
+    CHECK(pl->entries[1]->duration == -1);
+    CHECK_STR(pl->entries[2]->path, "/abs/track.ogg");
+    CHECK_STR(pl->entries[2]->title, "");               // no #EXTINF: no title, unknown duration
+    CHECK(pl->entries[2]->duration == -1);
+    CHECK_STR(pl->entries[3]->path, "/music/with space.flac");
     au_playlist_file_release(pl);
 }
 
@@ -48,14 +48,14 @@ static void test_m3u_plain_crlf_bom(void) {
     const AuPlaylistFile *pl = parse(text, "list.m3u", NULL);   // in the current folder
     REQUIRE(pl);
     CHECK(pl->count == 3);
-    CHECK_STR(pl->entries[0].path, "a.mp3");
-    CHECK_STR(pl->entries[1].path, "b.flac");
-    CHECK_STR(pl->entries[2].path, "sub/c.wav");
+    CHECK_STR(pl->entries[0]->path, "a.mp3");
+    CHECK_STR(pl->entries[1]->path, "b.flac");
+    CHECK_STR(pl->entries[2]->path, "sub/c.wav");
     au_playlist_file_release(pl);
 
     pl = parse("x.flac\n../y.flac\n", NULL, NULL);               // no base: as written
     REQUIRE(pl);
-    CHECK_STR(pl->entries[1].path, "../y.flac");
+    CHECK_STR(pl->entries[1]->path, "../y.flac");
     au_playlist_file_release(pl);
 }
 
@@ -64,21 +64,21 @@ static void test_latin1(void) {
     const char *text = "#EXTINF:10,Caf\xe9 Band\nCaf\xe9.mp3\n";
     const AuPlaylistFile *pl = parse(text, "/m/x.m3u", NULL);
     REQUIRE(pl && pl->count == 1);
-    CHECK_STR(pl->entries[0].title, "Caf\xc3\xa9 Band");
-    CHECK_STR(pl->entries[0].path, "/m/Caf\xc3\xa9.mp3");
+    CHECK_STR(pl->entries[0]->title, "Caf\xc3\xa9 Band");
+    CHECK_STR(pl->entries[0]->path, "/m/Caf\xc3\xa9.mp3");
     au_playlist_file_release(pl);
     // Windows-1252's quotes and dashes (0x80..0x9F): a right quote, not the invisible control U+0092 that made the path
     // point at no file
     const char *quotes = "Don\x92t Stop \x96 Live.flac\n";
     pl = parse(quotes, "/m/x.m3u", NULL);
     REQUIRE(pl && pl->count == 1);
-    CHECK_STR(pl->entries[0].path, "/m/Don\xe2\x80\x99t Stop \xe2\x80\x93 Live.flac");
+    CHECK_STR(pl->entries[0]->path, "/m/Don\xe2\x80\x99t Stop \xe2\x80\x93 Live.flac");
     au_playlist_file_release(pl);
     // Not UTF-8 although it looks like it: an overlong '/' (C0 AF) and a surrogate (ED A0 80) are read byte by byte
     const char *overlong = "a\xc0\xaf" "b.flac\n";
     pl = parse(overlong, NULL, NULL);
     REQUIRE(pl && pl->count == 1);
-    CHECK_STR(pl->entries[0].path, "a\xc3\x80\xc2\xaf" "b.flac");
+    CHECK_STR(pl->entries[0]->path, "a\xc3\x80\xc2\xaf" "b.flac");
     au_playlist_file_release(pl);
 }
 
@@ -97,33 +97,33 @@ static void test_pls(void) {
     const AuPlaylistFile *pl = parse(text, "http://example.com/radio/list.pls?id=7", NULL);
     REQUIRE(pl);
     CHECK(pl->count == 3);
-    CHECK_STR(pl->entries[0].path, "http://example.com/radio/first.ogg");
-    CHECK_STR(pl->entries[0].title, "First");
-    CHECK(pl->entries[0].duration == 180.5);
-    CHECK_STR(pl->entries[1].path, "http://stream.example.com:8000/high");
-    CHECK(pl->entries[1].duration == -1);
-    CHECK_STR(pl->entries[2].path, "http://example.com/radio/fifth.mp3");
-    CHECK_STR(pl->entries[2].title, "");
+    CHECK_STR(pl->entries[0]->path, "http://example.com/radio/first.ogg");
+    CHECK_STR(pl->entries[0]->title, "First");
+    CHECK(pl->entries[0]->duration == 180.5);
+    CHECK_STR(pl->entries[1]->path, "http://stream.example.com:8000/high");
+    CHECK(pl->entries[1]->duration == -1);
+    CHECK_STR(pl->entries[2]->path, "http://example.com/radio/fifth.mp3");
+    CHECK_STR(pl->entries[2]->title, "");
     au_playlist_file_release(pl);
 }
 
 static void test_url_and_windows_paths(void) {
     const AuPlaylistFile *pl = parse("/root.mp3\nrel.mp3\n", "https://host.example/a/b/list.m3u", NULL);
     REQUIRE(pl && pl->count == 2);
-    CHECK_STR(pl->entries[0].path, "https://host.example/root.mp3");
-    CHECK_STR(pl->entries[1].path, "https://host.example/a/b/rel.mp3");
+    CHECK_STR(pl->entries[0]->path, "https://host.example/root.mp3");
+    CHECK_STR(pl->entries[1]->path, "https://host.example/a/b/rel.mp3");
     au_playlist_file_release(pl);
 
     pl = parse("rel.mp3\n", "http://host.example", NULL);       // no path in the base
     REQUIRE(pl && pl->count == 1);
-    CHECK_STR(pl->entries[0].path, "http://host.example/rel.mp3");
+    CHECK_STR(pl->entries[0]->path, "http://host.example/rel.mp3");
     au_playlist_file_release(pl);
 
     pl = parse("Album\\01.flac\nD:\\Other\\02.flac\n\\\\nas\\music\\03.flac\n", "C:\\Music\\list.m3u", NULL);
     REQUIRE(pl && pl->count == 3);
-    CHECK_STR(pl->entries[0].path, "C:\\Music\\Album\\01.flac");
-    CHECK_STR(pl->entries[1].path, "D:\\Other\\02.flac");        // absolute: as written
-    CHECK_STR(pl->entries[2].path, "\\\\nas\\music\\03.flac");
+    CHECK_STR(pl->entries[0]->path, "C:\\Music\\Album\\01.flac");
+    CHECK_STR(pl->entries[1]->path, "D:\\Other\\02.flac");        // absolute: as written
+    CHECK_STR(pl->entries[2]->path, "\\\\nas\\music\\03.flac");
     au_playlist_file_release(pl);
 }
 
@@ -133,9 +133,9 @@ static void test_url_playlist_lists_only_urls(void) {
     const AuPlaylistFile *pl = parse(text, "http://host.example/lists/a.m3u", NULL);
     REQUIRE(pl);
     CHECK(pl->count == 3);
-    CHECK_STR(pl->entries[0].path, "http://host.example/root.mp3");
-    CHECK_STR(pl->entries[1].path, "http://host.example/lists/rel.mp3");
-    CHECK_STR(pl->entries[2].path, "https://other.example/s.mp3");
+    CHECK_STR(pl->entries[0]->path, "http://host.example/root.mp3");
+    CHECK_STR(pl->entries[1]->path, "http://host.example/lists/rel.mp3");
+    CHECK_STR(pl->entries[2]->path, "https://other.example/s.mp3");
     au_playlist_file_release(pl);
     pl = parse(text, "/home/me/a.m3u", NULL);                     // a local playlist may list anything
     REQUIRE(pl);
@@ -148,7 +148,7 @@ static void test_hls_and_errors(void) {
     const AuPlaylistFile *pl = parse(hls, "https://cdn.example/live/index.m3u8", NULL);
     REQUIRE(pl);
     CHECK(pl->count == 1);                                        // a stream: the playlist itself
-    CHECK_STR(pl->entries[0].path, "https://cdn.example/live/index.m3u8");
+    CHECK_STR(pl->entries[0]->path, "https://cdn.example/live/index.m3u8");
     au_playlist_file_release(pl);
     int err = 0;
     CHECK(parse(hls, NULL, &err) == NULL && err == AU_ERR_UNSUPPORTED);
@@ -174,12 +174,12 @@ static void test_read_files(void) {
     const AuPlaylistFile *pl = au_playlist_read(path, &err);
     REQUIRE(pl);
     CHECK(err == AU_OK && pl->count == 1);
-    CHECK_STR(pl->entries[0].path, fx("s44_stereo.flac"));        // next to the playlist
-    CHECK_STR(pl->entries[0].title, "Sine");
+    CHECK_STR(pl->entries[0]->path, fx("s44_stereo.flac"));        // next to the playlist
+    CHECK_STR(pl->entries[0]->title, "Sine");
 
     // What it lists plays
     REQUIRE(tc_init_player(0) == 0);
-    CHECK(au_play(pl->entries[0].path, NULL) > 0);
+    CHECK(au_play(pl->entries[0]->path, NULL) > 0);
     CHECK(TC_WAIT_FIELD(eof, 1, 5000));
     CHECK(tc_snapshot().eof_error == 0);
     au_shutdown();

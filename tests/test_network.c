@@ -455,9 +455,9 @@ static void test_playlist_over_http(void) {
     const AuPlaylistFile *pl = au_playlist_read(url("/files/station.pls"), &err);
     REQUIRE(pl);
     CHECK(err == AU_OK && pl->count == 1);                       // the local file:// entry is left out
-    CHECK(!strcmp(pl->entries[0].path, url("/files/s44_stereo.flac")));
-    CHECK(!strcmp(pl->entries[0].title, "Test Station"));
-    CHECK(au_play(pl->entries[0].path, NULL) > 0);
+    CHECK(!strcmp(pl->entries[0]->path, url("/files/s44_stereo.flac")));
+    CHECK(!strcmp(pl->entries[0]->title, "Test Station"));
+    CHECK(au_play(pl->entries[0]->path, NULL) > 0);
     CHECK(TC_WAIT_FIELD(eof, 1, 10000));
     CHECK(tc_snapshot().eof_error == 0);
     au_playlist_file_release(pl);
