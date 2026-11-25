@@ -878,6 +878,20 @@ static bool device_for_track(AudioPlayer *ap, TrackState *t) {
 //| Track messages and mixer events                     |
 //+-----------------------------------------------------+
 
+// A play or queue command waits in the message queue (posted after the batch being handled was taken): the current
+// track is about to get a successor, or be replaced. Asking the application for a next track now would make it queue
+// one over the track it queued already. (Since 4.0 the device opens while the first track's file does, so a short
+// first track can be open before an au_queue() right after its au_play() is handled.)
+static bool track_command_pending(AudioPlayer *ap) {
+    CHAOS("track_command_pending");
+    SDL_LockMutex(ap->msg_mutex);
+    bool pending = false;
+    for (const Msg *m = ap->msg_head; m && !pending; m = m->next)
+        pending = m->type == CMD_PLAY || m->type == CMD_SET_NEXT;
+    SDL_UnlockMutex(ap->msg_mutex);
+    return pending;
+}
+
 // A track that was current has ended and nothing plays or waits after it: ask the application for the next one, unless
 // it was asked already for this track (prepare-next before the end). Called from both ends of a track, whichever
 // comes first: its failure message, or the mixer's end event.
@@ -950,7 +964,8 @@ static void handle_track_msg(AudioPlayer *ap, const Msg *msg) {
             lock_mixer(ap);
             const bool is_current_alone = ap->mixer.current == t && !ap->mixer.next;
             unlock_mixer(ap);
-            if (is_current_alone && !t->prepare_next_sent && ffa_load(&t->loops_remaining) == 0) {
+            if (is_current_alone && !t->prepare_next_sent && ffa_load(&t->loops_remaining) == 0
+                && !track_command_pending(ap)) {
                 t->prepare_next_sent = true;
                 note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = t->handle });
             }
@@ -1090,7 +1105,8 @@ static void housekeeping(AudioPlayer *ap) {
         SDL_LockMutex(ap->format_mutex);
         const double speed = ap->speed > 0 ? ap->speed : 1.0;
         SDL_UnlockMutex(ap->format_mutex);
-        if (end >= 0 && (end - pos) / speed <= lead) { // lead is wall clock time
+        // lead is wall clock time; with a command pending, the next round asks if it is still needed
+        if (end >= 0 && (end - pos) / speed <= lead && !track_command_pending(ap)) {
             cur->prepare_next_sent = true;
             note_add((AuEvent){ .type = AU_EVENT_PREPARE_NEXT, .handle = cur->handle });
         }

@@ -78,6 +78,7 @@ typedef struct TcEvents {
     int log_error;
     int32_t last_eof_handle;
     int32_t last_started_handle;
+    int32_t last_prepare_handle;       // AU_EVENT_PREPARE_NEXT's handle (the track that nears its end)
     double last_duration;
 } TcEvents;
 
@@ -161,6 +162,9 @@ static void tc_event_cb(const AuEvent *e, void *ud) {
             break;
         case AU_EVENT_PREPARE_NEXT: {
             if (tc_verbose) fprintf(stderr, "PREPARE_NEXT current=%d\n", e->handle);
+            SDL_LockMutex(tc_mutex);
+            tc_ev.last_prepare_handle = e->handle;
+            SDL_UnlockMutex(tc_mutex);
             tc_bump(&tc_ev.prepare_next);
             SDL_LockMutex(tc_mutex);
             void (*prep_hook)(void) = tc_on_prepare_next_hook;

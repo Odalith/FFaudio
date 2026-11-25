@@ -57,9 +57,23 @@ static void race_pause_after_queue(void) {
     CHECK(TC_WAIT_FIELD(eof, 1, 3000));
 }
 
+// A track queued right after au_play() is the next one, also when the control thread handles the play late and the
+// played file is open before the queue is handled (FFAUDIO_CHAOS_AT=au_queue=…|ensure_device=…: the device open overlaps the
+// file open since 4.0). No AU_EVENT_PREPARE_NEXT may ask for a successor of the played track meanwhile: an
+// application that queues on it would replace the track it queued already.
+static void race_play_then_queue(void) {
+    const int32_t a = au_play(fx("join_a.flac"), NULL);
+    const int32_t b = au_queue(fx("join_b.flac"), NULL);
+    REQUIRE(a > 0 && b > 0);
+    CHECK(TC_WAIT_FIELD(eof, 2, 8000));
+    const TcEvents e = tc_snapshot();
+    CHECK(e.started == 2 && e.eof_error == 0);
+    CHECK(e.prepare_next == 1 && e.last_prepare_handle == b); // only for b, the last one
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
-        fprintf(stderr, "usage: %s <fixture-dir> registration|failed_track|pause_after_queue\n", argv[0]);
+        fprintf(stderr, "usage: %s <fixture-dir> registration|failed_track|pause_after_queue|play_then_queue\n", argv[0]);
         return 2;
     }
     tc_setup(argc, argv);
@@ -68,6 +82,7 @@ int main(int argc, char **argv) {
     if (!strcmp(which, "registration")) RUN_TEST(race_registration);
     else if (!strcmp(which, "failed_track")) RUN_TEST(race_failed_track);
     else if (!strcmp(which, "pause_after_queue")) RUN_TEST(race_pause_after_queue);
+    else if (!strcmp(which, "play_then_queue")) RUN_TEST(race_play_then_queue);
     else { fprintf(stderr, "unknown case '%s'\n", which); return 2; }
     au_shutdown();
     return tc_finish(which);

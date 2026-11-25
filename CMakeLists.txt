@@ -283,7 +283,8 @@ if(FFAUDIO_BUILD_TESTS)
                     "registration@registration@create_track: worker started=100000"
                     "failed_track_mixer_first@failed_track@eos stored, failure not posted=200000"
                     "failed_track_failure_first@failed_track@sdl_audio_callback=20000"
-                    "pause_after_queue@pause_after_queue@cmd_set_next=100000")
+                    "pause_after_queue@pause_after_queue@cmd_set_next=100000"
+                    "play_then_queue@play_then_queue@au_queue=20000|ensure_device=200000")
             foreach(race ${FFAUDIO_RACES})
                 string(REPLACE "@" ";" parts "${race}")
                 list(GET parts 0 name)
