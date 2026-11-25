@@ -260,6 +260,21 @@ static void test_wait_ends_with_shutdown(void) {
     CHECK(SDL_AtomicGet(&done) == 1);
 }
 
+// A failed au_init() (here: an audio driver that does not exist) leaves nothing behind (ASan checks for leaks): a
+// polling application can read why it failed, and the next au_init() works
+static void test_failed_init(void) {
+    char driver[64];
+    snprintf(driver, sizeof(driver), "%s", SDL_getenv("SDL_AUDIODRIVER") ? SDL_getenv("SDL_AUDIODRIVER") : "dummy");
+    SDL_setenv("SDL_AUDIODRIVER", "no_such_driver", 1);
+    CHECK(poll_start() == AU_ERR_SDL);
+    AuEvent e;
+    CHECK(au_poll_event(&e) && e.type == AU_EVENT_LOG && e.data.log.level == AU_LOG_FATAL && e.data.log.message);
+    printf("   failed: %s\n", e.data.log.message ? e.data.log.message : "(none)");
+    SDL_setenv("SDL_AUDIODRIVER", driver, 1);
+    REQUIRE(tc_init_player(0) == AU_OK);
+    au_shutdown();
+}
+
 int main(int argc, char **argv) {
     tc_setup(argc, argv);
     RUN_TEST(test_calls_before_init);
@@ -273,5 +288,6 @@ int main(int argc, char **argv) {
     RUN_TEST(test_poll_events);
     RUN_TEST(test_poll_overflow);
     RUN_TEST(test_wait_ends_with_shutdown);
+    RUN_TEST(test_failed_init);
     return tc_finish("test_lifecycle");
 }

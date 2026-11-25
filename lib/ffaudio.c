@@ -120,7 +120,7 @@ void ff_gain_cache_changed(const char *path) {
 // down: an FFmpeg error (a damaged packet, a TLS close the server did not answer) is something a player gets past.
 // Only what av_log_get_level() lets through (errors, see au_init()) comes here.
 static void ffmpeg_log(void *avcl, const int level, const char *fmt, va_list vl) {
-    if (level > av_log_get_level() || !audio_player) return;
+    if (level > av_log_get_level()) return; // ff_log() checks for a player, under the lifecycle lock
     char msg[1024];
     vsnprintf(msg, sizeof(msg), fmt, vl);
     size_t n = strlen(msg);
@@ -148,9 +148,11 @@ void ff_post_track_msg(const MsgType type, const int32_t handle, const double d)
     msg_post(ap, m);
 }
 
+// Any thread, also one that is not the player's: FFmpeg's messages come here (ffmpeg_log()) from every thread that uses
+// FFmpeg, such as gain-scan workers or an application thread in au_probe(), which may run while au_shutdown() frees the
+// player. So the player is looked up and posted to under the lifecycle lock, as ff_gain_cache_changed() does.
 void ff_log(const enum AU_LOG_LEVEL level, const char *fmt, ...) {
-    AudioPlayer *ap = audio_player;
-    if (!fmt || !ap) return;
+    if (!fmt) return;
 
     va_list args;
     va_start(args, fmt);
@@ -168,8 +170,17 @@ void ff_log(const enum AU_LOG_LEVEL level, const char *fmt, ...) {
     if (!m) { av_free(text); return; }
     m->str = text;
     m->level = level;
-    m->request = SDL_AtomicGet(&ap->request_count);
-    msg_post(ap, m);
+    SDL_mutex *lock = lifecycle_mutex();
+    if (!lock) { msg_free(m); return; }
+    SDL_LockMutex(lock);
+    AudioPlayer *ap = audio_player;
+    if (ap && !SDL_AtomicGet(&ap->shutting_down)) {
+        m->request = SDL_AtomicGet(&ap->request_count);
+        msg_post(ap, m);
+        m = NULL;
+    }
+    SDL_UnlockMutex(lock);
+    msg_free(m);
 }
 
 //+-----------------------------------------------------+
@@ -1266,6 +1277,40 @@ static int control_thread(void *arg) {
 //| Public API: lifetime                                |
 //+-----------------------------------------------------+
 
+// Everything a player owns, once none of its threads runs: the end of au_shutdown(), and every failure of au_init()
+// (where some of it was never made: NULL is fine everywhere)
+static void player_free(AudioPlayer *ap) {
+    for (Msg *m = ap->msg_head; m;) {   // what came after the shutdown, or a cache update during a failed start
+        Msg *n = m->next;
+        finish_sync(m);
+        msg_free(m);
+        m = n;
+    }
+    av_free(ap->tracks);
+    av_free(ap->dying);
+    av_free(ap->pubs);
+    av_free(ap->audio_device_name);
+    av_free(ap->device_in_use);
+    free_device_list(ap->known_devices, ap->n_known_devices);
+    av_free(ap->global_filters);
+    av_free(ap->downmix_filters);
+    av_free(ap->upmix_filters);
+    av_free(ap->source_filters);
+    av_channel_layout_uninit(&ap->audio_target.ch_layout);
+    ring_storage_free_all(ap); // the tracks gave their storage back when they were destroyed
+    av_free(ap->tap.buf);      // the device is closed: nothing writes it
+    SDL_DestroyMutex(ap->msg_mutex);
+    SDL_DestroySemaphore(ap->wake_sem);
+    SDL_DestroyMutex(ap->format_mutex);
+    SDL_DestroyCond(ap->format_cond);
+    SDL_DestroyMutex(ap->status_mutex);
+    SDL_DestroyMutex(ap->ring_pool_mutex);
+    SDL_DestroySemaphore(ap->started_sem);
+    SDL_DestroyMutex(ap->pub_mutex);
+    SDL_DestroyMutex(ap->tap_mutex);
+    av_free(ap);
+}
+
 // A log message before the control thread runs (au_init() failing): straight to the application
 static void early_log(const AuConfig *config, const char *message) {
     const AuEvent e = { .type = AU_EVENT_LOG, .data.log = { AU_LOG_FATAL, message, 0 } };
@@ -1279,6 +1324,7 @@ int au_init(const AuConfig *config) {
 
     AudioPlayer *ap = av_mallocz(sizeof(AudioPlayer));
     if (!ap) return AU_ERR_NO_MEMORY;
+    ap->saved_log_level = av_log_get_level();
 
     const float volume = config->volume < 0 || !isfinite(config->volume) ? 1.0f : fminf(config->volume, 1.0f);
     atomic_set_float(&ap->volume, volume);
@@ -1297,7 +1343,7 @@ int au_init(const AuConfig *config) {
     ap->use_default_device = true;
     ap->user_data = config->user_data;
     ap->on_event = config->on_event;
-    events_open();
+    events_open(); // first: early_log() hands a polling application the reason a failed au_init() failed
     ap->audio_target.fmt = AV_SAMPLE_FMT_NONE;
     ap->mixer.pause_gain = 1.0f;
     ap->mixer.pause_to = 1.0f;
@@ -1320,8 +1366,9 @@ int au_init(const AuConfig *config) {
         goto fail_sync;
     publish_idle_status(ap);
 
+    // Only FFmpeg's errors from here on; its log callback is ffaudio's once the player runs (below), so a failure
+    // until then has nothing to undo but this
     av_log_set_level(AV_LOG_ERROR);
-    av_log_set_callback(ffmpeg_log);   // FFmpeg's messages come as AU_EVENT_LOG (until au_shutdown())
 
     // A library must not take over the host's Ctrl-C / SIGTERM handling
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
@@ -1359,18 +1406,13 @@ int au_init(const AuConfig *config) {
         SDL_LockMutex(lock);
         audio_player = NULL;
         SDL_UnlockMutex(lock);
-        // A cache update may have queued a message in the meantime
-        while (ap->msg_head) {
-            Msg *m = ap->msg_head;
-            ap->msg_head = m->next;
-            msg_free(m);
-        }
-        avformat_network_deinit();
+        avformat_network_deinit(); // a cache update's message, if one came meanwhile, is freed with the player
         SDL_DelEventWatch(device_event_watch, ap);
         SDL_QuitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS);
         goto fail_sync;
     }
     SDL_SemWait(ap->started_sem); // control_thread_id is set
+    av_log_set_callback(ffmpeg_log);   // FFmpeg's messages come as AU_EVENT_LOG (until au_shutdown())
     au_set_device(config->device);   // AU_EVENT_DEVICE reports how it went
 
     ff_log(AU_LOG_INFO, "ffaudio %s initialized (audio driver: %s, resampler: %s)", au_get_version(),
@@ -1378,16 +1420,8 @@ int au_init(const AuConfig *config) {
     return AU_OK;
 
 fail_sync:
-    SDL_DestroyMutex(ap->msg_mutex);
-    SDL_DestroySemaphore(ap->wake_sem);
-    SDL_DestroyMutex(ap->format_mutex);
-    SDL_DestroyCond(ap->format_cond);
-    SDL_DestroyMutex(ap->status_mutex);
-    SDL_DestroyMutex(ap->ring_pool_mutex);
-    SDL_DestroySemaphore(ap->started_sem);
-    SDL_DestroyMutex(ap->pub_mutex);
-    SDL_DestroyMutex(ap->tap_mutex);
-    av_free(ap);
+    av_log_set_level(ap->saved_log_level);
+    player_free(ap);
     return AU_ERR_SDL;
 }
 
@@ -1414,42 +1448,14 @@ void au_shutdown(void) {
     SDL_WaitThread(ap->control_thread, NULL);
     SDL_DelEventWatch(device_event_watch, ap); // returns once a watch call in progress has finished
 
-    av_log_set_callback(av_log_default_callback); // every thread of the player has ended
+    av_log_set_callback(av_log_default_callback); // the player's threads have ended (other threads: see ff_log())
+    // The level au_init() found, unless the application chose another one meanwhile
+    if (av_log_get_level() == AV_LOG_ERROR) av_log_set_level(ap->saved_log_level);
     SDL_mutex *lock = lifecycle_mutex();
     SDL_LockMutex(lock);
     audio_player = NULL;
     SDL_UnlockMutex(lock);
-
-    Msg *rest = ap->msg_head;
-    while (rest) {
-        Msg *n = rest->next;
-        finish_sync(rest);
-        msg_free(rest);
-        rest = n;
-    }
-    av_free(ap->tracks);
-    av_free(ap->dying);
-    av_free(ap->pubs);
-    av_free(ap->audio_device_name);
-    av_free(ap->device_in_use);
-    free_device_list(ap->known_devices, ap->n_known_devices);
-    av_free(ap->global_filters);
-    av_free(ap->downmix_filters);
-    av_free(ap->upmix_filters);
-    av_free(ap->source_filters);
-    av_channel_layout_uninit(&ap->audio_target.ch_layout);
-    SDL_DestroyMutex(ap->msg_mutex);
-    SDL_DestroySemaphore(ap->wake_sem);
-    SDL_DestroyMutex(ap->format_mutex);
-    SDL_DestroyCond(ap->format_cond);
-    SDL_DestroyMutex(ap->status_mutex);
-    ring_storage_free_all(ap); // the tracks gave their storage back when they were destroyed
-    SDL_DestroyMutex(ap->ring_pool_mutex);
-    SDL_DestroySemaphore(ap->started_sem);
-    SDL_DestroyMutex(ap->pub_mutex);
-    SDL_DestroyMutex(ap->tap_mutex);
-    av_free(ap->tap.buf); // the device is closed: nothing writes it
-    av_free(ap);
+    player_free(ap);
 
     avformat_network_deinit();
     SDL_QuitSubSystem(SDL_INIT_AUDIO | SDL_INIT_EVENTS);

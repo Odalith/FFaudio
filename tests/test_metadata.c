@@ -266,6 +266,34 @@ static void test_ffmpeg_log_routed(void) {
     au_shutdown();
 }
 
+// FFmpeg logs from threads that are not the player's (gain-scan workers, au_probe() on an application thread, the
+// application's own FFmpeg) while au_shutdown() frees the player: ff_log() used to read the player without the
+// lifecycle lock and could post to freed memory (ASan, TSan)
+static SDL_atomic_t logger_stop;
+
+static int logger_main(void *arg) {
+    (void)arg;
+    const AVClass *ctx = &probe_class;
+    while (!SDL_AtomicGet(&logger_stop)) {
+        av_log(&ctx, AV_LOG_ERROR, "from another thread\n");
+        SDL_Delay(1);
+    }
+    return 0;
+}
+
+static void test_ffmpeg_log_during_shutdown(void) {
+    SDL_AtomicSet(&logger_stop, 0);
+    SDL_Thread *logger = SDL_CreateThread(logger_main, "logger", NULL);
+    REQUIRE(logger);
+    for (int i = 0; i < 30; i++) {
+        REQUIRE(tc_init_player(0) == 0);
+        tc_sleep_ms(5);
+        au_shutdown();
+    }
+    SDL_AtomicSet(&logger_stop, 1);
+    SDL_WaitThread(logger, NULL);
+}
+
 static void test_non_audio_opens_no_decoder(void) {
     // not_audio.bin is damaged JPEG data, detected as a raw video stream like encrypted cache files often are.
     // Probing it used to open the video decoder, which printed warnings ("[vvc] SPS id 9 not available", ...).
@@ -302,6 +330,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_pictures);
     RUN_TEST(test_track_info_while_playing);
     RUN_TEST(test_ffmpeg_log_routed);
+    RUN_TEST(test_ffmpeg_log_during_shutdown);
     RUN_TEST(test_non_audio_opens_no_decoder);
     return tc_finish("test_metadata");
 }

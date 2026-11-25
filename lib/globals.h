@@ -519,6 +519,7 @@ typedef struct AudioPlayer {
     FadeCurve play_curve, skip_curve, stop_curve, pause_curve; // control thread: its curves, sampled when set
     bool use_soxr;
     int32_t filter_nbthreads;
+    int saved_log_level;                // FFmpeg's log level before au_init(), put back by au_shutdown()
 
     // ---- published track state (TrackPub) ----
     SDL_mutex *pub_mutex;
