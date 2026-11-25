@@ -27,7 +27,7 @@ its replacement. The soname is `libffaudio.so.4`.
   `AuLoudnessProgressFn`), `au_set_gain_scan()`, and `au_gain_scan_request/_request_album/_cancel/_pending` for the
   measurement queue. `measure_streams` moved from `AuNetworkSettings` to `AuGainScanSettings`.
 - The volume goes up to 2 (+6 dB), 1 staying 100 %; above 1 loud parts can clip, which is up to the application
-  (a limiter in the filters prevents it). It was 0..1.
+  (the volume comes after the filters, so a limiter there does not catch it). It was 0..1.
 - `AuEvent` has a fixed size (72 bytes; its union is padded to 64), so 4.x can add event data without breaking the
   ABI.
 - `AuPlaylistFile.entries` is an array of pointers, so `AuPlaylistEntry` can gain fields.
