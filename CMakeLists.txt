@@ -271,8 +271,13 @@ if(FFAUDIO_BUILD_TESTS)
                 # Watches FFmpeg's own log messages (av_log_set_callback)
                 target_link_libraries(${t} PRIVATE PkgConfig::FFMPEG)
             endif()
+            # test_output renders about three minutes of audio in real time: twice the limit
+            set(timeout ${FFAUDIO_TEST_TIMEOUT})
+            if(t STREQUAL "test_output")
+                math(EXPR timeout "${FFAUDIO_TEST_TIMEOUT} * 2")
+            endif()
             set_tests_properties(${t} PROPERTIES
-                    TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
+                    TIMEOUT ${timeout}
                     ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
 
