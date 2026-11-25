@@ -1655,6 +1655,10 @@ int au_set_speed(const double speed, const bool keep_pitch) {
 int au_set_crossfade(const AuCrossfade *config) {
     AudioPlayer *ap = audio_player;
     if (!ap) return AU_ERR_NOT_INITIALIZED;
+    if (config && (!ff_fade_valid(&config->on_track_end) || !ff_fade_valid(&config->on_skip)
+                   || !ff_fade_valid(&config->on_play) || !ff_fade_valid(&config->on_stop)
+                   || !ff_fade_valid(&config->on_pause)))
+        return AU_ERR_INVALID_ARGUMENT;
     ffa_fetch_add(&ap->request_count, 1);
     Msg *m = msg_new(CMD_SET_CROSSFADE);
     if (!m) return AU_ERR_NO_MEMORY;

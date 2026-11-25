@@ -403,10 +403,10 @@ static float window_peak(const Capture *c, size_t first, double from_s, double t
 
 // Pausing fades out with the curve run backwards, curve(1 - t), as a crossfade's fade-out does: halfway through an
 // equal-power fade the level is cos(45 deg) = 0.71 of what it was (it used to be 1 - sin(45 deg) = 0.29)
-static void test_pause_fade_curve(void) {
+static float pause_fade_halfway(const AuFade pause) {
     start_capture("pausecurve");
-    const AuCrossfade xf = { .on_pause = { .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER } };
-    au_set_crossfade(&xf);
+    const AuCrossfade xf = { .on_pause = pause };
+    CHECK(au_set_crossfade(&xf) == AU_OK);
     au_play(fx("long_6s.flac"), NULL);
     tc_sleep_ms(1000);
     au_pause(true);
@@ -420,7 +420,29 @@ static void test_pause_fade_curve(void) {
     const double mid_s = (double)(last - first) / c.rate - 0.2;
     const float ratio = window_peak(&c, first, mid_s - 0.003, mid_s + 0.003) / steady;
     printf("   pause fade: level %.3f of steady halfway\n", ratio);
-    CHECK(fabsf(ratio - 0.707f) < 0.05f);
+    free(c.samples);
+    return ratio;
+}
+
+static void test_pause_fade_curve(void) {
+    CHECK(fabsf(pause_fade_halfway((AuFade){ .seconds = 0.4, .curve = AU_FADE_EQUAL_POWER }) - 0.707f) < 0.05f);
+}
+
+// A fade given without a curve is equal power (3.x: linear, a 3 dB dip in a crossfade), and an unknown curve is
+// refused instead of becoming linear
+static void test_default_curve_is_equal_power(void) {
+    CHECK(fabsf(pause_fade_halfway((AuFade){ .seconds = 0.4 }) - 0.707f) < 0.05f);
+    CHECK(fabsf(pause_fade_halfway((AuFade){ .seconds = 0.4, .curve = AU_FADE_LINEAR }) - 0.5f) < 0.05f);
+
+    start_capture("badcurve");
+    const AuCrossfade bad = { .on_skip = { .seconds = 1, .curve = (AU_FADE_CURVE)17 } };
+    CHECK(au_set_crossfade(&bad) == AU_ERR_INVALID_ARGUMENT);
+    const AuCrossfade no_fn = { .on_stop = { .seconds = 1, .curve = AU_FADE_CUSTOM } };
+    CHECK(au_set_crossfade(&no_fn) == AU_ERR_INVALID_ARGUMENT);
+    const AuCrossfade nan = { .on_play = { .seconds = NAN } };
+    CHECK(au_set_crossfade(&nan) == AU_ERR_INVALID_ARGUMENT);
+    CHECK(au_set_crossfade(NULL) == AU_OK);
+    Capture c = stop_capture();
     free(c.samples);
 }
 
@@ -1429,6 +1451,7 @@ int main(int argc, char **argv) {
     RUN_TEST(test_crossfade_into_slow_open);
     RUN_TEST(test_pause_fade);
     RUN_TEST(test_pause_fade_curve);
+    RUN_TEST(test_default_curve_is_equal_power);
     RUN_TEST(test_per_track_fade_override);
     RUN_TEST(test_short_tracks_stay_gapless);
     RUN_TEST(test_custom_curve);

@@ -146,13 +146,15 @@ extern "C" {
     //| Fades and crossfades                                |
     //+-----------------------------------------------------+
 
+    // A zeroed AuFade has the default curve, equal power. (Before 4.0 the zero value was linear, and other values
+    // than these fell back to linear; they are refused now.)
     typedef enum AU_FADE_CURVE {
-        AU_FADE_LINEAR = 0,       // gain changes linearly; a crossfade dips ~3 dB in the middle
-        AU_FADE_EQUAL_POWER,      // sin/cos; constant loudness for uncorrelated material (default choice)
-        AU_FADE_S_CURVE,          // smoothstep; gentle start and end
-        AU_FADE_LOGARITHMIC,      // fast rise, slow finish
-        AU_FADE_EXPONENTIAL,      // slow rise, fast finish
-        AU_FADE_CUSTOM,           // use AuFade.custom
+        AU_FADE_EQUAL_POWER = 0,  // sin/cos; constant loudness for uncorrelated material. The default
+        AU_FADE_LINEAR = 1,       // gain changes linearly; a crossfade dips ~3 dB in the middle
+        AU_FADE_S_CURVE = 2,      // smoothstep; gentle start and end
+        AU_FADE_LOGARITHMIC = 3,  // fast rise, slow finish
+        AU_FADE_EXPONENTIAL = 4,  // slow rise, fast finish
+        AU_FADE_CUSTOM = 5,       // use AuFade.custom (which must be set)
     } AU_FADE_CURVE;
 
     // t goes 0 -> 1 over the fade; return the gain (0..1) of the track fading IN.
@@ -345,6 +347,7 @@ extern "C" {
     FFAUDIO_API int au_seek_fraction(double fraction);
 
     // Set when and how fades and crossfades happen. NULL disables them all (gapless + hard cuts).
+    // AU_ERR_INVALID_ARGUMENT, and nothing changes, when a fade's seconds are not finite or its curve is unknown.
     FFAUDIO_API int au_set_crossfade(const AuCrossfade *config);
 
     // Playback speed for all tracks, 0.25..4 (1 = normal). keep_pitch: change the tempo only (atempo); false:
