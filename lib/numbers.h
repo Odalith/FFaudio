@@ -34,7 +34,8 @@
 // For the rest of the calling thread (one of ffaudio's own)
 void ff_thread_use_c_locale(void);
 
-// The C locale until ff_c_locale_end(), which restores the thread's previous locale. Cheap: no allocation.
+// The C locale until ff_c_locale_end(), which restores the thread's previous locale. Cheap: no allocation (on Windows
+// one small one, for the previous setting).
 typedef struct FfLocale { void *saved; } FfLocale;
 FfLocale ff_c_locale_begin(void);
 void ff_c_locale_end(FfLocale saved);

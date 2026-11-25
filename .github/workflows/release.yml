@@ -1,6 +1,6 @@
 name: Release
 
-# Pushing a tag like v2.0.0 builds the release archives (ffaudio with an LGPL FFmpeg built by
+# Pushing a tag like v4.0.0 builds the release archives (ffaudio with an LGPL FFmpeg built by
 # scripts/build-deps.sh), tests them and attaches them to a draft GitHub release, together with the FFmpeg
 # and soxr sources. Pull requests that change the packaging, and manual runs (workflow_dispatch), build and test
 # the archives as workflow artifacts only.

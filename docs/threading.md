@@ -2,12 +2,21 @@
 
 This is the reference for how ffaudio's threads work together: which threads exist, what each one owns, every lock,
 condition, semaphore and lock-free channel, the order locks may be taken in, and the hand-offs that have to happen in
-a particular order. It describes the code as it is (3.2), and it is kept up to date with it.
+a particular order. It describes the code as it is (4.0), and it is kept up to date with it.
 
 **Keep it true.** A change that adds a thread, a lock, a cross-thread field or a new hand-off updates this file in
 the same commit. When code and this file disagree, one of them has a bug. The chaos build (see
 [Chaos testing](#chaos-testing)) puts random delays at the hand-off points listed here; a new hand-off gets a
 `CHAOS()` point too.
+
+A change that touches more than one thread goes through this list:
+
+1. Every new field has an owner: say it in its `globals.h` comment and in [Ownership](#ownership) or the lock table.
+2. Its effect on the lock order: [Lock order](#lock-order), checked with `scripts/dev/lock_scan.py lib`.
+3. A `CHAOS()` point at each new hand-off; when a race was found, a forced race test that fails before the fix
+   (`FFAUDIO_CHAOS_AT`, `tests/test_races.c`).
+4. The [real-time rules](#real-time-rules) for anything the audio callback runs: `scripts/dev/rt_lint.sh`.
+5. A row in [History of races found](#history-of-races-found) for every race found.
 
 Source of the facts below: `lib/globals.h` (shared structures and their comments), `lib/ffaudio.c` (API, control
 thread), `lib/track.c` (track threads), `lib/output.c` (audio callback, mixer), `lib/sample_ring.c` (decoded-audio
@@ -24,13 +33,18 @@ ring), `lib/packet_queue_utils.c`, `lib/events.c`, `lib/meters.c`, `lib/gain_cac
 | **Network reader** | the track's worker | `ffa_read_<handle>` | 1 per network track | from after the open until the worker's decoding ends | `net_reader()`: reads packets ahead into the track's `audio_queue`, does seeks and range ends for the stream, reconnects, ICY/Ogg "now playing". | `read_cond` (queue full, at the end, after errors) |
 | **Gain scan worker** | first request (`start_workers()`) | `ffa_gain_scan` | up to `AuGainScanSettings.threads` (max 16) | until `au_gain_scan_stop()`, or until fewer are wanted: it then leaves after its job and flags its slot `exited`; `start_workers()` joins it (it has left, so that does not wait) before reusing the slot | `worker_main()`: measures files for the ReplayGain cache, calls `on_cached`. Runs without a player too. | gain scan `wake` cond |
 | **SDL event watch** | SDL | whichever thread adds an event to SDL's queue | - | - | `device_event_watch()`: sets `device_events` / `open_device_lost` atomics only. | never |
-| **FFmpeg internal** | FFmpeg | - | per decoder | - | Frame/slice threads of a decoder (`ff_open_decoder(threads)`). Filter graphs run single-threaded (`filter_nbthreads = 1`). Can call `av_log` → `ffmpeg_log()` → `ff_log()`. | - |
+| **FFmpeg internal** | FFmpeg | - | per decoder | - | Frame/slice threads of a decoder (`ff_open_decoder(threads)`): playback decoders use one (`stream_component_open()`; more would start a thread per core for every track), the loudness analysis four. Filter graphs run single-threaded (`filter_nbthreads = 1`). Can call `av_log` → `ffmpeg_log()` → `ff_log()`. | - |
 
 Application code runs on exactly these threads:
 
-- `AuConfig.on_event`: the **control thread** only (`dispatch_notes()`), never while a lock is held. It may call any API
-  function except `au_shutdown()`.
+- `on_event` (given to `au_init()`): the **control thread** only (`dispatch_notes()`), never while a lock is held. It
+  may call any API function except `au_shutdown()`.
 - `AuGainScanSettings.on_cached`: a **gain scan worker**, without the scan lock held (`notify()`).
+- `AuFadeCurveFn` (`AU_FADE_CUSTOM`): the **control thread**, while the fade is set up (`fade_curve_build()`, from
+  `au_set_crossfade()`'s message or `track_create()`); the 257 samples are used from then on.
+- `AuGainCacheVisitorFn`: the thread calling `au_gain_cache_foreach()`, on a copy, without the cache mutex.
+- `AuLoudnessProgressFn`: the thread measuring: the application's in `au_loudness_analyze()` / `_measure()`, or a
+  gain scan worker.
 - Without `on_event`, events wait in the poll queue and the application reads them with `au_poll_event()` /
   `au_wait_event()` on any thread.
 
@@ -108,7 +122,7 @@ flowchart LR
 | Object | File | Guards | Notes |
 |---|---|---|---|
 | event queue `mutex` + `cond` (created once) | `events.c` | the poll ring (64 growing to 4096 entries), `dropped`, `polled` | `events_push()` (control thread; also the application's thread for `au_init()`'s own failure log, `early_log()`), `au_poll_event()` / `au_wait_event()` (any thread). When full, logs go first, then the oldest events; readers get `AU_EVENT_OVERFLOW`. `events_close()` broadcasts so `au_wait_event(-1)` returns at shutdown. Leaf. |
-| cache mutex + `cache_changed` cond (created once) | `gain_cache.c` | the in-memory ReplayGain table, the file state, failure marks | any thread (API), workers (`gain_cache_lookup()`, `gain_cache_wait()`), scan workers. `gain_cache_wait()` waits on the cond in 20 ms steps, re-checking its abort flag. Not held while calling out: `ff_gain_cache_changed()` comes after it is released. |
+| cache mutex + `cache_changed` cond (created once) | `gain_cache.c` | the in-memory ReplayGain table, the file state, failure marks | any thread (API), workers (`gain_cache_lookup()`, `gain_cache_wait()`), scan workers, and the control thread (`CMD_GAIN_CACHE_CHANGED` / `CMD_SET_REPLAYGAIN` → `track_update_gain()` → `gain_cache_lookup()`; the first use loads the file, and may compact it under the file lock, so the control thread can wait for that once). `gain_cache_wait()` waits on the cond in 20 ms steps, re-checking its abort flag. Not held while calling out: `ff_gain_cache_changed()` comes after it is released. |
 | cache file lock (`<cache>.lock`, `LockFileEx` / `flock`) | `gain_cache.c` | appends and compaction **across processes** | taken under the cache mutex, around one append or a compaction. The cache file stays open between appends; before each append (under the file lock) the open file is checked to still be the one at the path (inode, or on Windows volume + file index), and reopened if another process's compaction replaced it. On Windows it is opened with `FILE_SHARE_DELETE` so it can be replaced while open (Windows 10 allows the rename then: checked on the user's laptop, 2026-11-24); should a rename be refused, that compaction fails harmlessly and a later one does it. |
 | scan `lock` + `wake` cond (created once) | `gain_scan.c` | the job list and index, `workers[]` (thread, job, `exited`), `config`, `pending`, `failed[]` | API calls, scan workers. Workers wait on `wake`; `au_gain_scan_stop()` sets `stopping`, broadcasts, joins after releasing it (refused on a scan worker: `on_cached` would join its own thread). `au_set_gain_scan()` never joins. Held while `request()` asks the cache whether a path is stored (`au_gain_cache_get()`) and while dropping jobs, which notes failures in the cache (scan `lock` → cache mutex). |
 | network settings `lock` (created once) | `network.c` | `AuNetworkSettings settings` | any thread; copied out under it (`network_config()`). Leaf. |
@@ -184,12 +198,13 @@ Who may touch what, beyond the locks above.
 
 | Data | Owner |
 |---|---|
-| `AudioPlayer.tracks[]`, `dying[]`, `known_devices`, crossfade settings and curves, `prepare_next_seconds`, `output_channels`/`output_sample_rate`, `tap_enabled`, the note list (`notes`) | control thread only |
+| `AudioPlayer.tracks[]`, `dying[]`, `known_devices`, crossfade settings and curves, `prepare_next_seconds`, `output_channels`/`output_sample_rate`, `tap_enabled`, the device fields (`device_id`, `use_default_device`, `audio_device_index`, `audio_device_name`) | control thread only |
+| the note list (`notes`, a static in `ffaudio.c`, not in `AudioPlayer`) | control thread only |
 | `TrackState.ended`, `prepare_next_sent`, `duration_reported`, `reported_duration`, `buffering_reported` | control thread only |
 | `TrackState` playback cursor: `position`, `last_frame_pts`, `play_speed`, `started`, `announced`, `loops_heard`, `last_frame_serial`, `gain_cur`/`gain_step`/…, `stalled`, `resume_fade`, `play_clock`, `clock_serial` | audio callback only |
 | `Mixer` (everything) | audio callback, and the control thread under the device lock |
 | `TrackState` decode state: `ic` (after open), decoder, `convert`/`speed_chain`/`user` graphs, `trim`, `range_end_hit`, `audio_filter_src`, speed segment fields | worker only. For network tracks `ic` belongs to the reader once it runs. |
-| `TrackState` range fields (`has_range` … `duration_s`) | worker, before `opened`; read-only after |
+| `TrackState` range fields (`has_range` … `duration_s`), `live`, `chained_ogg`, `pts_offset` | worker, before `opened`; read-only after |
 | `TrackState` read state: `demux_eof`, `read_clock`, `last_pkt_ts`, `ts_shift`/`ts_next`, `icy`, `last_icy`, `last_meta`, `read_errors` | whoever reads the file: the worker (local), the reader (network) |
 | `TrackState` creation fields (`filename`, `range_start_s`, `range_len_s`, overrides, `network`, buffer targets) | written by the control thread before the worker starts; read-only after |
 

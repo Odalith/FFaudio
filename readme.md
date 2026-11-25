@@ -44,14 +44,15 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
 - Surround files up to 7.1 play on multichannel outputs with SDL's speaker order, or are mixed down at full level
   (like mpv), normalized (never clips), or with your own filters (e.g. `sofalizer` for headphones); mono and stereo
   files can be spread over every speaker of a surround output
-- Safe to drive from any thread, including from its own event callback: no function ever waits for the player
+- Safe to drive from any thread, including from its own event callback: no function waits for the player's threads
+  (except `au_shutdown()`, which stops them)
 - Linux tested; Windows builds with MSYS2 (see CI); macOS, Android and iOS untested
 - LGPL-2.1
 
 ## Downloads
 [Releases](https://github.com/Odalith/ffAudio/releases) have ready-built archives for Linux x86_64 and Windows
 x86_64 (MinGW/UCRT). Each contains ffaudio, an LGPL build of FFmpeg trimmed for audio playback (every audio decoder,
-demuxer and audio filter; no encoders, video or network code), soxr and bs2b, with headers, pkg-config and CMake
+demuxer and audio filter, and http/https for streams; no encoders or video), soxr and bs2b, with headers, pkg-config and CMake
 files (`find_package(ffaudio)`). The Windows archive also has SDL2; on Linux SDL2 comes from the system. The FFmpeg
 and soxr sources are attached to each release, and `scripts/build-deps.sh` rebuilds them.
 
@@ -545,7 +546,10 @@ au_shutdown();   // not from on_event; au_init() may be called again afterwards
   are queued for `au_poll_event()` / `au_wait_event()` (4096 at most; when the queue is full, log events are dropped
   first and `AU_EVENT_OVERFLOW` says how many).
 - No `au_*` function waits for the control thread, so every one may be called from `on_event` (except
-  `au_shutdown()`); what it changes comes as later events.
+  `au_shutdown()`, which returns `AU_ERR_WRONG_THREAD` there); what it changes comes as later events.
+- Some calls do slow work on the calling thread: they open or read files (`au_probe()`, `au_media_picture()`,
+  `au_cue_read()`, `au_playlist_read()`), or measure them (`au_loudness_*()`, `au_gain_cache_scan()`). Called from
+  `on_event` they hold up the control thread and with it every other event; call them from a thread of your own.
 - `AU_EVENT_TRACK_ENDED` comes exactly once for every handle returned by `au_play()` / `au_queue()`.
 - Custom fade curves (`AuFadeCurveFn`) are sampled on the control thread when the fade is set up, never on the
   audio callback.
@@ -646,6 +650,11 @@ one thread.
 - `test_metadata`: tags, track/disc numbers and ReplayGain/R128 parsing in several formats
 - `test_output`: captures the mixed output and checks gapless joins sample by sample, crossfade lengths,
   fades, volume ramps and live filter changes
+- `test_network`: streams from a local HTTP server: playing, probing and seeking, errors and timeouts, headers,
+  protocol whitelists, live streams, stalls and reconnects, ICY and Ogg titles, playlists over HTTP, measuring
+- `test_playlist`: M3U/M3U8/PLS parsing, paths and URLs resolved against the playlist, HLS, legacy encodings
+- `test_cue`: cue sheets, embedded sheets and chapters
+- `test_races` (chaos builds only): one test per race in docs/threading.md's history, each forcing its delay
 
 `golden_render <fixture-dir> <out.f32> [reference.f32]` (not a CTest) renders a fixed queue of tracks
 without anything depending on timing, so a render from before a change can be compared with one after it.
@@ -660,9 +669,9 @@ without anything depending on timing, so a render from before a change can be co
 - `lock_scan.py` lists nested lock acquisitions.
 
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
-`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player <music-dir | sheet.cue | audio file> [-x seconds] [-f filters] [-s] [-c channels] [-d full|norm|filters] [-r track|album] [-g] [-G cache-file] [-e preset|gains] [-X] [-b default|chu|jan] [-P ParametricEQ.txt] [-L] [-C gentle|night]`
-plays a folder on real hardware for listening tests (Linux and Windows), or the tracks of a cue sheet (or of an audio file with one inside,
-or with chapters). `scripts/make_cue_album.sh <album-dir> <out-dir> [rate]` makes a test album for that from an
+`tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player` plays a folder, a cue sheet (or an audio
+file with one inside, or with chapters) or a URL on real hardware for listening tests (Linux and Windows); started
+without arguments it prints its options. `scripts/make_cue_album.sh <album-dir> <out-dir> [rate]` makes a test album for that from an
 album's tracks: one FLAC image (tracks at another sample rate are resampled) and its `album.cue`; the album's files are
 only read.
 
