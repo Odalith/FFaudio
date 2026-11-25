@@ -104,6 +104,7 @@ extern "C" {
     // cached, otherwise the file is measured (track values only; it blocks for the scan, typically well under a
     // second per song) and the result is stored, which also updates the track if it is already queued or playing.
     // out may be NULL. Returns AU_OK or an error from au_loudness_analyze(); nothing is stored on error.
+    // AU_ERR_NOT_SAVED: measured and cached in memory (out is filled), but the cache file could not be written.
     // Avoid calling it from player callbacks: they run on the player's control thread, which would be held up.
     FFAUDIO_API int au_gain_cache_scan(const char *path, const AuLoudnessOptions *config, AuReplayGain *out);
 
@@ -125,8 +126,9 @@ extern "C" {
         AU_SCAN_URGENT,           // before everything else, newest first (e.g. a track the user picked)
     } AU_SCAN_PRIORITY;
 
-    // A requested file was measured and stored (result AU_OK, rg set), could not be measured (AU_ERR_FILE, ...,
-    // rg NULL) or was cancelled while being measured (AU_ERR_CANCELLED). Runs on a worker thread: keep it short.
+    // A requested file was measured and stored (result AU_OK, rg set; AU_ERR_NOT_SAVED: stored in memory only, the
+    // cache file could not be written), could not be measured (AU_ERR_FILE, ..., rg NULL) or was cancelled while
+    // being measured (AU_ERR_CANCELLED). Runs on a worker thread: keep it short.
     typedef void (*AuGainCachedFn)(const char *path, int result, const AuReplayGain *rg, void *user);
 
     typedef struct AuGainScanSettings {

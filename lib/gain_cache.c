@@ -783,13 +783,13 @@ int au_gain_cache_set(const char *path, const AuReplayGain *rg) {
     SDL_LockMutex(m);
     ensure_loaded();
     int ret = table_set(path, rg);
-    if (ret == AU_OK) ret = append_record(bp.str, bp.len);
+    if (ret == AU_OK && append_record(bp.str, bp.len) != AU_OK) ret = AU_ERR_NOT_SAVED; // kept in memory only
     if (cache_changed) SDL_CondBroadcast(cache_changed);
     SDL_UnlockMutex(m);
     av_bprint_finalize(&bp, NULL);
 
     ff_gain_cache_changed(path);
-    return ret; // AU_ERR_FILE: kept in memory, but could not be written to the file
+    return ret;
 }
 
 unsigned gain_cache_failure_mark(void) {
@@ -849,11 +849,11 @@ bool au_gain_cache_get(const char *path, AuReplayGain *out) {
     return gain_cache_lookup(path, out);
 }
 
-bool au_gain_cache_remove(const char *path) {
+int au_gain_cache_remove(const char *path) {
     CHAOS("au_gain_cache_remove");
-    if (!path || !path[0]) return false;
+    if (!path || !path[0]) return AU_ERR_INVALID_ARGUMENT;
     SDL_mutex *m = cache_mutex();
-    if (!m) return false;
+    if (!m) return AU_ERR_SDL;
 
     AVBPrint bp;
     av_bprint_init(&bp, 0, AV_BPRINT_SIZE_UNLIMITED);
@@ -864,28 +864,34 @@ bool au_gain_cache_remove(const char *path) {
     SDL_LockMutex(m);
     ensure_loaded();
     const bool removed = table_remove(path);
-    if (removed && av_bprint_is_complete(&bp)) append_record(bp.str, bp.len);
+    int ret = removed ? AU_OK : AU_ERR_NOTHING_TO_DO;
+    if (removed && (!av_bprint_is_complete(&bp) || append_record(bp.str, bp.len) != AU_OK)) ret = AU_ERR_NOT_SAVED;
     SDL_UnlockMutex(m);
     av_bprint_finalize(&bp, NULL);
 
     if (removed) ff_gain_cache_changed(path);
-    return removed;
+    return ret;
 }
 
-void au_gain_cache_clear(void) {
+int au_gain_cache_clear(void) {
     CHAOS("au_gain_cache_clear");
     SDL_mutex *m = cache_mutex();
-    if (!m) return;
+    if (!m) return AU_ERR_SDL;
     SDL_LockMutex(m);
     ensure_loaded();
     table_clear();
-    if (persistent() && !foreign) { // an empty file
-        const bool locked = take_file_lock();
-        write_file();
-        release_file_lock(locked);
+    int ret = AU_OK;
+    if (persistent()) { // an empty file
+        if (foreign) ret = AU_ERR_NOT_SAVED; // not ours to write
+        else {
+            const bool locked = take_file_lock();
+            if (write_file() != AU_OK) ret = AU_ERR_NOT_SAVED;
+            release_file_lock(locked);
+        }
     }
     SDL_UnlockMutex(m);
     ff_gain_cache_changed(NULL);
+    return ret;
 }
 
 int au_gain_cache_count(void) {
@@ -946,5 +952,5 @@ int au_gain_cache_scan(const char *path, const AuLoudnessOptions *config, AuRepl
     rg = au_loudness_to_replaygain(&l, NULL);
     const int set = au_gain_cache_set(path, &rg);
     if (out) *out = rg;
-    return set; // AU_ERR_FILE: measured and cached in memory, but not written
+    return set; // AU_ERR_NOT_SAVED: measured and cached in memory, but not written
 }

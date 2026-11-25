@@ -368,8 +368,8 @@ static void measure_job(const int index, const Job *job, const AuGainScanSetting
             if (ret == AU_OK) {
                 au_loudness_result(file, &l);
                 const AuReplayGain rg = au_loudness_to_replaygain(&l, NULL);
-                au_gain_cache_set(path, &rg);
-                notify(cfg, path, AU_OK, &rg);
+                const int set = au_gain_cache_set(path, &rg);   // AU_ERR_NOT_SAVED: in memory only
+                notify(cfg, path, set, set == AU_OK || set == AU_ERR_NOT_SAVED ? &rg : NULL);
             }
             else {
                 note_result(path, ret);
@@ -408,8 +408,8 @@ static void measure_job(const int index, const Job *job, const AuGainScanSetting
             continue;
         }
         const AuReplayGain rg = au_loudness_to_replaygain(&tracks[i], have_album ? &album_values : NULL);
-        au_gain_cache_set(job->paths[i], &rg);
-        notify(cfg, job->paths[i], AU_OK, &rg);
+        const int set = au_gain_cache_set(job->paths[i], &rg);
+        notify(cfg, job->paths[i], set, set == AU_OK || set == AU_ERR_NOT_SAVED ? &rg : NULL);
     }
 end:
     av_free(tracks);

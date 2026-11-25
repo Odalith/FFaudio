@@ -62,6 +62,7 @@ extern "C" {
         // not available in this build (e.g. an FFmpeg filter that was not compiled in), or no audio that can be played
         // in the file (not a media file, no audio stream, a codec this FFmpeg does not have)
         AU_ERR_UNSUPPORTED = -11,
+        AU_ERR_NOT_SAVED = -12,        // done in memory, but the ReplayGain cache file could not be written. Since 4.0.
     } AU_RESULT;
 
     typedef enum AU_LOG_LEVEL {
@@ -516,17 +517,19 @@ extern "C" {
     FFAUDIO_API int au_gain_cache_reload(void);
 
     // Store (or replace) the values for a path. Returns AU_ERR_INVALID_ARGUMENT for a NULL/empty path or rg, and
-    // AU_ERR_FILE when the entry is in memory but could not be written to the cache file.
+    // AU_ERR_NOT_SAVED when the entry is in memory but could not be written to the cache file (AU_ERR_FILE before 4.0).
     FFAUDIO_API int au_gain_cache_set(const char *path, const AuReplayGain *rg);
 
     // true and *out filled (out may be NULL) when the path is cached
     FFAUDIO_API bool au_gain_cache_get(const char *path, AuReplayGain *out);
 
-    // true when an entry was removed
-    FFAUDIO_API bool au_gain_cache_remove(const char *path);
+    // AU_OK when an entry was removed, AU_ERR_NOTHING_TO_DO when there was none, AU_ERR_INVALID_ARGUMENT for a
+    // NULL/empty path, AU_ERR_NOT_SAVED when it is gone from memory but the cache file could not be written.
+    // (A bool before 4.0.)
+    FFAUDIO_API int au_gain_cache_remove(const char *path);
 
-    // Remove every entry, also from the cache file
-    FFAUDIO_API void au_gain_cache_clear(void);
+    // Remove every entry, also from the cache file: AU_OK, or AU_ERR_NOT_SAVED when the file could not be written
+    FFAUDIO_API int au_gain_cache_clear(void);
 
     FFAUDIO_API int au_gain_cache_count(void);
 
