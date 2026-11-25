@@ -88,7 +88,7 @@ jobs:
         run: |
           export PKG_CONFIG_PATH="$PWD/deps/prefix/lib/pkgconfig"
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFFAUDIO_SANITIZER=none \
-            -DFFAUDIO_RELOCATABLE=ON -DFFAUDIO_BUILD_MANUAL_PLAYER=OFF -DCMAKE_INSTALL_PREFIX="$PWD/stage"
+            -DFFAUDIO_RELOCATABLE=ON -DFFAUDIO_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$PWD/stage"
           cmake --build build
 
       - name: Test with the bundled FFmpeg

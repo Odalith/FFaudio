@@ -21,9 +21,7 @@
 #ifndef FFAUDIO_H
 #define FFAUDIO_H
 
-#if defined(FFAUDIO_STATIC)
-    #define FFAUDIO_API
-#elif defined(_WIN32)
+#if defined(_WIN32)
     #if defined(FFAUDIO_BUILDING)
         #define FFAUDIO_API __declspec(dllexport)
     #else

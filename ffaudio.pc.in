@@ -6,7 +6,5 @@ Name: ffaudio
 Description: Gapless and crossfading music playback library built on FFmpeg and SDL2
 URL: https://github.com/Odalith/ffAudio
 Version: @PROJECT_VERSION@
-@FFAUDIO_PC_REQUIRES_PRIVATE@
 Libs: -L${libdir} -lffaudio
-Libs.private: -lm
-Cflags: -I${includedir}/ffaudio @FFAUDIO_PC_CFLAGS@
+Cflags: -I${includedir}/ffaudio

@@ -6,10 +6,16 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 include(GNUInstallDirs)
 
-option(BUILD_SHARED_LIBS "Build ffaudio as a shared library" ON)
-option(FFAUDIO_BUILD_TESTS "Build the headless test suite" ON)
-option(FFAUDIO_BUILD_MANUAL_PLAYER "Build the interactive manual test player (and, on POSIX, the soak test)" ON)
-option(FFAUDIO_INSTALL "Generate install rules" ON)
+# Tests, tools and install rules default to on only when ffaudio is the project being built, not when another project
+# includes it with add_subdirectory() or FetchContent
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(FFAUDIO_TOP_LEVEL ON)
+else()
+    set(FFAUDIO_TOP_LEVEL OFF)
+endif()
+option(FFAUDIO_BUILD_TESTS "Build the headless test suite" ${FFAUDIO_TOP_LEVEL})
+option(FFAUDIO_BUILD_TOOLS "Build the manual player, loudness_scan and (on POSIX) the soak test" ${FFAUDIO_TOP_LEVEL})
+option(FFAUDIO_INSTALL "Generate install rules" ${FFAUDIO_TOP_LEVEL})
 option(FFAUDIO_CHAOS "Testing only: random delays at the points where threads hand state over (lib/chaos.h), to find races" OFF)
 option(FFAUDIO_RELOCATABLE "Linux/macOS: look for dependencies next to libffaudio first (RUNPATH $ORIGIN), for archives that bundle them" OFF)
 set(FFAUDIO_SANITIZER "" CACHE STRING "Sanitizer to build with: address, thread, undefined, none or empty")
@@ -38,7 +44,7 @@ endif()
 #| Dependencies                                        |
 #+-----------------------------------------------------+
 
-find_package(SDL2 REQUIRED)
+find_package(SDL2 2.24 REQUIRED)   # SDL_GetDefaultAudioInfo()
 if(TARGET SDL2::SDL2)
     set(FFAUDIO_SDL2 SDL2::SDL2)
 else()
@@ -65,7 +71,9 @@ set(FFAUDIO_PUBLIC_HEADERS
         lib/ffaudio_playlist.h
         lib/ffaudio_meters.h)
 
-add_library(ffaudio
+# Shared only (static builds were dropped in 4.0): one copy of the player's process-wide state, and FFmpeg and SDL
+# come along as the library's own dependencies
+add_library(ffaudio SHARED
         ${FFAUDIO_PUBLIC_HEADERS}
         lib/ffaudio.c
         lib/play_options.c
@@ -104,6 +112,8 @@ add_library(ffaudio
         lib/decoder_utils.c
         lib/decoder_utils.h
         lib/globals.h)
+# The same name as find_package(ffaudio) gives, for projects that build ffaudio along with themselves
+add_library(ffaudio::ffaudio ALIAS ffaudio)
 
 target_include_directories(ffaudio PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/lib>
@@ -123,9 +133,6 @@ target_compile_definitions(ffaudio PRIVATE FFAUDIO_BUILDING)
 if(FFAUDIO_CHAOS)
     target_sources(ffaudio PRIVATE lib/chaos.c)
     target_compile_definitions(ffaudio PRIVATE FFAUDIO_CHAOS)
-endif()
-if(NOT BUILD_SHARED_LIBS)
-    target_compile_definitions(ffaudio PUBLIC FFAUDIO_STATIC)
 endif()
 target_compile_options(ffaudio PRIVATE ${FFAUDIO_WARNINGS} ${SAN_FLAGS})
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
@@ -149,31 +156,11 @@ set_target_properties(ffaudio PROPERTIES
         SOVERSION ${PROJECT_VERSION_MAJOR}
         PUBLIC_HEADER "${FFAUDIO_PUBLIC_HEADERS}")
 
-# 3.0.0 was released with the soname libffaudio.so.3.0: a link by that name lets programs built against it run on
-# any 3.x without relinking. Remove in 4.0.
-set(FFAUDIO_COMPAT_SONAME_LINK OFF)
-if(BUILD_SHARED_LIBS AND UNIX AND NOT APPLE AND PROJECT_VERSION_MAJOR EQUAL 3)
-    set(FFAUDIO_COMPAT_SONAME_LINK ON)
-    add_custom_command(TARGET ffaudio POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E rm -f $<TARGET_FILE_DIR:ffaudio>/libffaudio.so.3.0
-            COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_SONAME_FILE_NAME:ffaudio>
-                    $<TARGET_FILE_DIR:ffaudio>/libffaudio.so.3.0
-            VERBATIM)
-endif()
-
 #+-----------------------------------------------------+
 #| Install                                             |
 #+-----------------------------------------------------+
 
 if(FFAUDIO_INSTALL)
-    # A shared libffaudio brings its dependencies along; only static linking needs them listed
-    if(BUILD_SHARED_LIBS)
-        set(FFAUDIO_PC_CFLAGS "")
-        set(FFAUDIO_PC_REQUIRES_PRIVATE "")
-    else()
-        set(FFAUDIO_PC_CFLAGS "-DFFAUDIO_STATIC")
-        set(FFAUDIO_PC_REQUIRES_PRIVATE "Requires.private: sdl2 libavformat libavcodec libavfilter libswresample libavutil")
-    endif()
     configure_file(ffaudio.pc.in ${CMAKE_CURRENT_BINARY_DIR}/ffaudio.pc @ONLY)
 
     install(TARGETS ffaudio
@@ -183,9 +170,6 @@ if(FFAUDIO_INSTALL)
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
             PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ffaudio)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ffaudio.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
-    if(FFAUDIO_COMPAT_SONAME_LINK)
-        install(FILES $<TARGET_FILE_DIR:ffaudio>/libffaudio.so.3.0 DESTINATION ${CMAKE_INSTALL_LIBDIR})
-    endif()
     install(EXPORT ffaudioTargets NAMESPACE ffaudio:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ffaudio)
 
     # find_package(ffaudio) -> ffaudio::ffaudio
@@ -216,15 +200,15 @@ function(ffaudio_test_exe name src)
     set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 endfunction()
 
-if(FFAUDIO_BUILD_MANUAL_PLAYER)
+if(FFAUDIO_BUILD_TOOLS)
     ffaudio_test_exe(manual_player tests/manual_player.c)
 endif()
-if(FFAUDIO_BUILD_MANUAL_PLAYER AND NOT WIN32)
+if(FFAUDIO_BUILD_TOOLS AND NOT WIN32)
     # Long-running soak test with memory sampling (Linux /proc); not part of CTest
     ffaudio_test_exe(soak tests/soak.c)
     target_link_libraries(soak PRIVATE Threads::Threads)
 endif()
-if(FFAUDIO_BUILD_MANUAL_PLAYER)
+if(FFAUDIO_BUILD_TOOLS)
     ffaudio_test_exe(loudness_scan tests/loudness_scan.c)
 endif()
 
@@ -252,7 +236,12 @@ if(FFAUDIO_BUILD_TESTS)
                 COMMAND ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/make_fixtures.sh ${FIXTURE_DIR}
                 DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/make_fixtures.sh
                 COMMENT "Generating audio fixtures")
-        add_custom_target(ffaudio_fixtures ALL DEPENDS ${FIXTURE_DIR}/.stamp)
+        # Made by a test that every playback test requires (a CTest fixture), not by the build: an FFmpeg without an
+        # encoder the fixtures need fails the tests, not the build. Building the target again is a no-op.
+        add_custom_target(ffaudio_fixtures DEPENDS ${FIXTURE_DIR}/.stamp)
+        add_test(NAME ffaudio_fixtures
+                 COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target ffaudio_fixtures --config $<CONFIG>)
+        set_tests_properties(ffaudio_fixtures PROPERTIES FIXTURES_SETUP fixtures TIMEOUT 600)
 
         # The ReplayGain cache's default location, inside the build tree: XDG_DATA_HOME on Linux, LOCALAPPDATA on
         # Windows (the tests never touch the user's real one)
@@ -262,7 +251,6 @@ if(FFAUDIO_BUILD_TESTS)
         endif()
         foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network test_playlist test_cue)
             ffaudio_test_exe(${t} tests/${t}.c)
-            add_dependencies(${t} ffaudio_fixtures)
             add_test(NAME ${t} COMMAND ${t} ${FIXTURE_DIR})
             if(t STREQUAL "test_network" AND WIN32)
                 target_link_libraries(${t} PRIVATE ws2_32)   # the test's HTTP server
@@ -277,6 +265,7 @@ if(FFAUDIO_BUILD_TESTS)
                 math(EXPR timeout "${FFAUDIO_TEST_TIMEOUT} * 2")
             endif()
             set_tests_properties(${t} PROPERTIES
+                    FIXTURES_REQUIRED fixtures
                     TIMEOUT ${timeout}
                     ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
@@ -284,7 +273,6 @@ if(FFAUDIO_BUILD_TESTS)
         if(FFAUDIO_CHAOS)
             # Races of docs/threading.md pinned down: a delay forced at the chaos point that opens each one's window
             ffaudio_test_exe(test_races tests/test_races.c)
-            add_dependencies(test_races ffaudio_fixtures)
             set(FFAUDIO_RACES
                     "registration@registration@create_track: worker started=100000"
                     "failed_track_mixer_first@failed_track@eos stored, failure not posted=200000"
@@ -298,6 +286,7 @@ if(FFAUDIO_BUILD_TESTS)
                 list(GET parts 2 point)
                 add_test(NAME race_${name} COMMAND test_races ${FIXTURE_DIR} ${case})
                 set_tests_properties(race_${name} PROPERTIES
+                        FIXTURES_REQUIRED fixtures
                         TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
                         ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};FFAUDIO_CHAOS_AT=${point};TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
             endforeach()

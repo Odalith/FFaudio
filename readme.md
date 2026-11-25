@@ -55,21 +55,24 @@ files (`find_package(ffaudio)`). The Windows archive also has SDL2; on Linux SDL
 and soxr sources are attached to each release, and `scripts/build-deps.sh` rebuilds them.
 
 ## Building
-Requires CMake ≥ 3.20, a C99 compiler, SDL2 ≥ 2.24 and FFmpeg ≥ 6.0 (libavcodec, libavformat, libavfilter,
-libswresample, libavutil) with pkg-config.
+Requires CMake ≥ 3.20, GCC or Clang (MinGW on Windows), SDL2 ≥ 2.24 and FFmpeg ≥ 6.0 (libavcodec, libavformat,
+libavfilter, libswresample, libavutil) with pkg-config. ffaudio is a shared library only. Applications may use any
+compiler, MSVC included: the headers are plain C, also valid C++.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build --output-on-failure   # needs the ffmpeg CLI to generate test files
+ctest --test-dir build --output-on-failure   # makes the test files first (needs the ffmpeg CLI and bash)
 cmake --install build                        # installs headers, the library, ffaudio.pc and CMake targets
 ```
 
-Options: `-DBUILD_SHARED_LIBS=OFF` for a static library, `-DFFAUDIO_SANITIZER=address|thread|undefined`,
-`-DFFAUDIO_BUILD_TESTS=OFF`, `-DFFAUDIO_BUILD_MANUAL_PLAYER=OFF`, `-DFFAUDIO_RELOCATABLE=ON` (Linux/macOS: find bundled
-libraries next to libffaudio, for archives like the release ones).
+Options: `-DFFAUDIO_SANITIZER=address|thread|undefined`, `-DFFAUDIO_BUILD_TESTS=OFF`, `-DFFAUDIO_BUILD_TOOLS=OFF`
+(manual player, loudness_scan, soak), `-DFFAUDIO_INSTALL=OFF`, `-DFFAUDIO_RELOCATABLE=ON` (Linux/macOS: find bundled
+libraries next to libffaudio, for archives like the release ones). Tests, tools and install rules are on by default
+only when ffaudio is the top-level project.
 
-Consumers: `pkg-config --cflags --libs ffaudio`, or `find_package` the installed `ffaudio::ffaudio` target.
+Consumers: `pkg-config --cflags --libs ffaudio`, or `find_package(ffaudio)` and link `ffaudio::ffaudio`; a project
+that builds ffaudio with `add_subdirectory()` links the same `ffaudio::ffaudio`.
 
 ## Usage
 
