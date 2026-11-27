@@ -542,7 +542,15 @@ au_set_upmix(AU_UPMIX_NONE, NULL);              // back to the default
 au_shutdown();   // not from on_event; au_init() may be called again afterwards
 ```
 
-## Python bindings and a player
+## Bindings and a player
+`bindings/csharp` has .NET bindings for every public header (`net8.0` and newer; [its README](bindings/csharp/README.md)),
+the successor of the separate FFAudioSharp project:
+```csharp
+FFAudio.Init("My Player");
+FFAudio.Play("/music/song.flac");
+await foreach (var e in FFAudio.ReadEventsAsync(token))
+    if (e is TrackEndedEvent { Error: not ResultCode.Ok } failed) Console.WriteLine("could not play: " + failed.Message);
+```
 `bindings/python` has bindings for every public header (ctypes, nothing to compile; [its README](bindings/python/README.md)):
 ```python
 import ffaudio
@@ -742,6 +750,7 @@ only read.
 - [ ] SDL3 port, or native audio backends instead of SDL
 - [x] Release binaries for Linux and Windows
 - [ ] Test macOS, Android and iOS
-- [ ] Update the C# bindings (FFAudioSharp) to this API
+- [x] C# bindings for this API (`bindings/csharp`, replacing the separate FFAudioSharp project)
+- [ ] A NuGet package that bundles the native libraries
 
 Note: this project is not affiliated with FFmpeg, FFplay, or their authors.

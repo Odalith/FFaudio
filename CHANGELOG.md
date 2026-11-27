@@ -1,5 +1,20 @@
 # Changelog
 
+## 4.1.0 (unreleased)
+
+### Added
+- .NET bindings (`bindings/csharp`, `net8.0` and newer, AOT and trimming safe): every public header as a friendly C# API
+  (`FFAudio`, `PlayOptions`, event records, `FilterBuilder`, `Loudness`, `GainCache`, `GainScan`, `CueSheet`,
+  `PlaylistFile`, `Spectrum`), with examples. They replace the separate FFAudioSharp project, which only knew
+  ffaudio 2.x; [its README](bindings/csharp/README.md) has a table from the 1.x names. The bindings find the library
+  through `FFAUDIO_LIBRARY`, `runtimes/<rid>/native/` or the system, and refuse one of another major version.
+  A NuGet package that bundles the native libraries is not set up yet.
+
+### Development
+- `csharp_bindings` (CTest, and CI on Linux and Windows): the .NET tests compare every struct's layout with the C
+  compiler's (the program the Python layout test uses), check every function in `abi/ffaudio.symbols` is declared, and
+  play real files with SDL's dummy driver. CI fails when the test is not registered because no .NET SDK was found.
+
 ## 4.0.0 (2026-11-25)
 
 A major release that settles the API: [docs/migrating-3-to-4.md](docs/migrating-3-to-4.md) lists every change with

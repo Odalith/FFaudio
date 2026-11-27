@@ -270,14 +270,42 @@ if(FFAUDIO_BUILD_TESTS)
                     ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
 
-        # The Python bindings (bindings/python) and the player (player/), with the library just built. Not with a
-        # sanitizer: an instrumented library can not be loaded into a Python that is not.
+        # The bindings (Python: bindings/python and the player in player/; C#: bindings/csharp), with the library just
+        # built. Not with a sanitizer: an instrumented library can not be loaded into a runtime that is not.
         find_package(Python3 COMPONENTS Interpreter)
-        if(Python3_FOUND AND (FFAUDIO_SANITIZER STREQUAL "" OR FFAUDIO_SANITIZER STREQUAL "none"))
-            # Prints every struct's layout as the C compiler sees it, for the bindings' layout test
+        find_program(FFAUDIO_DOTNET dotnet)
+        set(FFAUDIO_DOTNET_TFM "")
+        if(FFAUDIO_DOTNET)
+            # Needs an SDK (bindings/csharp/global.json: 8.0.100 or newer) and a runtime of a framework the tests target
+            execute_process(COMMAND ${FFAUDIO_DOTNET} --version WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/csharp
+                            RESULT_VARIABLE FFAUDIO_DOTNET_NO_SDK OUTPUT_QUIET ERROR_QUIET)
+            execute_process(COMMAND ${FFAUDIO_DOTNET} --list-runtimes OUTPUT_VARIABLE FFAUDIO_DOTNET_RUNTIMES ERROR_QUIET)
+            if(NOT FFAUDIO_DOTNET_NO_SDK EQUAL 0)
+                message(STATUS "ffaudio: no usable .NET SDK (8.0.100 or newer), the C# bindings' tests are left out")
+            elseif(FFAUDIO_DOTNET_RUNTIMES MATCHES "Microsoft.NETCore.App 8\\.")
+                set(FFAUDIO_DOTNET_TFM net8.0)
+            elseif(FFAUDIO_DOTNET_RUNTIMES MATCHES "Microsoft.NETCore.App 10\\.")
+                set(FFAUDIO_DOTNET_TFM net10.0)
+            else()
+                message(STATUS "ffaudio: no .NET 8 or 10 runtime, the C# bindings' tests are left out")
+            endif()
+        endif()
+        if((Python3_FOUND OR FFAUDIO_DOTNET_TFM) AND (FFAUDIO_SANITIZER STREQUAL "" OR FFAUDIO_SANITIZER STREQUAL "none"))
+            # Prints every struct's layout as the C compiler sees it, for the bindings' layout tests
             add_executable(ffaudio_layout bindings/python/tests/layout.c)
             target_include_directories(ffaudio_layout PRIVATE lib)
-            set(FFAUDIO_PYTHON_ENV "FFAUDIO_LIBRARY=$<TARGET_FILE:ffaudio>;FFAUDIO_FIXTURES=${FIXTURE_DIR};SDL_AUDIODRIVER=dummy;PYTHONDONTWRITEBYTECODE=1;${FFAUDIO_TEST_DATA_ENV}")
+            set(FFAUDIO_BINDINGS_ENV "FFAUDIO_LIBRARY=$<TARGET_FILE:ffaudio>;FFAUDIO_FIXTURES=${FIXTURE_DIR};SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV}")
+            if(FFAUDIO_DOTNET_TFM)
+                # The tests build into the build tree (--artifacts-path); the first run restores xunit from nuget.org
+                add_test(NAME csharp_bindings
+                         COMMAND ${FFAUDIO_DOTNET} test ${CMAKE_CURRENT_SOURCE_DIR}/bindings/csharp/tests/FFAudioSharp.Tests/FFAudioSharp.Tests.csproj
+                                 -c Release -f ${FFAUDIO_DOTNET_TFM} --artifacts-path ${CMAKE_BINARY_DIR}/csharp)
+                set_tests_properties(csharp_bindings PROPERTIES FIXTURES_REQUIRED fixtures TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
+                        ENVIRONMENT "${FFAUDIO_BINDINGS_ENV};FFAUDIO_LAYOUT=$<TARGET_FILE:ffaudio_layout>;FFAUDIO_SYMBOLS=${CMAKE_CURRENT_SOURCE_DIR}/abi/ffaudio.symbols;DOTNET_NOLOGO=1;DOTNET_CLI_TELEMETRY_OPTOUT=1")
+            endif()
+        endif()
+        if(Python3_FOUND AND (FFAUDIO_SANITIZER STREQUAL "" OR FFAUDIO_SANITIZER STREQUAL "none"))
+            set(FFAUDIO_PYTHON_ENV "${FFAUDIO_BINDINGS_ENV};PYTHONDONTWRITEBYTECODE=1")
             add_test(NAME python_bindings
                      COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/tests)
             set_tests_properties(python_bindings PROPERTIES FIXTURES_REQUIRED fixtures TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
