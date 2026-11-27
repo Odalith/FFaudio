@@ -48,9 +48,10 @@ void Add(string path)
             foreach (var t in CueSheet.Read(path).Tracks)
                 queue.Enqueue((t.Path, t.ToPlayOptions(), $"{t.Number:00} {t.Performer} - {t.Title}"));
         }
-        catch (FFAudioException e) when (e.Code == ResultCode.NothingToDo && ext != ".cue")
+        catch (FFAudioException) when (ext != ".cue")
         {
-            queue.Enqueue((path, null, path));   // a plain audio file
+            // A plain audio file (NothingToDo), or one that can not be read: the player reports why when it gets to it
+            queue.Enqueue((path, null, path));
         }
     }
     else
@@ -105,12 +106,12 @@ await foreach (var e in FFAudio.ReadEventsAsync(cancel.Token))
         case PrepareNextEvent:
             Start(first: false);   // gapless, or crossfaded, into the next one
             break;
-        case TrackEndedEvent { Reason: EndReason.Error } failed:
-            Console.WriteLine($"\n! {names.GetValueOrDefault(failed.Handle, "?")}: {failed.Message}");
-            break;
         case TrackEndedEvent ended:
+            if (ended.Reason == EndReason.Error)
+                Console.WriteLine($"\n! {names.GetValueOrDefault(ended.Handle, "?")}: {ended.Message}");
             names.Remove(ended.Handle);
-            if (ended.Reason == EndReason.Finished && queue.Count == 0 && FFAudio.GetStatus().Handle == 0) cancel.Cancel();
+            // Done when nothing is left to play: none of our tracks is playing or queued (a failed last track too)
+            if (queue.Count == 0 && names.Count == 0) cancel.Cancel();
             break;
     }
     remaining = queue.Count;

@@ -66,9 +66,14 @@ internal static unsafe partial class Lib
     private static IntPtr Open(string candidate, Assembly assembly, DllImportSearchPath? searchPath, StringBuilder tried)
     {
         var isPath = Path.IsPathRooted(candidate);
+        // Windows looks for a DLL's own dependencies (FFmpeg, SDL2) next to it only when its path uses backslashes;
+        // paths from CMake or a script often have forward slashes
+        if (isPath) candidate = Path.GetFullPath(candidate);
         if (isPath && !File.Exists(candidate))
         {
-            if (candidate == Environment.GetEnvironmentVariable("FFAUDIO_LIBRARY")) tried.Append($"\n  {candidate}: no such file (FFAUDIO_LIBRARY)");
+            var env = Environment.GetEnvironmentVariable("FFAUDIO_LIBRARY");
+            if (!string.IsNullOrEmpty(env) && Path.IsPathRooted(env) && Path.GetFullPath(env) == candidate)
+                tried.Append($"\n  {candidate}: no such file (FFAUDIO_LIBRARY)");
             return IntPtr.Zero;
         }
         IntPtr h;

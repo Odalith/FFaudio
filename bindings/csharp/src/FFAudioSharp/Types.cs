@@ -103,7 +103,8 @@ public sealed class Crossfade
 /// <summary>Applying ReplayGain / R128 tags: <see cref="FFAudio.SetReplayGain"/>.</summary>
 public sealed class ReplayGainSettings
 {
-    public ReplayGainMode Mode { get; set; } = ReplayGainMode.Track;
+    /// <summary>Off by default, as in C and the Python binding: set Track or Album.</summary>
+    public ReplayGainMode Mode { get; set; } = ReplayGainMode.Off;
     /// <summary>Added to tagged gains, -15..+15 dB.</summary>
     public double PreampDb { get; set; }
     /// <summary>Used for files without values, -30..+15 dB.</summary>

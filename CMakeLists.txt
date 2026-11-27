@@ -309,6 +309,15 @@ if(FFAUDIO_BUILD_TESTS)
         endif()
         if(Python3_FOUND AND (FFAUDIO_SANITIZER STREQUAL "" OR FFAUDIO_SANITIZER STREQUAL "none"))
             set(FFAUDIO_PYTHON_ENV "${FFAUDIO_BINDINGS_ENV};PYTHONDONTWRITEBYTECODE=1")
+            if(APPLE)
+                # HOME is redirected for the tests (the ReplayGain cache above), and Python finds `pip install --user`
+                # packages (Textual) through HOME: give it the real user base
+                execute_process(COMMAND ${Python3_EXECUTABLE} -m site --user-base OUTPUT_VARIABLE FFAUDIO_PY_USER_BASE
+                                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+                if(FFAUDIO_PY_USER_BASE)
+                    string(APPEND FFAUDIO_PYTHON_ENV ";PYTHONUSERBASE=${FFAUDIO_PY_USER_BASE}")
+                endif()
+            endif()
             add_test(NAME python_bindings
                      COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/tests)
             set_tests_properties(python_bindings PROPERTIES FIXTURES_REQUIRED fixtures TIMEOUT ${FFAUDIO_TEST_TIMEOUT}

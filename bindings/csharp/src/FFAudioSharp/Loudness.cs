@@ -241,30 +241,34 @@ public static unsafe class GainScan
     /// <summary>Sets how the queue works; null restores the defaults. Can be called at any time.</summary>
     public static void Configure(GainScanSettings? settings)
     {
-        GCHandle handle = default;
-        int result;
-        if (settings == null)
-        {
-            result = Lib.au_set_gain_scan(null);
-        }
-        else
-        {
-            var n = new AuGainScanSettings { threads = settings.Threads, skip_true_peak = B(settings.SkipTruePeak), measure_streams = B(settings.MeasureStreams) };
-            if (settings.OnCached != null)
-            {
-                handle = GCHandle.Alloc(settings.OnCached);
-                n.on_cached = (delegate* unmanaged[Cdecl]<byte*, int, AuReplayGain*, void*, void>)&Cached;
-                n.user = (void*)GCHandle.ToIntPtr(handle);
-            }
-            result = Lib.au_set_gain_scan(&n);
-        }
-        if (result < 0)
-        {
-            if (handle.IsAllocated) handle.Free();
-            throw new FFAudioException((ResultCode)result, "gain scan settings");
-        }
+        // The native call and the handle swap under one lock: two calls at once must leave _onCached being the handle
+        // the library holds, or Stop() would free a handle that is still in use. au_set_gain_scan() never waits, so
+        // the lock is short (and a worker's OnCached calling Configure can not deadlock with Stop(), which waits for
+        // the workers outside the lock).
         lock (Retired)
         {
+            GCHandle handle = default;
+            int result;
+            if (settings == null)
+            {
+                result = Lib.au_set_gain_scan(null);
+            }
+            else
+            {
+                var n = new AuGainScanSettings { threads = settings.Threads, skip_true_peak = B(settings.SkipTruePeak), measure_streams = B(settings.MeasureStreams) };
+                if (settings.OnCached != null)
+                {
+                    handle = GCHandle.Alloc(settings.OnCached);
+                    n.on_cached = (delegate* unmanaged[Cdecl]<byte*, int, AuReplayGain*, void*, void>)&Cached;
+                    n.user = (void*)GCHandle.ToIntPtr(handle);
+                }
+                result = Lib.au_set_gain_scan(&n);
+            }
+            if (result < 0)
+            {
+                if (handle.IsAllocated) handle.Free();
+                throw new FFAudioException((ResultCode)result, "gain scan settings");
+            }
             if (_onCached.IsAllocated) Retired.Add(_onCached);
             _onCached = handle;
         }
