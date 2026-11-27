@@ -42,7 +42,11 @@ typedef SOCKET ts_socket;
 typedef int ts_socket;
 #define TS_BAD_SOCKET (-1)
 #define ts_closesocket close
+#ifdef __APPLE__
+#define TS_SEND_FLAGS 0              // no MSG_NOSIGNAL here: SO_NOSIGPIPE is set on every connection instead
+#else
 #define TS_SEND_FLAGS MSG_NOSIGNAL   // a client that hangs up must not kill the test with SIGPIPE
+#endif
 #endif
 
 typedef struct TsServer {
@@ -367,6 +371,9 @@ static int ts_accept_loop(void *arg) {
     while (!SDL_AtomicGet(&s->stop)) {
         if (!ts_wait_readable(s, s->listener, 100)) continue;
         const ts_socket c = accept(s->listener, NULL, NULL);
+#ifdef SO_NOSIGPIPE
+        if (c != TS_BAD_SOCKET) { const int one = 1; setsockopt(c, SOL_SOCKET, SO_NOSIGPIPE, (const void *)&one, sizeof(one)); }
+#endif
         if (c == TS_BAD_SOCKET) continue;
         TsConn *conn = malloc(sizeof(TsConn));
         if (!conn) { ts_closesocket(c); continue; }

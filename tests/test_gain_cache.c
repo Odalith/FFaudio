@@ -516,6 +516,9 @@ static void test_memory_only_and_default_location(void) {
 #ifdef _WIN32
     const char *suffix = "ffaudio\\replaygain.cache";
     const char *base = getenv("LOCALAPPDATA"), *test_dir = "localappdata";
+#elif defined(__APPLE__)
+    const char *suffix = "ffaudio/replaygain.cache";
+    const char *base = getenv("HOME"), *test_dir = "/home";   // ~/Library/Application Support/ffaudio, with HOME redirected
 #else
     const char *suffix = "ffaudio/replaygain.cache";
     const char *base = getenv("XDG_DATA_HOME"), *test_dir = "xdg-data";

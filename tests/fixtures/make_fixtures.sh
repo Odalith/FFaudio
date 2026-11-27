@@ -162,7 +162,7 @@ ff -f lavfi -i "testsrc=duration=1:size=64x64:rate=5" -an video_only.mkv
 ff -f lavfi -i "testsrc=duration=1:size=160x120:rate=10" -c:v mjpeg -f mjpeg not_audio.bin
 size=$(wc -c < not_audio.bin)
 for off in $(seq 60 97 "$size"); do
-    printf '\x13\x37\xc0\xde\x00\x00\x01\xb3' | dd of=not_audio.bin bs=1 seek="$off" conv=notrunc status=none
+    printf '\x13\x37\xc0\xde\x00\x00\x01\xb3' | dd of=not_audio.bin bs=1 seek="$off" conv=notrunc 2>/dev/null
 done
 
 touch .stamp
