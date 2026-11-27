@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>FFAudioSharp</AssemblyName>
+    <RootNamespace>FFAudioSharp</RootNamespace>
+    <IsAotCompatible>true</IsAotCompatible>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <!-- 1591/1573: not every member and record parameter needs its own doc comment -->
+    <NoWarn>$(NoWarn);CS1591;CS1573</NoWarn>
+
+    <!-- NuGet: the metadata only; packing and publishing are not set up yet (they come with 4.1's macOS builds) -->
+    <PackageId>Odalith.FFAudioSharp</PackageId>
+    <Authors>Odalith</Authors>
+    <Description>Play music from .NET with ffaudio: FFmpeg decoding, gapless and crossfaded playback, ReplayGain, filters, cue sheets, network streams, level meters. Bundles the native libraries for Windows and Linux (x64).</Description>
+    <PackageTags>audio music playback ffmpeg sdl2 gapless replaygain crossfade cue</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>FFaudio64.png</PackageIcon>
+    <PackageLicenseExpression>LGPL-2.1-or-later</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/Odalith/FFaudio</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Odalith/FFaudio</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageReleaseNotes>https://github.com/Odalith/FFaudio/blob/master/CHANGELOG.md</PackageReleaseNotes>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="FFAudioSharp.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../assets/FFaudio64.png" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <!--
+    The native libraries of a release (scripts/stage-native.sh puts them in <dir>/runtimes/<rid>/native/): packed as
+    runtimes/<rid>/native/, with the licenses of what is bundled in licenses/. Without the property (a build for
+    development) the package has no libraries: set FFAUDIO_LIBRARY to a libffaudio of your own.
+  -->
+  <ItemGroup Condition="'$(FFAudioNative)' != ''">
+    <None Include="$(FFAudioNative)/runtimes/**/*" Pack="true" PackagePath="runtimes/%(RecursiveDir)" Visible="false" />
+    <None Include="$(FFAudioNative)/licenses/**/*" Pack="true" PackagePath="licenses/%(RecursiveDir)" Visible="false" />
+  </ItemGroup>
+
+</Project>
