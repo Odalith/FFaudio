@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <!-- The package version is ffaudio's: the release workflow passes -p:Version=<CMakeLists.txt's version>. -->
+    <Version Condition="'$(Version)' == ''">0.0.0-dev</Version>
+    <LangVersion>12.0</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+</Project>

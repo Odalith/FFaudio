@@ -14,7 +14,7 @@ else()
     set(FFAUDIO_TOP_LEVEL OFF)
 endif()
 option(FFAUDIO_BUILD_TESTS "Build the headless test suite" ${FFAUDIO_TOP_LEVEL})
-option(FFAUDIO_BUILD_TOOLS "Build the manual player, loudness_scan and (on POSIX) the soak test" ${FFAUDIO_TOP_LEVEL})
+option(FFAUDIO_BUILD_TOOLS "Build the manual player, loudness_scan and (on Linux) the soak test" ${FFAUDIO_TOP_LEVEL})
 option(FFAUDIO_INSTALL "Generate install rules" ${FFAUDIO_TOP_LEVEL})
 option(FFAUDIO_CHAOS "Testing only: random delays at the points where threads hand state over (lib/chaos.h), to find races" OFF)
 option(FFAUDIO_RELOCATABLE "Linux/macOS: look for dependencies next to libffaudio first (RUNPATH $ORIGIN), for archives that bundle them" OFF)
@@ -175,9 +175,9 @@ if(FFAUDIO_INSTALL)
     # find_package(ffaudio) -> ffaudio::ffaudio
     include(CMakePackageConfigHelpers)
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfig.cmake
-         "include(\"\${CMAKE_CURRENT_LIST_DIR}/ffaudioTargets.cmake\")\n")
+            "include(\"\${CMAKE_CURRENT_LIST_DIR}/ffaudioTargets.cmake\")\n")
     write_basic_package_version_file(${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfigVersion.cmake
-                                     COMPATIBILITY SameMajorVersion)
+            COMPATIBILITY SameMajorVersion)
     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfig.cmake ${CMAKE_CURRENT_BINARY_DIR}/ffaudioConfigVersion.cmake
             DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/ffaudio)
 endif()
@@ -203,8 +203,8 @@ endfunction()
 if(FFAUDIO_BUILD_TOOLS)
     ffaudio_test_exe(manual_player tests/manual_player.c)
 endif()
-if(FFAUDIO_BUILD_TOOLS AND NOT WIN32)
-    # Long-running soak test with memory sampling (Linux /proc); not part of CTest
+if(FFAUDIO_BUILD_TOOLS AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Long-running soak test with memory sampling (Linux /proc and glibc's malloc); not part of CTest
     ffaudio_test_exe(soak tests/soak.c)
     target_link_libraries(soak PRIVATE Threads::Threads)
 endif()
@@ -217,6 +217,19 @@ if(FFAUDIO_BUILD_TESTS)
     find_program(FFMPEG_EXECUTABLE ffmpeg)
     find_program(BASH_EXECUTABLE bash)
 
+    # The playback tests' fixtures come from a pinned archive (fetch, the default): the output of
+    # tests/fixtures/make_fixtures.sh, published as a release asset and verified by hash, so no machine running
+    # the tests needs an FFmpeg with the libvorbis/libopus/libmp3lame encoders. -DFFAUDIO_FIXTURES_MODE=generate
+    # restores local generation with make_fixtures.sh (the nightly golden-render job uses it: the reference and
+    # current renders must both use the runner's FFmpeg).
+    set(FFAUDIO_FIXTURES_MODE "fetch" CACHE STRING "fetch: download the pinned fixture archive; generate: run make_fixtures.sh")
+    set(FFAUDIO_FIXTURES_VERSION "v1")
+    set(FFAUDIO_FIXTURES_SHA256 "a7384b75a57888072f2fe54e47dba22bc1c2c6c32377abd6dcf786385a63ec74")
+    set(FFAUDIO_FIXTURES_URL "https://github.com/Odalith/FFaudio/releases/download/fixtures-${FFAUDIO_FIXTURES_VERSION}/ffaudio-fixtures-${FFAUDIO_FIXTURES_VERSION}.tar.xz")
+    if(NOT FFAUDIO_FIXTURES_MODE STREQUAL "fetch" AND NOT FFAUDIO_FIXTURES_MODE STREQUAL "generate")
+        message(FATAL_ERROR "ffaudio: FFAUDIO_FIXTURES_MODE must be fetch or generate")
+    endif()
+
     ffaudio_test_exe(test_filters tests/test_filters.c)
     add_test(NAME test_filters COMMAND test_filters ${CMAKE_BINARY_DIR})
     ffaudio_test_exe(test_ring tests/test_ring.c)
@@ -224,30 +237,44 @@ if(FFAUDIO_BUILD_TESTS)
     # Renders a fixed playlist for before/after comparisons of the output; not a CTest (see the file)
     ffaudio_test_exe(golden_render tests/golden_render.c)
 
-    if(NOT FFMPEG_EXECUTABLE OR NOT BASH_EXECUTABLE)
+    if(NOT FFAUDIO_FIXTURES_MODE STREQUAL "fetch" AND (NOT FFMPEG_EXECUTABLE OR NOT BASH_EXECUTABLE))
         if(FFAUDIO_REQUIRE_TESTS)
             message(FATAL_ERROR "ffaudio: ffmpeg or bash not found, the playback tests can not be built")
         endif()
         message(WARNING "ffaudio: ffmpeg or bash not found, playback tests are disabled")
     else()
         set(FIXTURE_DIR ${CMAKE_BINARY_DIR}/fixtures)
+        if(FFAUDIO_FIXTURES_MODE STREQUAL "fetch")
+            set(FFAUDIO_FIXTURE_COMMAND ${CMAKE_COMMAND} -DFIXTURE_DIR=${FIXTURE_DIR}
+                    -DFIXTURES_URL=${FFAUDIO_FIXTURES_URL} -DFIXTURES_SHA256=${FFAUDIO_FIXTURES_SHA256}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/fetch_fixtures.cmake)
+            set(FFAUDIO_FIXTURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/fetch_fixtures.cmake)
+            set(FFAUDIO_FIXTURE_COMMENT "Fetching audio fixtures")
+        else()
+            set(FFAUDIO_FIXTURE_COMMAND ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/make_fixtures.sh ${FIXTURE_DIR})
+            set(FFAUDIO_FIXTURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/make_fixtures.sh)
+            set(FFAUDIO_FIXTURE_COMMENT "Generating audio fixtures")
+        endif()
         add_custom_command(
                 OUTPUT ${FIXTURE_DIR}/.stamp
-                COMMAND ${BASH_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/make_fixtures.sh ${FIXTURE_DIR}
-                DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/make_fixtures.sh
-                COMMENT "Generating audio fixtures")
+                COMMAND ${FFAUDIO_FIXTURE_COMMAND}
+                DEPENDS ${FFAUDIO_FIXTURE_DEPENDS}
+                COMMENT "${FFAUDIO_FIXTURE_COMMENT}")
         # Made by a test that every playback test requires (a CTest fixture), not by the build: an FFmpeg without an
         # encoder the fixtures need fails the tests, not the build. Building the target again is a no-op.
         add_custom_target(ffaudio_fixtures DEPENDS ${FIXTURE_DIR}/.stamp)
         add_test(NAME ffaudio_fixtures
-                 COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target ffaudio_fixtures --config $<CONFIG>)
+                COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target ffaudio_fixtures --config $<CONFIG>)
         set_tests_properties(ffaudio_fixtures PROPERTIES FIXTURES_SETUP fixtures TIMEOUT 600)
 
         # The ReplayGain cache's default location, inside the build tree: XDG_DATA_HOME on Linux, LOCALAPPDATA on
-        # Windows (the tests never touch the user's real one)
+        # Windows, HOME on macOS (the tests never touch the user's real one)
         set(FFAUDIO_TEST_DATA_ENV "XDG_DATA_HOME=${CMAKE_BINARY_DIR}/xdg-data")
         if(WIN32)
             string(APPEND FFAUDIO_TEST_DATA_ENV ";LOCALAPPDATA=${CMAKE_BINARY_DIR}/localappdata")
+        elseif(APPLE)
+            # ~/Library/Application Support/ffaudio
+            string(APPEND FFAUDIO_TEST_DATA_ENV ";HOME=${CMAKE_BINARY_DIR}/home")
         endif()
         foreach(t test_basic test_lifecycle test_stress test_output test_metadata test_loudness test_gain_cache test_gain_scan test_network test_playlist test_cue)
             ffaudio_test_exe(${t} tests/${t}.c)
@@ -270,23 +297,60 @@ if(FFAUDIO_BUILD_TESTS)
                     ENVIRONMENT "SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV};ASAN_OPTIONS=detect_leaks=1:abort_on_error=1;TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1:suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tests/tsan.supp")
         endforeach()
 
-        # The Python bindings (bindings/python) and the player (player/), with the library just built. Not with a
-        # sanitizer: an instrumented library can not be loaded into a Python that is not.
+        # The bindings (Python: bindings/python and the player in player/; C#: bindings/csharp), with the library just
+        # built. Not with a sanitizer: an instrumented library can not be loaded into a runtime that is not.
         find_package(Python3 COMPONENTS Interpreter)
-        if(Python3_FOUND AND (FFAUDIO_SANITIZER STREQUAL "" OR FFAUDIO_SANITIZER STREQUAL "none"))
-            # Prints every struct's layout as the C compiler sees it, for the bindings' layout test
+        find_program(FFAUDIO_DOTNET dotnet)
+        set(FFAUDIO_DOTNET_TFM "")
+        if(FFAUDIO_DOTNET)
+            # Needs an SDK (bindings/csharp/global.json: 8.0.100 or newer) and a runtime of a framework the tests target
+            execute_process(COMMAND ${FFAUDIO_DOTNET} --version WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/bindings/csharp
+                    RESULT_VARIABLE FFAUDIO_DOTNET_NO_SDK OUTPUT_QUIET ERROR_QUIET)
+            execute_process(COMMAND ${FFAUDIO_DOTNET} --list-runtimes OUTPUT_VARIABLE FFAUDIO_DOTNET_RUNTIMES ERROR_QUIET)
+            if(NOT FFAUDIO_DOTNET_NO_SDK EQUAL 0)
+                message(STATUS "ffaudio: no usable .NET SDK (8.0.100 or newer), the C# bindings' tests are left out")
+            elseif(FFAUDIO_DOTNET_RUNTIMES MATCHES "Microsoft.NETCore.App 8\\.")
+                set(FFAUDIO_DOTNET_TFM net8.0)
+            elseif(FFAUDIO_DOTNET_RUNTIMES MATCHES "Microsoft.NETCore.App 10\\.")
+                set(FFAUDIO_DOTNET_TFM net10.0)
+            else()
+                message(STATUS "ffaudio: no .NET 8 or 10 runtime, the C# bindings' tests are left out")
+            endif()
+        endif()
+        if((Python3_FOUND OR FFAUDIO_DOTNET_TFM) AND (FFAUDIO_SANITIZER STREQUAL "" OR FFAUDIO_SANITIZER STREQUAL "none"))
+            # Prints every struct's layout as the C compiler sees it, for the bindings' layout tests
             add_executable(ffaudio_layout bindings/python/tests/layout.c)
             target_include_directories(ffaudio_layout PRIVATE lib)
-            set(FFAUDIO_PYTHON_ENV "FFAUDIO_LIBRARY=$<TARGET_FILE:ffaudio>;FFAUDIO_FIXTURES=${FIXTURE_DIR};SDL_AUDIODRIVER=dummy;PYTHONDONTWRITEBYTECODE=1;${FFAUDIO_TEST_DATA_ENV}")
+            set(FFAUDIO_BINDINGS_ENV "FFAUDIO_LIBRARY=$<TARGET_FILE:ffaudio>;FFAUDIO_FIXTURES=${FIXTURE_DIR};SDL_AUDIODRIVER=dummy;${FFAUDIO_TEST_DATA_ENV}")
+            if(FFAUDIO_DOTNET_TFM)
+                # The tests build into the build tree (--artifacts-path); the first run restores xunit from nuget.org
+                add_test(NAME csharp_bindings
+                        COMMAND ${FFAUDIO_DOTNET} test ${CMAKE_CURRENT_SOURCE_DIR}/bindings/csharp/tests/FFAudioSharp.Tests/FFAudioSharp.Tests.csproj
+                        -c Release -f ${FFAUDIO_DOTNET_TFM} --artifacts-path ${CMAKE_BINARY_DIR}/csharp)
+                set_tests_properties(csharp_bindings PROPERTIES FIXTURES_REQUIRED fixtures TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
+                        ENVIRONMENT "${FFAUDIO_BINDINGS_ENV};FFAUDIO_LAYOUT=$<TARGET_FILE:ffaudio_layout>;FFAUDIO_SYMBOLS=${CMAKE_CURRENT_SOURCE_DIR}/abi/ffaudio.symbols;DOTNET_NOLOGO=1;DOTNET_CLI_TELEMETRY_OPTOUT=1")
+            endif()
+        endif()
+        if(Python3_FOUND AND (FFAUDIO_SANITIZER STREQUAL "" OR FFAUDIO_SANITIZER STREQUAL "none"))
+            set(FFAUDIO_PYTHON_ENV "${FFAUDIO_BINDINGS_ENV};PYTHONDONTWRITEBYTECODE=1")
+            if(APPLE)
+                # HOME is redirected for the tests (the ReplayGain cache above), and Python finds `pip install --user`
+                # packages (Textual) through HOME: give it the real user base
+                execute_process(COMMAND ${Python3_EXECUTABLE} -m site --user-base OUTPUT_VARIABLE FFAUDIO_PY_USER_BASE
+                        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+                if(FFAUDIO_PY_USER_BASE)
+                    string(APPEND FFAUDIO_PYTHON_ENV ";PYTHONUSERBASE=${FFAUDIO_PY_USER_BASE}")
+                endif()
+            endif()
             add_test(NAME python_bindings
-                     COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/tests)
+                    COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/bindings/python/tests)
             set_tests_properties(python_bindings PROPERTIES FIXTURES_REQUIRED fixtures TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
                     ENVIRONMENT "${FFAUDIO_PYTHON_ENV};FFAUDIO_LAYOUT=$<TARGET_FILE:ffaudio_layout>")
             execute_process(COMMAND ${Python3_EXECUTABLE} -c "import textual" RESULT_VARIABLE FFAUDIO_NO_TEXTUAL
-                            OUTPUT_QUIET ERROR_QUIET)
+                    OUTPUT_QUIET ERROR_QUIET)
             if(FFAUDIO_NO_TEXTUAL EQUAL 0)
                 add_test(NAME player
-                         COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/player/tests)
+                        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_CURRENT_SOURCE_DIR}/player/tests)
                 set_tests_properties(player PROPERTIES FIXTURES_REQUIRED fixtures TIMEOUT ${FFAUDIO_TEST_TIMEOUT}
                         ENVIRONMENT "${FFAUDIO_PYTHON_ENV}")
             else()

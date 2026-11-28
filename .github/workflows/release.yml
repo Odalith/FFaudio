@@ -1,6 +1,7 @@
 name: Release
 
-# Pushing a tag like v4.0.0 builds the release archives (ffaudio with an LGPL FFmpeg built by
+# Pushing a tag like v4.0.0 builds the release archives for Linux, Windows and macOS (Intel and Apple silicon:
+# ffaudio with an LGPL FFmpeg built by
 # scripts/build-deps.sh), tests them and attaches them to a draft GitHub release, together with the FFmpeg
 # and soxr sources. Pull requests that change the packaging, and manual runs (workflow_dispatch), build and test
 # the archives as workflow artifacts only.
@@ -13,7 +14,7 @@ on:
     paths: [ 'scripts/build-deps.sh', '.github/workflows/release.yml' ]
   pull_request:
     paths: [ '.github/workflows/release.yml', 'scripts/**', 'CMakeLists.txt', 'ffaudio.pc.in', 'tests/release_smoke.c',
-             'bindings/**', 'player/**' ]
+             'bindings/python/**', 'player/**' ]
   workflow_dispatch:
 
 permissions:
@@ -232,9 +233,100 @@ jobs:
             dist/*.sha256
             dist/ffmpeg-build-windows-x86_64.txt
 
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: check
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GitHub's last Intel image (supported into 2027); the archive runs on macOS 10.15 and newer
+          - arch: x86_64
+            runner: macos-15-intel
+            target: '10.15'
+          # Apple silicon: macOS 11 is the first that runs on it
+          - arch: arm64
+            runner: macos-15
+            target: '11.0'
+    env:
+      # The oldest macOS the libraries run on (FFmpeg, soxr, SDL2 and ffaudio all build for it)
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.target }}
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nothing from Homebrew goes into the archive: build-deps.sh does not look for GnuTLS or bs2b on macOS and
+      # builds SDL2 itself, CMAKE_PREFIX_PATH puts that SDL2 first, and package.sh checks every library's
+      # dependencies with otool. (ffmpeg and flac used to be installed here to make the test fixtures; the fixtures
+      # are a pinned archive download now, see FFAUDIO_FIXTURES_MODE in CMakeLists.txt.)
+      - name: Install build tools
+        run: brew install ninja nasm pkg-config
+
+      - name: Restore dependency builds
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: deps
+          key: deps-macos-${{ matrix.arch }}-${{ matrix.target }}-${{ hashFiles('scripts/build-deps.sh') }}
+
+      - name: Build FFmpeg, soxr and SDL2
+        if: steps.deps.outputs.cache-hit != 'true'
+        env:
+          CMAKE_GENERATOR: Ninja
+        run: |
+          scripts/build-deps.sh deps/prefix deps/work
+          find deps/work -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +   # keep only the source tarballs
+
+      - name: Save dependency builds
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: deps
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+
+      - name: Build ffaudio
+        run: |
+          export PKG_CONFIG_PATH="$PWD/deps/prefix/lib/pkgconfig"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DFFAUDIO_SANITIZER=none \
+            -DFFAUDIO_RELOCATABLE=ON -DFFAUDIO_BUILD_TOOLS=OFF -DCMAKE_INSTALL_PREFIX="$PWD/stage" \
+            -DCMAKE_PREFIX_PATH="$PWD/deps/prefix"
+          cmake --build build
+
+      - name: Test with the bundled FFmpeg
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Package
+        run: |
+          cmake --install build
+          scripts/package.sh "ffaudio-${{ needs.check.outputs.version }}-macos-${{ matrix.arch }}" deps/prefix stage dist
+          cp deps/prefix/share/licenses/ffmpeg/BUILD.txt "dist/ffmpeg-build-macos-${{ matrix.arch }}.txt"
+
+      # Built against the unpacked archive only, run without any library path: catches anything not bundled
+      - name: Smoke test the archive
+        run: |
+          mkdir -p smoke
+          tar -xzf dist/ffaudio-*-macos-*.tar.gz -C smoke
+          a="$(echo "$PWD"/smoke/ffaudio-*)"
+          cc -std=c11 -Wall tests/release_smoke.c -o smoke/run \
+            $(PKG_CONFIG_PATH="$a/lib/pkgconfig" pkg-config --cflags --libs ffaudio) -lm -Wl,-rpath,"$a/lib"
+          env -u DYLD_LIBRARY_PATH SDL_AUDIODRIVER=dummy smoke/run build/fixtures/s44_stereo.flac
+          otool -L smoke/run
+          env -u DYLD_LIBRARY_PATH SDL_AUDIODRIVER=dummy python3 -c "import sys; sys.path.insert(0, '$a/python'); \
+            import ffaudio; print('python bindings', ffaudio.version(), ffaudio.probe('build/fixtures/s44_stereo.flac').codec)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/ffmpeg-build-macos-*.txt
+
   release:
     name: Draft release
-    needs: [ check, linux, windows ]
+    needs: [ check, linux, windows, macos ]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
@@ -256,6 +348,11 @@ jobs:
             echo "### Downloads"
             echo "The archives contain ffaudio with an LGPL build of FFmpeg $(sed -n 's/^FFMPEG_VERSION=//p' scripts/build-deps.sh) and soxr made by"
             echo "\`scripts/build-deps.sh\`; their source tarballs are attached. Each archive's README.txt lists what is inside."
+            echo
+            echo "macOS: \`macos-x86_64\` (Intel, macOS 10.15 or newer) and \`macos-arm64\` (Apple silicon, macOS 11 or newer)"
+            echo "bundle SDL2 as well. The arm64 archive is built and tested on GitHub's Apple silicon runners but has not"
+            echo "been tried on a real Mac yet. The libraries are not notarized: after a download, remove the quarantine"
+            echo "flag with \`xattr -dr com.apple.quarantine <folder>\` if macOS refuses to load them."
           } >> notes.md
 
       - name: Create the draft

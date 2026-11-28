@@ -110,6 +110,12 @@ jobs:
           python3 -m venv ~/pyenv
           ~/pyenv/bin/pip install -q -r player/requirements.txt
 
+      # The C# bindings' tests (bindings/csharp, CTest's csharp_bindings): not with a sanitizer, like the Python ones
+      - uses: actions/setup-dotnet@v4
+        if: matrix.sanitizer == 'none'
+        with:
+          dotnet-version: 8.0.x
+
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja
@@ -122,6 +128,13 @@ jobs:
 
       - name: Build
         run: cmake --build build
+
+      # A test that CMake leaves out because a tool is missing would pass by not running
+      - name: The bindings' tests are there
+        if: matrix.sanitizer == 'none'
+        run: |
+          ctest --test-dir build -N | grep -q csharp_bindings || { echo "::error::csharp_bindings is not registered (no .NET SDK found)"; exit 1; }
+          ctest --test-dir build -N | grep -q python_bindings || { echo "::error::python_bindings is not registered"; exit 1; }
 
       - name: Test
         env:
@@ -144,6 +157,48 @@ jobs:
           export PKG_CONFIG_PATH=$PWD/stage/lib/pkgconfig
           cc -std=c99 -pedantic -Wall -Werror tests/consumer/consumer.c -o consumer_pc $(pkg-config --cflags --libs ffaudio)
           LD_LIBRARY_PATH=$PWD/stage/lib ./consumer_pc
+
+  macos:
+    name: macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: macos-15-intel   # GitHub's last Intel image (into 2027)
+          - arch: arm64
+            runner: macos-15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+    steps:
+      - uses: actions/checkout@v4
+
+      # Homebrew's FFmpeg and SDL2, as the Linux legs use Ubuntu's; ffmpeg and flac also make the test fixtures
+      - name: Install dependencies
+        run: brew install ninja pkg-config sdl2 ffmpeg flac
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=none
+          -DFFAUDIO_REQUIRE_TESTS=ON
+
+      - name: Build
+        run: cmake --build build
+
+      - name: The bindings' tests are there
+        run: |
+          ctest --test-dir build -N | grep -q csharp_bindings || { echo "::error::csharp_bindings is not registered (no .NET SDK found)"; exit 1; }
+          ctest --test-dir build -N | grep -q python_bindings || { echo "::error::python_bindings is not registered"; exit 1; }
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
 
   windows:
     name: Windows (MSYS2 UCRT64, ${{ matrix.name }})
@@ -179,14 +234,24 @@ jobs:
             mingw-w64-ucrt-x86_64-ffmpeg
             mingw-w64-ucrt-x86_64-flac
 
+      # .NET for the C# bindings' tests. The MSYS2 shell does not see the system's PATH, so CMake is told where dotnet is.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
       # The test fixtures are generated with MSYS2's ffmpeg.exe (and metaflac.exe) (bash comes with MSYS2)
       - name: Configure
         run: >
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=none
           -DFFAUDIO_CHAOS=${{ matrix.chaos }} -DFFAUDIO_REQUIRE_TESTS=ON
+          "-DFFAUDIO_DOTNET=C:/Program Files/dotnet/dotnet.exe"
 
       - name: Build
         run: cmake --build build
+
+      - name: The bindings' tests are there
+        run: |
+          ctest --test-dir build -N | grep -q csharp_bindings || { echo "::error::csharp_bindings is not registered (no .NET SDK found)"; exit 1; }
 
       - name: Test
         env:
