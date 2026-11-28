@@ -257,11 +257,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ffmpeg and flac only make the test fixtures. Nothing from Homebrew goes into the archive: build-deps.sh does
-      # not look for GnuTLS or bs2b on macOS and builds SDL2 itself, CMAKE_PREFIX_PATH puts that SDL2 first, and
-      # package.sh checks every library's dependencies with otool
+      # Nothing from Homebrew goes into the archive: build-deps.sh does not look for GnuTLS or bs2b on macOS and
+      # builds SDL2 itself, CMAKE_PREFIX_PATH puts that SDL2 first, and package.sh checks every library's
+      # dependencies with otool. (ffmpeg and flac used to be installed here to make the test fixtures; the fixtures
+      # are a pinned archive download now, see FFAUDIO_FIXTURES_MODE in CMakeLists.txt.)
       - name: Install build tools
-        run: brew install ninja nasm pkg-config ffmpeg flac
+        run: brew install ninja nasm pkg-config
 
       - name: Restore dependency builds
         id: deps

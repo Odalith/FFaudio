@@ -64,7 +64,10 @@ jobs:
             libavcodec-dev libavformat-dev libavfilter-dev libavutil-dev libswresample-dev
       - name: Build
         run: |
-          cmake -S . -B build-dev/release -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=none
+          # generate, not the pinned fixture archive: the reference render comes from the last tag's tree built
+          # with this runner's FFmpeg, and both renders must use the same FFmpeg (tests/golden_render.c)
+          cmake -S . -B build-dev/release -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DFFAUDIO_SANITIZER=none \
+            -DFFAUDIO_FIXTURES_MODE=generate
           cmake --build build-dev/release
       - name: Compare
         run: scripts/dev/golden.sh "$(git describe --tags --abbrev=0 --match 'v*')"
