@@ -259,9 +259,17 @@ jobs:
 
       # ffmpeg and flac only make the test fixtures. Nothing from Homebrew goes into the archive: build-deps.sh does
       # not look for GnuTLS or bs2b on macOS and builds SDL2 itself, CMAKE_PREFIX_PATH puts that SDL2 first, and
-      # package.sh checks every library's dependencies with otool
+      # package.sh checks every library's dependencies with otool.
+      # STOPGAP: homebrew-core's ffmpeg no longer ships the libvorbis encoder the fixtures encode with, so ffmpeg
+      # comes from the homebrew-ffmpeg tap instead (full-codec build, compiled from source, hence the timeout).
+      # The long-term fix is a fixture ffmpeg built by this repo; the tap lines go away when that lands.
       - name: Install build tools
-        run: brew install ninja nasm pkg-config ffmpeg flac
+        timeout-minutes: 30
+        run: |
+          brew trust homebrew-ffmpeg/ffmpeg
+          brew tap homebrew-ffmpeg/ffmpeg
+          brew install ninja nasm pkg-config flac
+          brew install homebrew-ffmpeg/ffmpeg/ffmpeg
 
       - name: Restore dependency builds
         id: deps
