@@ -71,11 +71,22 @@ void free_filter_chain(FilterChain *c) {
 }
 
 bool filtergraph_soxr_available(void) {
-    // aresample only accepts resampler=soxr when libswresample was built with libsoxr
-    SwrContext *swr = swr_alloc();
-    if (!swr) return false;
-    const bool ok = av_opt_set(swr, "resampler", "soxr", 0) >= 0;
+    // aresample only accepts resampler=soxr when libswresample was built with libsoxr.
+    // av_opt_set alone cannot prove that: the "soxr" constant is in the option table either
+    // way, and the missing engine only surfaces when it is instantiated at swr_init().
+    // Probe with real in/out parameters and require a successful init.
+    AVChannelLayout in_layout, out_layout;
+    av_channel_layout_default(&in_layout, 2);
+    av_channel_layout_default(&out_layout, 2);
+    SwrContext *swr = NULL;
+    const int ret = swr_alloc_set_opts2(&swr, &out_layout, AV_SAMPLE_FMT_FLT, 48000,
+                                        &in_layout, AV_SAMPLE_FMT_FLT, 48000, 0, NULL);
+    bool ok = false;
+    if (ret >= 0 && swr)
+        ok = av_opt_set(swr, "resampler", "soxr", 0) >= 0 && swr_init(swr) >= 0;
     swr_free(&swr);
+    av_channel_layout_uninit(&in_layout);
+    av_channel_layout_uninit(&out_layout);
     return ok;
 }
 
