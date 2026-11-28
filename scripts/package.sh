@@ -10,6 +10,9 @@
 #        SDL2 and the C library stay system dependencies. The result is checked with ldd.
 #        Third-party licenses come from the Debian/Ubuntu package that owns each bundled library.
 # Windows (MSYS2): DLLs go to bin/, including SDL2 and the MinGW runtime; licenses from the owning MSYS2 package.
+# macOS: libraries go to lib/, SDL2 included (build-deps.sh builds it), all found through @rpath and @loader_path.
+#        Nothing is rewritten (that would break the code signatures arm64 needs); the result is checked with otool:
+#        every dependency is in the archive or part of macOS.
 set -euo pipefail
 
 name="${1:?usage: package.sh <archive-name> <deps-prefix> <ffaudio-install-dir> <out-dir>}"
@@ -26,6 +29,7 @@ mkdir -p "$root"
 case "$(uname -s)" in
     MINGW*|MSYS*) os=windows ;;
     Linux)        os=linux ;;
+    Darwin)       os=macos ;;
     *)            echo "error: unsupported platform $(uname -s)" >&2; exit 1 ;;
 esac
 
@@ -37,7 +41,7 @@ rm -rf "$root/lib/cmake/soxr" "$root/share/ffmpeg" "$root/share/doc" 2>/dev/null
 
 # pkg-config files that work wherever the archive is unpacked
 for pc in "$root"/lib/pkgconfig/*.pc; do
-    sed -i 's|^prefix=.*|prefix=${pcfiledir}/../..|' "$pc"
+    sed -i.orig 's|^prefix=.*|prefix=${pcfiledir}/../..|' "$pc" && rm -f "$pc.orig"   # (BSD sed needs a suffix)
 done
 
 # The Python bindings and the player (source; the player needs Textual: pip install -r player/requirements.txt)
@@ -112,6 +116,29 @@ if [ "$os" = linux ]; then
             fi
         done
     done
+elif [ "$os" = macos ]; then
+    # Every Mach-O library in lib/: its own name is @rpath/<file>, it looks next to itself (@loader_path), and each
+    # library it loads is either in lib/ (as @rpath/<file>) or part of macOS
+    system_dylib() { case "$1" in /usr/lib/*|/System/Library/*) return 0 ;; esac; return 1; }
+    for lib in "$root"/lib/*.dylib; do
+        [ -L "$lib" ] && continue
+        id=$(otool -D "$lib" | sed -n 2p)
+        case "$id" in @rpath/*) ;; *) echo "error: $lib is named '$id', not @rpath/..." >&2; exit 1 ;; esac
+        deps_of=$(otool -L "$lib" | tail -n +2 | awk '{ print $1 }' | grep -vxF "$id" || true)
+        if grep -q '^@rpath/' <<< "$deps_of"; then
+            otool -l "$lib" | grep -A2 LC_RPATH | grep -q 'path @loader_path ' \
+                || { echo "error: $lib loads @rpath libraries but has no @loader_path rpath" >&2; exit 1; }
+        fi
+        for dep in $deps_of; do
+            case "$dep" in
+                @rpath/*) [ -e "$root/lib/${dep#@rpath/}" ] || { echo "error: $lib needs $dep, which is not in lib/" >&2; exit 1; } ;;
+                *) system_dylib "$dep" || { echo "error: $lib needs $dep, which is neither bundled nor part of macOS" >&2; exit 1; } ;;
+            esac
+        done
+    done
+    if [ -e "$root/share/licenses/sdl2/LICENSE.txt" ]; then
+        bundled+=("$(head -1 "$root/share/licenses/sdl2/BUILD.txt" | cut -d' ' -f1-2) (zlib license)")
+    fi
 else
     msys="${MINGW_PREFIX:-/ucrt64}"
     msys_bin="$msys/bin"
@@ -184,6 +211,18 @@ fi
         echo "Needs SDL2 (2.24 or newer) from the system, e.g. libsdl2-2.0-0 on Debian/Ubuntu, sdl2 on Arch/Fedora."
         echo "https streams need GnuTLS from the system (libgnutls30 on Debian/Ubuntu, gnutls elsewhere)."
         echo "Built on Ubuntu 24.04: needs glibc 2.39 or newer."
+    elif [ "$os" = macos ]; then
+        echo "  lib/                libffaudio.dylib and every library it needs (FFmpeg, soxr, SDL2), found through"
+        echo "                      @rpath: link with -Wl,-rpath,<here>/lib, or put them next to your executable"
+        echo "  lib/pkgconfig       pkg-config files: PKG_CONFIG_PATH=<here>/lib/pkgconfig pkg-config --cflags --libs ffaudio"
+        echo "  lib/cmake/ffaudio   find_package(ffaudio) with CMAKE_PREFIX_PATH=<here>, target ffaudio::ffaudio"
+        echo
+        echo "Needs macOS ${MACOSX_DEPLOYMENT_TARGET:-$(sw_vers -productVersion)} or newer. https uses the system's TLS (SecureTransport)."
+        echo "The libraries are not notarized: if macOS refuses to load them after a download, remove the quarantine"
+        echo "flag: xattr -dr com.apple.quarantine <this folder>"
+        if [ "$(uname -m)" = arm64 ]; then
+            echo "Apple silicon (arm64): built and tested on GitHub's macOS runners, not yet on a real Mac."
+        fi
     else
         echo "  bin/                libffaudio.dll and every DLL it needs (FFmpeg, soxr, SDL2, MinGW runtime)."
         echo "                      SDL2.dll is sdl2-compat, which runs on SDL3.dll: ship both"
@@ -195,7 +234,7 @@ fi
     echo "Bundled third-party libraries"
     echo "  FFmpeg - LGPL 2.1 or later; how it was configured: share/licenses/ffmpeg/BUILD.txt"
     echo "  soxr   - LGPL 2.1 or later; share/licenses/soxr"
-    for b in "${bundled[@]}"; do echo "  $b - see share/licenses"; done
+    for b in ${bundled[@]+"${bundled[@]}"}; do echo "  $b - see share/licenses"; done   # (bash 3.2: empty arrays and set -u)
     echo
     echo "Source code"
     echo "  The FFmpeg and soxr source tarballs these libraries were built from are attached to the same release"
@@ -207,10 +246,13 @@ cd "$out"
 if [ "$os" = linux ]; then
     archive="$name.tar.xz"
     tar -cJf "$archive" "$name"
+elif [ "$os" = macos ]; then
+    archive="$name.tar.gz"   # Archive Utility opens it with a double click; tar keeps the library symlinks
+    tar -czf "$archive" "$name"
 else
     archive="$name.zip"
     rm -f "$archive"
     zip -qr9 "$archive" "$name"
 fi
-sha256sum "$archive" > "$archive.sha256"
+if command -v sha256sum > /dev/null; then sha256sum "$archive" > "$archive.sha256"; else shasum -a 256 "$archive" > "$archive.sha256"; fi
 echo "wrote $out/$archive"

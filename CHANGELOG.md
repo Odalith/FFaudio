@@ -3,6 +3,11 @@
 ## 4.1.0 (unreleased)
 
 ### Added
+- macOS: release archives for Intel (`macos-x86_64`, macOS 10.15 or newer) and Apple silicon (`macos-arm64`, macOS 11
+  or newer) with FFmpeg, soxr and SDL2 bundled and found through `@rpath`, https through the system's TLS
+  (SecureTransport), and CI legs for both. Tested on a real Intel Mac (macOS 10.15, every test, and listening with
+  `manual_player`); the arm64 build is tested on GitHub's Apple silicon runners only, not yet on a real Mac. The
+  libraries are not notarized (see the readme for the quarantine flag).
 - .NET bindings (`bindings/csharp`, `net8.0` and newer, AOT and trimming safe): every public header as a friendly C# API
   (`FFAudio`, `PlayOptions`, event records, `FilterBuilder`, `Loudness`, `GainCache`, `GainScan`, `CueSheet`,
   `PlaylistFile`, `Spectrum`), with examples. They replace the separate FFAudioSharp project, which only knew
@@ -11,6 +16,10 @@
   A NuGet package that bundles the native libraries is not set up yet.
 
 ### Development
+- macOS: `scripts/build-deps.sh` builds for it (SDL2 2.32 too, `MACOSX_DEPLOYMENT_TARGET` honoured) and
+  `scripts/package.sh` packs it, checking with `otool` that every library is bundled or part of macOS. The test
+  suite runs there: the Linux-only `soak` tool is left out, the fixture script avoids GNU-only `dd` options, the
+  test HTTP server sets `SO_NOSIGPIPE`, and the tests' ReplayGain cache location is redirected through `HOME`.
 - `csharp_bindings` (CTest, and CI on Linux and Windows): the .NET tests compare every struct's layout with the C
   compiler's (the program the Python layout test uses), check every function in `abi/ffaudio.symbols` is declared, and
   play real files with SDL's dummy driver. CI fails when the test is not registered because no .NET SDK was found.

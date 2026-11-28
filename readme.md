@@ -46,15 +46,21 @@ The goal: a full-featured, high-quality player engine that covers ~98% of music 
   files can be spread over every speaker of a surround output
 - Safe to drive from any thread, including from its own event callback: no function waits for the player's threads
   (except `au_shutdown()`, which stops them)
-- Linux tested; Windows builds with MSYS2 (see CI); macOS, Android and iOS untested
+- Linux and Windows (MSYS2) tested; macOS tested on Intel (a real Mac) and on Apple silicon in CI only; Android and
+  iOS untested
 - LGPL-2.1
 
 ## Downloads
-[Releases](https://github.com/Odalith/ffAudio/releases) have ready-built archives for Linux x86_64 and Windows
-x86_64 (MinGW/UCRT). Each contains ffaudio, an LGPL build of FFmpeg trimmed for audio playback (every audio decoder,
-demuxer and audio filter, and http/https for streams; no encoders or video), soxr and bs2b, with headers, pkg-config and CMake
-files (`find_package(ffaudio)`). The Windows archive also has SDL2; on Linux SDL2 comes from the system. The FFmpeg
-and soxr sources are attached to each release, and `scripts/build-deps.sh` rebuilds them.
+[Releases](https://github.com/Odalith/ffAudio/releases) have ready-built archives for Linux x86_64, Windows
+x86_64 (MinGW/UCRT) and macOS (x86_64 for macOS 10.15+, arm64 for macOS 11+). Each contains ffaudio, an LGPL build of
+FFmpeg trimmed for audio playback (every audio decoder, demuxer and audio filter, and http/https for streams; no
+encoders or video) and soxr (and bs2b on Linux and Windows), with headers, pkg-config and CMake files
+(`find_package(ffaudio)`). The Windows and macOS archives also have SDL2; on Linux SDL2 comes from the system. The
+FFmpeg and soxr sources are attached to each release, and `scripts/build-deps.sh` rebuilds them.
+
+macOS: the arm64 archive is built and tested on GitHub's Apple silicon runners, not yet on a real Mac. The libraries
+are not notarized, so after a download macOS may refuse to load them until the quarantine flag is removed:
+`xattr -dr com.apple.quarantine ffaudio-<version>-macos-<arch>`.
 
 ## Building
 Requires CMake ≥ 3.20, GCC or Clang (MinGW on Windows), SDL2 ≥ 2.24 and FFmpeg ≥ 6.0 (libavcodec, libavformat,
@@ -274,7 +280,7 @@ Local paths may only open local files and URLs only network protocols, so a play
 local files. A server that stops answering ends the track with an error after the timeout; stopping or skipping
 a track that is still connecting interrupts it. Network files are not measured for ReplayGain unless
 `AuGainScanSettings.measure_streams` is set (it downloads the whole file). The release archives use the system's
-GnuTLS for https on Linux and Windows' own TLS.
+GnuTLS for https on Linux, and the system's own TLS on Windows (Schannel) and macOS (SecureTransport).
 
 ### Playlist files
 ```c
@@ -729,7 +735,7 @@ without anything depending on timing, so a render from before a change can be co
 
 All suites are run under AddressSanitizer and ThreadSanitizer (`-DFFAUDIO_SANITIZER=thread`, with
 `tests/tsan.supp` for FFmpeg's uninstrumented internals). `manual_player` plays a folder, a cue sheet (or an audio
-file with one inside, or with chapters) or a URL on real hardware for listening tests (Linux and Windows); started
+file with one inside, or with chapters) or a URL on real hardware for listening tests (Linux, Windows and macOS); started
 without arguments it prints its options. `scripts/make_cue_album.sh <album-dir> <out-dir> [rate]` makes a test album for that from an
 album's tracks: one FLAC image (tracks at another sample rate are resampled) and its `album.cue`; the album's files are
 only read.
@@ -748,8 +754,9 @@ only read.
 - [x] Verified multichannel (5.1/7.1) playback, configurable downmixing and upmixing
 - [x] Device added/removed notifications for the application
 - [ ] SDL3 port, or native audio backends instead of SDL
-- [x] Release binaries for Linux and Windows
-- [ ] Test macOS, Android and iOS
+- [x] Release binaries for Linux, Windows and macOS (Intel and Apple silicon)
+- [x] Test macOS (Intel on real hardware; Apple silicon in CI only so far)
+- [ ] Test Android and iOS
 - [x] C# bindings for this API (`bindings/csharp`, replacing the separate FFAudioSharp project)
 - [ ] A NuGet package that bundles the native libraries
 

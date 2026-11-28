@@ -8,15 +8,20 @@
 #   - every demuxer, parser and bitstream filter (files often carry video or cover art next to the audio)
 #   - every audio filter, with soxr and (when its development files are installed) bs2b
 #   - the file and pipe protocols, and for streams http, https, tcp, tls, crypto (AES-encrypted HLS) and httpproxy.
-#     TLS comes from the system: GnuTLS on Linux (not bundled; FFmpeg stays LGPL 2.1+), schannel on Windows
+#     TLS comes from the system: GnuTLS on Linux (not bundled; FFmpeg stays LGPL 2.1+), schannel on Windows,
+#     SecureTransport on macOS
 # Not built: encoders, muxers, video decoders and filters, devices, swscale, hardware acceleration, other network
 # protocols (rtmp, rtsp, udp, ...) and the ffmpeg/ffprobe programs.
 #
 # Usage: scripts/build-deps.sh <install-prefix> [work-dir]
 # The source tarballs are kept in the work dir (default ./deps-build); releases attach them.
 # Environment: JOBS (default: all cores), EXTRA_CONFIGURE (more FFmpeg configure options)
+# macOS also gets SDL2 (2.x, zlib license), which it does not have as a system library. Libraries there find each
+# other through @rpath (install names) and @loader_path; MACOSX_DEPLOYMENT_TARGET sets the oldest macOS they run on.
+#
 # Needs: curl, tar, a C compiler, make, cmake, pkg-config, nasm (x86); libbs2b and (Linux) GnuTLS development files
-# are optional: without GnuTLS there is no https.
+# are optional: without GnuTLS there is no https on Linux. On macOS neither is used (a library from Homebrew would
+# make the build depend on Homebrew).
 set -euo pipefail
 
 FFMPEG_VERSION=9.0.2
@@ -27,6 +32,9 @@ SOXR_SHA256=b111c15fdc8c029989330ff559184198c161100a59312f5dc19ddeb9b5a15889
 # systems do not always install it (MSYS2's static libbs2b has none)
 BS2B_VERSION=3.1.0
 BS2B_SHA256=6aaafd81aae3898ee40148dd1349aab348db9bfae9767d0e66e0b07ddd4b2528
+# macOS only
+SDL2_VERSION=2.32.10
+SDL2_SHA256=5f5993c530f084535c65a6879e9b26ad441169b3e25d789d83287040a9ca5165
 
 prefix="${1:?usage: build-deps.sh <install-prefix> [work-dir]}"
 work="${2:-$PWD/deps-build}"
@@ -38,9 +46,11 @@ cd "$work"
 
 # Linux: every library finds the others next to itself (RUNPATH $ORIGIN), so a release archive works wherever it
 # is unpacked
+# macOS: the same with @rpath install names and an @loader_path rpath
+linux=0 macos=0
 case "$(uname -s)" in
-    Linux) linux=1 ;;
-    *)     linux=0 ;;
+    Linux)  linux=1 ;;
+    Darwin) macos=1 ;;
 esac
 
 sha256() {
@@ -80,13 +90,44 @@ cmake -S "soxr-$SOXR_VERSION-Source" -B soxr-build -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF \
     -DWITH_OPENMP=OFF -DWITH_LSR_BINDINGS=OFF -DWITH_AVFFT=OFF -DWITH_DEV_TRACE=OFF \
     $( [ $linux = 1 ] && echo "-DCMAKE_INSTALL_RPATH=\$ORIGIN" ) \
+    $( [ $macos = 1 ] && echo "-DCMAKE_INSTALL_NAME_DIR=@rpath -DCMAKE_INSTALL_RPATH=@loader_path" ) \
     ${CMAKE_GENERATOR:+-G "$CMAKE_GENERATOR"}
 cmake --build soxr-build --parallel "$jobs"
 cmake --install soxr-build
+if [ $macos = 1 ]; then
+    # soxr's CMakeLists names its library by the absolute install path (INSTALL_NAME_DIR ${LIB_INSTALL_DIR}), which
+    # CMAKE_INSTALL_NAME_DIR does not override: rename it before FFmpeg links to it, and sign it again (ad hoc), as
+    # changing a library breaks its signature, which arm64 requires
+    for f in "$prefix"/lib/libsoxr*.dylib; do
+        [ -L "$f" ] && continue
+        install_name_tool -id "@rpath/$(basename "$(otool -D "$f" | sed -n 2p)")" "$f"
+        codesign -f -s - "$f"
+    done
+fi
 mkdir -p "$prefix/share/licenses/soxr"
 cp "soxr-$SOXR_VERSION-Source/LICENCE" "soxr-$SOXR_VERSION-Source/COPYING.LGPL" "$prefix/share/licenses/soxr/"
 echo "soxr $SOXR_VERSION ($soxr_tarball, sha256 $SOXR_SHA256), built without OpenMP" > "$prefix/share/licenses/soxr/BUILD.txt"
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
+#+-----------------------------------------------------+
+#| SDL2 (macOS)                                        |
+#+-----------------------------------------------------+
+
+if [ $macos = 1 ]; then
+    sdl_tarball="SDL2-$SDL2_VERSION.tar.gz"
+    fetch "$sdl_tarball" "$SDL2_SHA256" "https://github.com/libsdl-org/SDL/releases/download/release-$SDL2_VERSION/$sdl_tarball"
+    rm -rf "SDL2-$SDL2_VERSION" sdl2-build
+    tar xf "$sdl_tarball"
+    cmake -S "SDL2-$SDL2_VERSION" -B sdl2-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$prefix" \
+        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF -DCMAKE_INSTALL_NAME_DIR=@rpath \
+        ${CMAKE_GENERATOR:+-G "$CMAKE_GENERATOR"}
+    cmake --build sdl2-build --parallel "$jobs"
+    cmake --install sdl2-build
+    rm -f "$prefix/bin/sdl2-config"   # a script with this machine's paths in it
+    mkdir -p "$prefix/share/licenses/sdl2"
+    cp "SDL2-$SDL2_VERSION/LICENSE.txt" "$prefix/share/licenses/sdl2/"
+    echo "SDL2 $SDL2_VERSION ($sdl_tarball, sha256 $SDL2_SHA256)" > "$prefix/share/licenses/sdl2/BUILD.txt"
+fi
 
 #+-----------------------------------------------------+
 #| FFmpeg                                              |
@@ -117,7 +158,7 @@ done
 
 # configure looks for soxr with the compiler (not pkg-config), hence the -I/-L for the prefix below
 optional=(--enable-libsoxr)
-if pkg-config --exists libbs2b; then
+if [ $macos = 0 ] && pkg-config --exists libbs2b; then
     optional+=(--enable-libbs2b)
     (
         cd "$work"
@@ -134,13 +175,17 @@ else
     echo "note: libbs2b not found, building without it"
 fi
 case "$(uname -s)" in
-    MINGW*|MSYS*) ;;
+    MINGW*|MSYS*|Darwin) ;;   # schannel / SecureTransport, below
     *) if pkg-config --exists gnutls; then optional+=(--enable-gnutls)
        else echo "note: GnuTLS not found, building without https"; fi ;;
 esac
 
 case "$(uname -s)" in
     MINGW*|MSYS*) platform=(--enable-w32threads --enable-schannel) ;;
+    # SecureTransport: Apple's TLS, part of the system (Security.framework). @rpath install names, and every library
+    # looks next to itself
+    Darwin)       platform=(--enable-pthreads --enable-securetransport --install-name-dir=@rpath
+                            --extra-ldflags=-Wl,-rpath,@loader_path) ;;
     # $ORIGIN passes four interpreters: configure's eval (\\\$\$\$\$ -> \$$$$), make twice (library.mak expands
     # its link rule with $(eval), $$$$ -> $$ -> $) and the shell running the link command (\$ -> $)
     *)            platform=(--enable-pthreads '--extra-ldflags=-Wl,-rpath,\\\$\$\$\$ORIGIN') ;;
